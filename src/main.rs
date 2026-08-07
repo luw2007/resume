@@ -6,7 +6,7 @@ use resume::cli::{Cli, Command, ConfigCommand, Shell};
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
+    match &cli.command {
         Some(Command::Config(config)) => match config.command {
             ConfigCommand::Example => print!("{}", resume::cli::config_example()),
         },
@@ -19,11 +19,6 @@ fn main() {
                 Shell::Fish => generate(shells::Fish, &mut command, name, &mut io::stdout()),
             }
         }
-        None => {
-            if let Err(error) = resume::config::load(cli.config) {
-                eprintln!("resume: {error}");
-                std::process::exit(2);
-            }
-        }
+        None => std::process::exit(resume::app::run(cli)),
     }
 }
