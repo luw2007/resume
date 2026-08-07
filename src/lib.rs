@@ -1,4 +1,14 @@
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
+pub mod injection;
+pub mod jsonl;
+pub mod message;
+pub mod picker;
+pub mod preview;
+pub mod runtime;
 pub mod scope;
 pub mod session;
+pub mod snapshot;
+pub mod summary;
+pub mod text;
