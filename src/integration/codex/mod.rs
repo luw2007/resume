@@ -195,6 +195,107 @@ where
     out
 }
 
+/// Discover Codex Sessions with optional `state_5.sqlite` enrichment (Step 8).
+///
+/// This is the enriched variant of [`discover_with_filter`]. It performs the
+/// **exact same** JSONL-based discovery — the same rollout files are parsed,
+/// the same identity/Workspace rules apply — and *then* optionally consults
+/// `state_5.sqlite` to enrich titles, activity times, and archived hints for
+/// sessions that have no JSONL-derived title.
+///
+/// **Strictly additive and optional.** The `sqlite::SqliteOutcome` reports
+/// whether enrichment happened; when it is `Absent` or `Degraded`, the
+/// returned [`DiscoveredSession`] list is byte-for-byte identical to what
+/// [`discover_with_filter`] would have produced. Deleting the DB never changes
+/// which sessions are discoverable or resumable.
+///
+/// The JSONL rollout remains authoritative: identity and Workspace come only
+/// from `session_meta`, and the DB may only fill in missing presentation
+/// fields. Disagreement produces a diagnostic in the outcome rather than
+/// replacing identity.
+pub fn discover_with_filter_enriched<F>(
+    effective_root: &Path,
+    bounds: &Bounds,
+    filter: F,
+) -> (Vec<DiscoveredSession>, sqlite::SqliteOutcome)
+where
+    F: Fn(&ParsedSession) -> bool,
+{
+    let canonical_root = effective_root
+        .canonicalize()
+        .unwrap_or_else(|_| effective_root.to_path_buf());
+
+    // Parse every rollout first, in the exact same order as the JSONL-only
+    // path (list_rollout_files is already sorted). We hold the parsed sessions
+    // (filtered) so enrichment can attach DB hints before build_session turns
+    // them into the immutable Session type. Errors are emitted in file order,
+    // interleaved with sessions, exactly like discover_with_filter.
+    enum Pending {
+        Parsed {
+            rollout_path: PathBuf,
+            slot: Option<Box<ParsedSession>>,
+        },
+        Error {
+            path: PathBuf,
+            error: IntegrationError,
+        },
+    }
+    let mut pending: Vec<Pending> = Vec::new();
+    for root in rollout_roots(effective_root) {
+        for path in list_rollout_files(&root.path) {
+            match parse_rollout_file(&path, bounds) {
+                Ok(None) => {}
+                Ok(Some(mut parsed)) => {
+                    parsed.effective_root = Some(canonical_root.clone());
+                    parsed.archived = root.kind == RolloutKind::Archived;
+                    if filter(&parsed) {
+                        let rollout_path = parsed.rollout_path.clone();
+                        pending.push(Pending::Parsed {
+                            rollout_path,
+                            slot: Some(Box::new(parsed)),
+                        });
+                    }
+                }
+                Err(error) => pending.push(Pending::Error { path, error }),
+            }
+        }
+    }
+
+    // Collect the parsed sessions for enrichment.
+    let mut kept: Vec<ParsedSession> = pending
+        .iter_mut()
+        .filter_map(|p| match p {
+            Pending::Parsed { slot, .. } => slot.take().map(|b| *b),
+            Pending::Error { .. } => None,
+        })
+        .collect();
+
+    // Enrich in place. Never raises; never changes identity or Workspace.
+    let outcome = sqlite::enrich(&mut kept, effective_root);
+
+    // Re-assemble in the original order, building immutable Sessions from
+    // the (possibly enriched) parsed data. We match parsed sessions back to
+    // their pending slot by rollout path, which is unique per session.
+    let mut kept_by_path: std::collections::HashMap<PathBuf, ParsedSession> = kept
+        .into_iter()
+        .map(|ps| (ps.rollout_path.clone(), ps))
+        .collect();
+    let out: Vec<DiscoveredSession> = pending
+        .into_iter()
+        .map(|p| match p {
+            Pending::Parsed { rollout_path, .. } => {
+                let enriched = kept_by_path
+                    .remove(&rollout_path)
+                    .expect("enriched session must map back to its pending slot");
+                DiscoveredSession::Session(build_session(enriched))
+            }
+            Pending::Error { path, error } => DiscoveredSession::Error { path, error },
+        })
+        .collect();
+
+    (out, outcome)
+}
+
 /// A discovery outcome for one rollout file.
 #[derive(Debug)]
 pub enum DiscoveredSession {
@@ -303,6 +404,19 @@ pub struct ParsedSession {
     pub malformed_middle: usize,
     /// Parsed import metadata, if any (`foreign_session_import` equivalent).
     pub import: Option<ImportMeta>,
+    /// Optional title hint sourced from `state_5.sqlite` (Step 8 enrichment).
+    /// Only set when the JSONL has no usable user message to derive a title
+    /// from, and only after the DB row passed identity/Workspace precedence
+    /// checks. Never overrides a JSONL-derived identity. `None` when the
+    /// `codex-sqlite` feature is off, the DB is absent, or no row matched.
+    pub sqlite_title: Option<String>,
+    /// Optional activity-time hint sourced from `state_5.sqlite` (Step 8).
+    /// Additive metadata only; never used as identity or to mark a session
+    /// Inactive.
+    pub sqlite_activity_time: Option<String>,
+    /// Optional archived hint sourced from `state_5.sqlite` (Step 8). May not
+    /// override a filesystem-derived `archived` value. Informational only.
+    pub sqlite_archived_hint: Option<bool>,
 }
 
 /// Safe import metadata badge. Source path/remote are never rendered by
@@ -407,6 +521,9 @@ pub(crate) fn parse_rollout_records(
         outcome: read.outcome.clone(),
         malformed_middle: read.malformed_middle,
         import,
+        sqlite_title: None,
+        sqlite_activity_time: None,
+        sqlite_archived_hint: None,
     }))
 }
 
@@ -489,15 +606,19 @@ fn canonicalize_workspace(cwd: &Path) -> Option<PathBuf> {
 /// Derive a display title from a parsed session. Codex rollouts do not embed
 /// a reliable AI title in the JSONL (titles live in the optional SQLite, which
 /// this step must not depend on), so the title is a deterministic summary of
-/// the first real user message.
+/// the first real user message. When there are no usable user messages, an
+/// optional `state_5.sqlite` title hint (Step 8) may be used as a fallback —
+/// but only as enrichment, never overriding a JSONL-derived title.
 fn derive_title(parsed: &ParsedSession) -> Option<String> {
-    summary::summarize(
+    let from_jsonl = summary::summarize(
         parsed
             .user_messages
             .iter()
             .map(|m| m.text.clone())
             .filter(|t| !t.is_empty()),
-    )
+    );
+    // JSONL is authoritative; the SQLite hint only fills a missing title.
+    from_jsonl.or_else(|| parsed.sqlite_title.clone())
 }
 
 /// Extract and deduplicate user messages from rollout records.
@@ -776,6 +897,61 @@ fn invalid(path: &Path, chain: &str) -> IntegrationError {
             verbose_path: Some(path.to_path_buf()),
             verbose_chain: Some(chain.to_string()),
         },
+    }
+}
+
+/// Optional Codex `state_5.sqlite` enrichment (Step 8). Compiled only under
+/// the `codex-sqlite` feature; never required for discovery.
+#[cfg(feature = "codex-sqlite")]
+pub mod sqlite;
+
+/// Public enrichment entrypoint that compiles to a no-op when the
+/// `codex-sqlite` feature is disabled, so callers can always invoke it
+/// without a `#[cfg]` guard. With the feature off it simply returns an
+/// [`SqliteOutcomeStub`] indicating the DB path is unused.
+#[cfg(not(feature = "codex-sqlite"))]
+pub mod sqlite {
+    use std::path::Path;
+
+    use super::ParsedSession;
+
+    /// Coarse outcome mirroring the feature-on [`sqlite::SqliteOutcome`].
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum SqliteOutcome {
+        /// SQLite enrichment is compiled out; the DB is never consulted.
+        Absent,
+        Used {
+            enriched: usize,
+            skipped_no_row: usize,
+            diagnostics: Vec<crate::session::Diagnostic>,
+        },
+        Degraded {
+            category: &'static str,
+        },
+    }
+
+    impl SqliteOutcome {
+        pub fn is_degraded(&self) -> bool {
+            matches!(self, Self::Degraded { .. })
+        }
+        pub fn summary(&self) -> Option<String> {
+            match self {
+                Self::Absent => {
+                    Some("codex_sqlite_disabled: compiled without codex-sqlite feature".to_string())
+                }
+                _ => None,
+            }
+        }
+    }
+
+    /// No-op enrichment: with the feature off, sessions are returned unchanged.
+    pub fn enrich(_sessions: &mut [ParsedSession], _effective_root: &Path) -> SqliteOutcome {
+        SqliteOutcome::Absent
+    }
+
+    /// Path the DB would occupy, for symmetry with the feature-on module.
+    pub fn state_db_path(effective_root: &Path) -> std::path::PathBuf {
+        effective_root.join("state_5.sqlite")
     }
 }
 
