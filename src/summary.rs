@@ -17,7 +17,12 @@ use crate::{injection::collapse_known_injections, text};
 const SUMMARY_READ_LIMIT: u64 = 1024 * 1024; // 1 MiB
 
 /// Default maximum Unicode display width for a summary.
-const DEFAULT_SUMMARY_WIDTH: usize = 80;
+pub const DEFAULT_SUMMARY_WIDTH: usize = 80;
+
+/// The default maximum Unicode display width for a summary.
+pub fn default_width() -> usize {
+    DEFAULT_SUMMARY_WIDTH
+}
 
 /// Build a deterministic summary from an iterator of user message texts.
 ///
