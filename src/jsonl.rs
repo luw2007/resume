@@ -101,13 +101,13 @@ pub fn open_for_read(
             format!("cannot resolve session file {:?}", path),
         )
     })?;
-    if let Some(root) = effective_root {
-        if !resolved.starts_with(root) {
-            return Err(io::Error::other(format!(
-                "session file {:?} resolves outside effective root {:?}",
-                resolved, root
-            )));
-        }
+    if let Some(root) = effective_root
+        && !resolved.starts_with(root)
+    {
+        return Err(io::Error::other(format!(
+            "session file {:?} resolves outside effective root {:?}",
+            resolved, root
+        )));
     }
     let file = fs::File::open(&resolved)?;
     Ok((file, resolved))
@@ -445,8 +445,7 @@ mod tests {
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
             let err = read_file_confined(&link, root.path(), &Bounds::default())
-                .err()
-                .expect("symlink outside root must be rejected");
+                .expect_err("symlink outside root must be rejected");
             assert!(err.to_string().contains("outside effective root"));
         }
     }

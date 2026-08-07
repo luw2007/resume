@@ -628,7 +628,7 @@ mod tests {
     fn sanitize_strips_bidi_rlo_override() {
         // RLO can flip rendering of "file.txt" to look like a different name.
         let dirty = "file\u{202e}txt.exe";
-        assert_eq!(sanitize_for_display(&dirty), "filetxt.exe");
+        assert_eq!(sanitize_for_display(dirty), "filetxt.exe");
     }
 
     #[test]
