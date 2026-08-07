@@ -105,15 +105,6 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
 }
 
 impl PtySession {
-    /// Collect all bytes rendered so far without blocking.
-    fn drain(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        while let Ok(b) = self.rx.try_recv() {
-            out.push(b);
-        }
-        out
-    }
-
     /// Read until `deadline` collecting bytes; returns the raw buffer.
     fn read_for(&self, dur: Duration) -> Vec<u8> {
         let start = Instant::now();

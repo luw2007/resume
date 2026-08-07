@@ -291,16 +291,11 @@ fn run_skim_panic_safe(rx: SkimItemReceiver) -> Option<SkimOutput> {
     // panic inside rendering). We catch the unwind so tuikit's drop impl still
     // restores the terminal, then classify the failure instead of aborting.
     let result = panic::catch_unwind(AssertUnwindSafe(|| Skim::run_with(&options, Some(rx))));
-    match result {
-        Ok(out) => out,
-        Err(_payload) => {
-            // tuikit's Term::Drop restores the terminal during unwind; here we
-            // only need to signal the caller that the run failed. We cannot
-            // fabricate a real SkimOutput (the Event type is private), so we
-            // return None and let `classify` map it to InternalError.
-            None
-        }
-    }
+    // tuikit's Term::Drop restores the terminal during unwind; here we only
+    // need to signal the caller that the run failed. We cannot fabricate a
+    // real SkimOutput (the Event type is private), so we return None on panic
+    // and let `classify` map it to InternalError.
+    result.ok().flatten()
 }
 
 fn classify(outcome: Option<SkimOutput>) -> PickerOutcome {
