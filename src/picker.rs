@@ -29,6 +29,8 @@ use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
+use crate::config::{PreviewMode, PreviewPosition};
+
 use skim::prelude::{
     AnsiString, DisplayContext, ItemPreview, PreviewContext, Skim, SkimItem, SkimItemReceiver,
     SkimItemSender, SkimOptions, SkimOptionsBuilder, SkimOutput, bounded,
@@ -339,6 +341,86 @@ fn output_info(o: &SkimOutput) -> OutputInfo<'_> {
 
 fn is_interrupt(key: &SkimKey) -> bool {
     matches!(key, SkimKey::Ctrl('c'))
+}
+
+/// Immutable production candidate. Display text is never identity or launch state.
+#[derive(Clone, Debug)]
+pub struct PickerCandidate {
+    pub key: CandidateKey,
+    pub display: String,
+    pub search_text: String,
+    pub preview: String,
+}
+
+/// Production bounded streaming picker, preserving the Step 2 interaction contract.
+pub fn run_production_picker(
+    candidates: std::sync::mpsc::Receiver<PickerCandidate>,
+    preview_mode: PreviewMode,
+    preview_position: PreviewPosition,
+) -> PickerOutcome {
+    if let Err(reason) = preflight() {
+        return PickerOutcome::PreflightFailed(reason);
+    }
+    let store = Arc::new(PreviewStore::default());
+    // The accepted dual-section fallback always exposes normalized and raw in Preview.
+    store
+        .show_raw
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(crate::runtime::CHANNEL_CAPACITY);
+    let producer_store = store.clone();
+    let producer = std::thread::spawn(move || {
+        while let Ok(candidate) = candidates.recv() {
+            producer_store.insert(candidate.key.clone(), candidate.preview);
+            let item = Arc::new(SpikeItem {
+                key: candidate.key,
+                display: candidate.display,
+                search_text: candidate.search_text,
+                preview_store: producer_store.clone(),
+            }) as Arc<dyn SkimItem>;
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    let options = build_production_options(preview_mode, preview_position);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| Skim::run_with(&options, Some(rx))))
+        .ok()
+        .flatten();
+    drop(store);
+    let _ = producer.join();
+    classify(result)
+}
+
+fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> SkimOptions {
+    let position = match position {
+        PreviewPosition::Right => "right",
+        PreviewPosition::Bottom => "down",
+        PreviewPosition::Auto => {
+            if tty_size().is_some_and(|(width, _)| width >= 100) {
+                "right"
+            } else {
+                "down"
+            }
+        }
+    };
+    let visibility = if mode == PreviewMode::Hidden {
+        ":hidden"
+    } else {
+        ""
+    };
+    SkimOptionsBuilder::default()
+        .height(String::from("100%"))
+        .multi(false)
+        .preview(Some(String::new()))
+        .preview_window(format!("{position}:60%{visibility}"))
+        .bind(vec![
+            String::from("ctrl-o:toggle-preview"),
+            String::from("ctrl-r:ignore"),
+            String::from("enter:accept"),
+            String::from("esc:abort"),
+        ])
+        .build()
+        .expect("hardcoded production skim options are valid")
 }
 
 // ---------------------------------------------------------------------------
