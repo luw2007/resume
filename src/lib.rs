@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod diagnostics;
 pub mod injection;
+pub mod integration;
 pub mod jsonl;
 pub mod message;
 pub mod picker;
