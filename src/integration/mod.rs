@@ -10,4 +10,5 @@
 
 pub mod claude;
 pub mod codex;
+pub mod omp;
 pub mod pi;
