@@ -15,3 +15,4 @@ pub mod session;
 pub mod snapshot;
 pub mod summary;
 pub mod text;
+pub mod time;

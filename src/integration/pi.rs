@@ -30,7 +30,7 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use serde_json::Value;
@@ -557,86 +557,9 @@ fn extract_user_message(message_obj: &serde_json::Map<String, Value>) -> Option<
     }
 }
 
-/// Convert a JSON timestamp (epoch seconds, epoch millis, or ISO-8601 string)
-/// to `SystemTime`. Returns `None` on unparseable values.
+/// Convert a JSON timestamp to `SystemTime`. See `crate::time::json_value_to_system_time`.
 fn as_system_time(value: &Value) -> Option<SystemTime> {
-    match value {
-        // Epoch seconds (integer or float).
-        Value::Number(n) if n.is_i64() => {
-            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(n.as_i64()? as u64))
-        }
-        Value::Number(n) if n.is_u64() => {
-            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(n.as_u64()?))
-        }
-        Value::Number(n) if n.is_f64() => {
-            let secs = n.as_f64()?;
-            // Heuristic: Pi timestamps in millis when > 1e12.
-            if secs >= 1e12 {
-                let millis = secs as u64;
-                SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis))
-            } else {
-                SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs_f64(secs))
-            }
-        }
-        Value::String(s) => parse_iso8601(s),
-        _ => None,
-    }
-}
-
-/// Parse a subset of ISO-8601 timestamps into `SystemTime`.
-fn parse_iso8601(s: &str) -> Option<SystemTime> {
-    // Accept e.g. 2026-08-07T12:34:56Z and ...+00:00.
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // Split date and time.
-    let (date, rest) = s.split_once('T').unwrap_or((s, ""));
-    let date_parts: Vec<&str> = date.split('-').collect();
-    if date_parts.len() != 3 {
-        return None;
-    }
-    let year: i64 = date_parts[0].parse().ok()?;
-    let month: u32 = date_parts[1].parse().ok()?;
-    let day: u32 = date_parts[2].parse().ok()?;
-    let (h, min, sec) = if rest.is_empty() {
-        (0u32, 0u32, 0u32)
-    } else {
-        let (time_part, _tz) = rest
-            .split_once(['Z', '+', '-'])
-            .filter(|(t, tz)| !tz.is_empty() || t.contains(':'))
-            .unwrap_or((rest, ""));
-        let time_parts: Vec<&str> = time_part.split(':').collect();
-        let h: u32 = time_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
-        let min: u32 = time_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
-        let sec: u32 = time_parts
-            .get(2)
-            .and_then(|x| x.split('.').next().unwrap_or("0").parse().ok())
-            .unwrap_or(0);
-        (h, min, sec)
-    };
-    let epoch_days = days_from_civil(year, month, day)?;
-    let secs = epoch_days * 86_400 + (h as i64) * 3600 + (min as i64) * 60 + sec as i64;
-    if secs < 0 {
-        UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
-    } else {
-        UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
-    }
-}
-
-/// Howard Hinnant's days_from_civil: convert (y,m,d) to days since 1970-01-01.
-/// Returns `None` for out-of-range inputs.
-fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    if month == 0 || month > 12 || day == 0 || day > 31 {
-        return None;
-    }
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64;
-    let m = month as i64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (day as i64 - 1);
-    let doe = yoe as i64 * 365 + yoe as i64 / 4 - yoe as i64 / 100 + doy;
-    Some(era * 146097 + doe - 719468)
+    crate::time::json_value_to_system_time(value)
 }
 
 /// Determine the [`ActivityStatus`] for a parsed session given optional

@@ -151,3 +151,94 @@ fn no_sessions_is_success_and_invalid_agent_is_usage_error() {
         Some(2)
     );
 }
+
+#[test]
+fn malformed_since_value_is_usage_error() {
+    let (tmp, ws) = fixtures();
+    assert_eq!(
+        run(tmp.path(), &ws, &["--list", "--since", "yesterday"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn since_all_matches_since_flag_absent() {
+    let (tmp, ws) = fixtures();
+    let with_all = run(tmp.path(), &ws, &["--json", "--since", "all"]);
+    let without_flag = run(tmp.path(), &ws, &["--json"]);
+    assert!(with_all.status.success());
+    assert!(without_flag.status.success());
+    let with_all: serde_json::Value = serde_json::from_slice(&with_all.stdout).unwrap();
+    let without_flag: serde_json::Value = serde_json::from_slice(&without_flag.stdout).unwrap();
+    assert_eq!(
+        with_all["sessions"].as_array().unwrap().len(),
+        without_flag["sessions"].as_array().unwrap().len()
+    );
+}
+
+#[test]
+fn since_duration_filters_out_stale_transcripts_across_all_four_agents() {
+    let (tmp, ws) = fixtures();
+    // The fixture transcripts were just written, so they are within the last
+    // minute; `--since 0m` (an implausibly narrow window achieved by backdating
+    // every transcript file's mtime) should filter them all out, while
+    // `--since all` keeps them. We backdate file mtimes directly rather than
+    // sleeping in the test, since the filter reads mtime from disk.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for entry in walk_jsonl(tmp.path()) {
+        let file = fs::OpenOptions::new().write(true).open(&entry).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
+
+    let recent = run(tmp.path(), &ws, &["--json", "--since", "10m"]);
+    assert!(recent.status.success());
+    let recent: serde_json::Value = serde_json::from_slice(&recent.stdout).unwrap();
+    assert_eq!(
+        recent["sessions"].as_array().unwrap().len(),
+        0,
+        "all transcripts are older than 10m, so --since 10m must exclude them all: {recent}"
+    );
+
+    let everything = run(tmp.path(), &ws, &["--json", "--since", "all"]);
+    assert!(everything.status.success());
+    let everything: serde_json::Value = serde_json::from_slice(&everything.stdout).unwrap();
+    assert_eq!(
+        everything["sessions"].as_array().unwrap().len(),
+        4,
+        "--since all must not filter anything: {everything}"
+    );
+
+    let wide = run(tmp.path(), &ws, &["--json", "--since", "2h"]);
+    assert!(wide.status.success());
+    let wide: serde_json::Value = serde_json::from_slice(&wide.stdout).unwrap();
+    assert_eq!(
+        wide["sessions"].as_array().unwrap().len(),
+        4,
+        "--since 2h must include transcripts backdated by 1h: {wide}"
+    );
+}
+
+/// Collect every `.jsonl` transcript file under `home` (recursively), so the
+/// test can backdate every fixture's mtime regardless of which agent wrote
+/// it, without hardcoding each integration's directory layout twice.
+fn walk_jsonl(home: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(home, &mut out);
+    out
+}
