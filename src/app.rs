@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::{
     cli::Cli,
     config::{Config, PreviewMode, PreviewPosition},
+    diagnostics::{redact_path, redact_text},
     integration::{claude, codex, omp, pi},
     jsonl::Bounds,
     launch::{self, LaunchEvidence},
@@ -691,18 +692,29 @@ fn print_list(records: &[CandidateRecord]) {
 }
 fn print_diagnostics(state: &DiscoveryState, verbose: bool) {
     for error in state.errors.lock().unwrap().iter() {
-        if verbose {
-            eprintln!(
-                "resume: {}: {} {:?} {}",
-                error.category,
-                error.count,
-                error.verbose_path,
-                error.verbose_chain.as_deref().unwrap_or("")
-            );
-        } else {
-            eprintln!("resume: {}: {}", error.category, error.count);
-        }
+        eprintln!("{}", render_diagnostic(error, verbose));
     }
+}
+
+fn render_diagnostic(error: &Diagnostic, verbose: bool) -> String {
+    if !verbose {
+        return format!("resume: {}: {}", error.category, error.count);
+    }
+
+    let path = error
+        .verbose_path
+        .as_deref()
+        .map(redact_path)
+        .unwrap_or_default();
+    let chain = error
+        .verbose_chain
+        .as_deref()
+        .map(redact_text)
+        .unwrap_or_default();
+    format!(
+        "resume: {}: {} {} {}",
+        error.category, error.count, path, chain
+    )
 }
 fn discovery_exit(records: &[CandidateRecord], state: &DiscoveryState) -> i32 {
     if records.is_empty() && state.successful_integrations.load(Ordering::SeqCst) == 0 {
@@ -740,6 +752,26 @@ mod tests {
         assert!(item.display.starts_with("READY     omp[work]"));
         assert!(item.search_text.contains("/workspace"));
     }
+    #[test]
+    fn verbose_diagnostic_output_is_redacted() {
+        let diagnostic = Diagnostic {
+            category: "io_error",
+            count: 1,
+            verbose_path: Some(PathBuf::from(
+                "/sessions/https://secret.example/transcript.jsonl",
+            )),
+            verbose_chain: Some(
+                "failed fetching git@github.com:private/repo.git https://secret.example/api".into(),
+            ),
+        };
+
+        let rendered = render_diagnostic(&diagnostic, true);
+        assert!(!rendered.contains("secret.example"));
+        assert!(!rendered.contains("github.com"));
+        assert!(rendered.contains("[redacted-url]"));
+        assert!(rendered.contains("[redacted-remote]"));
+    }
+
     #[test]
     fn unknown_agent_is_usage_error() {
         let cli = Cli {

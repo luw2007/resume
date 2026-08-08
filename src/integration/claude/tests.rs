@@ -188,6 +188,75 @@ fn workspace_key_collision_pair_keeps_distinct_cwd() {
 // Fixture: UUID agreement / disagreement
 // ===========================================================================
 
+#[cfg(unix)]
+#[test]
+fn symlinked_transcript_inside_effective_root_is_read() {
+    let home = tempfile::tempdir().unwrap();
+    let root = claude::resolve_root(None, Some(home.path())).unwrap();
+    let cwd = home.path().join("work");
+    fs::create_dir_all(&cwd).unwrap();
+    let target = write_transcript(
+        &default_root_dir(home.path()),
+        "target-key",
+        UUID_A,
+        &standard_records(UUID_A, cwd.to_str().unwrap(), "followed safely"),
+    );
+    let link_dir = default_root_dir(home.path()).join("projects/link-key");
+    fs::create_dir_all(&link_dir).unwrap();
+    std::os::unix::fs::symlink(&target, link_dir.join(format!("{UUID_A}.jsonl"))).unwrap();
+    fs::remove_file(target).unwrap();
+    let relocated = default_root_dir(home.path()).join("relocated.data");
+    write_transcript(
+        &default_root_dir(home.path()),
+        "unused",
+        UUID_A,
+        &standard_records(UUID_A, cwd.to_str().unwrap(), "followed safely"),
+    );
+    let generated = default_root_dir(home.path())
+        .join("projects/unused")
+        .join(format!("{UUID_A}.jsonl"));
+    fs::rename(generated, &relocated).unwrap();
+    fs::remove_dir_all(default_root_dir(home.path()).join("projects/unused")).unwrap();
+    fs::remove_file(link_dir.join(format!("{UUID_A}.jsonl"))).unwrap();
+    std::os::unix::fs::symlink(&relocated, link_dir.join(format!("{UUID_A}.jsonl"))).unwrap();
+
+    let discovery = claude::discover(&root).unwrap();
+    assert_eq!(discovery.sessions.len(), 1);
+    assert_eq!(
+        discovery.sessions[0].title.as_deref(),
+        Some("followed safely")
+    );
+    assert!(discovery.diagnostics.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_transcript_outside_effective_root_is_rejected_with_diagnostic() {
+    let home = tempfile::tempdir().unwrap();
+    let root = claude::resolve_root(None, Some(home.path())).unwrap();
+    let cwd = home.path().join("work");
+    fs::create_dir_all(&cwd).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = write_transcript(
+        outside.path(),
+        "foreign",
+        UUID_A,
+        &standard_records(UUID_A, cwd.to_str().unwrap(), "must not leak"),
+    );
+    let link_dir = default_root_dir(home.path()).join("projects/key");
+    fs::create_dir_all(&link_dir).unwrap();
+    std::os::unix::fs::symlink(&target, link_dir.join(format!("{UUID_A}.jsonl"))).unwrap();
+
+    let discovery = claude::discover(&root).unwrap();
+    assert!(discovery.sessions.is_empty());
+    assert!(discovery.diagnostics.iter().any(|d| {
+        d.category == "claude_io"
+            && d.verbose_chain
+                .as_deref()
+                .is_some_and(|chain| chain.contains("outside effective root"))
+    }));
+}
+
 #[test]
 fn uuid_filename_and_embedded_session_id_agree_is_supported() {
     let home = tempfile::tempdir().unwrap();

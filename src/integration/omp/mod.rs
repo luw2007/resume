@@ -491,11 +491,14 @@ pub struct DiscoverOutcome {
 /// Header `cwd` is authoritative; directory names are never reversed.
 pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
     let session_root = config.roots.session_root.clone();
+    let confined_root = session_root
+        .canonicalize()
+        .unwrap_or_else(|_| session_root.clone());
     let mut outcome = DiscoverOutcome::default();
     let mut seen: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for jsonl_path in iter_session_files(&session_root)? {
-        let parsed = match parse_session_file(&jsonl_path, &config.bounds) {
+        let parsed = match parse_session_file(&jsonl_path, &confined_root, &config.bounds) {
             Ok(Some(parsed)) => parsed,
             Ok(None) => {
                 outcome.no_header_files += 1;
@@ -568,7 +571,8 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
         };
         if file_type.is_dir() {
             collect_jsonl(&path, out)?;
-        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        } else if (file_type.is_file() || file_type.is_symlink())
+            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
         {
             out.push(path);
         }
@@ -578,9 +582,13 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
 
 /// Parse a single OMP JSONL session file read-only. Returns `Ok(None)` when
 /// the file has no valid `session` header.
-fn parse_session_file(path: &Path, bounds: &Bounds) -> io::Result<Option<ParsedSession>> {
+fn parse_session_file(
+    path: &Path,
+    effective_root: &Path,
+    bounds: &Bounds,
+) -> io::Result<Option<ParsedSession>> {
+    let result = jsonl::read_file_confined(path, effective_root, bounds)?;
     let file_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
-    let result = jsonl::read_file(path, bounds)?;
     Ok(extract_session(path, &result, file_mtime))
 }
 
