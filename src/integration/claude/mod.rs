@@ -248,8 +248,11 @@ struct ParsedTranscript {
 
 /// Parse a candidate transcript file into extracted state and the raw read
 /// outcome (for diagnostics). Uses the shared bounded JSONL reader.
-fn parse_transcript(path: &Path) -> Result<(ParsedTranscript, ReadResult), Diagnostic> {
-    let read = jsonl::read_file(path, &Bounds::default()).map_err(|source| {
+fn parse_transcript(
+    path: &Path,
+    effective_root: &Path,
+) -> Result<(ParsedTranscript, ReadResult), Diagnostic> {
+    let read = jsonl::read_file_confined(path, effective_root, &Bounds::default()).map_err(|source| {
         diagnostic_chain(
             "claude_io",
             path,
@@ -380,7 +383,11 @@ fn parse_candidate(
     candidate: &Candidate,
     root: &ClaudeRoot,
 ) -> Result<(Option<Session>, Vec<Diagnostic>), Diagnostic> {
-    let (parsed, read) = parse_transcript(&candidate.path)?;
+    let confined_root = root
+        .effective_root
+        .canonicalize()
+        .unwrap_or_else(|_| root.effective_root.clone());
+    let (parsed, read) = parse_transcript(&candidate.path, &confined_root)?;
 
     let filename_uuid_str = candidate.stem.to_string_lossy().into_owned();
 
