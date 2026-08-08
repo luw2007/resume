@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::{
     cli::Cli,
     config::{Config, PreviewMode, PreviewPosition},
+    diagnostics::{redact_path, redact_text},
     integration::{claude, codex, omp, pi},
     jsonl::Bounds,
     launch::{self, LaunchEvidence},
@@ -691,18 +692,29 @@ fn print_list(records: &[CandidateRecord]) {
 }
 fn print_diagnostics(state: &DiscoveryState, verbose: bool) {
     for error in state.errors.lock().unwrap().iter() {
-        if verbose {
-            eprintln!(
-                "resume: {}: {} {:?} {}",
-                error.category,
-                error.count,
-                error.verbose_path,
-                error.verbose_chain.as_deref().unwrap_or("")
-            );
-        } else {
-            eprintln!("resume: {}: {}", error.category, error.count);
-        }
+        eprintln!("{}", render_diagnostic(error, verbose));
     }
+}
+
+fn render_diagnostic(error: &Diagnostic, verbose: bool) -> String {
+    if !verbose {
+        return format!("resume: {}: {}", error.category, error.count);
+    }
+
+    let path = error
+        .verbose_path
+        .as_deref()
+        .map(redact_path)
+        .unwrap_or_default();
+    let chain = error
+        .verbose_chain
+        .as_deref()
+        .map(redact_text)
+        .unwrap_or_default();
+    format!(
+        "resume: {}: {} {} {}",
+        error.category, error.count, path, chain
+    )
 }
 fn discovery_exit(records: &[CandidateRecord], state: &DiscoveryState) -> i32 {
     if records.is_empty() && state.successful_integrations.load(Ordering::SeqCst) == 0 {
@@ -745,10 +757,11 @@ mod tests {
         let diagnostic = Diagnostic {
             category: "io_error",
             count: 1,
-            verbose_path: Some(PathBuf::from("/sessions/https://secret.example/transcript.jsonl")),
+            verbose_path: Some(PathBuf::from(
+                "/sessions/https://secret.example/transcript.jsonl",
+            )),
             verbose_chain: Some(
-                "failed fetching git@github.com:private/repo.git https://secret.example/api"
-                    .into(),
+                "failed fetching git@github.com:private/repo.git https://secret.example/api".into(),
             ),
         };
 
