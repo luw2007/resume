@@ -42,11 +42,15 @@ The declared set of coding agents whose Session behavior is tracked by the proje
 _Avoid_: `npx skills` agent list, detected agents
 
 **Support Status**:
-The verified capability level of an Agent Integration: Supported, Discover Only, Unsupported, or Unavailable. Only Supported Sessions may be resumed.
+The verified capability level of an Agent Integration: Supported, Discover Only, Unsupported, or Unavailable. Only Supported Sessions may be resumed. In v0.1.0, the current integrations can produce Supported, Discover Only, and Unavailable; Unsupported is modeled for a future integration that fails validation entirely and is not currently assigned.
 _Avoid_: Compatibility flag, best-effort support
 
+**Risk Status**:
+A discovery-time signal that may require confirmation before Resume. In v0.1.0, integrations produce Normal or BroadWorkspace. WorkspaceChanged and ConflictingMetadata are reserved model variants and are not produced by current integration discovery; an actual workspace replacement is instead rejected during launch revalidation.
+_Avoid_: Launch error, activity status
+
 **Active Session**:
-A Session that an Agent Integration can reliably associate with a currently running process. Its process and terminal details inform the user's Resume decision but do not determine it.
+A Session that an Agent Integration can reliably associate with a currently running process. Its process and terminal details inform the user's Resume decision but do not determine it. In the v0.1.0 assembled app, integrations receive no live-correlation evidence, so discovery reports activity as Unknown by default; Active risk handling is implemented but has no live discovery trigger.
 _Avoid_: Locked session, busy session
 
 **Session Picker**:

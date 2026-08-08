@@ -1,6 +1,6 @@
 # JSON output schema (v1)
 
-Run `resume --json` to write one compact JSON document to stdout. Discovery diagnostics are written separately to stderr. The JSON document contains Session metadata and aggregate errors only; it never contains Session message bodies.
+Run `resume --json` to write one compact JSON document to stdout. Discovery diagnostics are written separately to stderr. The JSON document contains Session metadata and aggregate errors only; it never contains a `messages` array or full/raw transcript content. The `title` metadata may intentionally contain a bounded, truncated summary excerpt derived from the first user message (or an explicit native title), so consumers should treat titles as potentially conversation-derived text.
 
 The current serialization implemented in `src/app.rs` is exactly the envelope `{schemaVersion, sessions, errors}`. Unknown future fields should be ignored by consumers. `schemaVersion` changes when an incompatible representation is introduced.
 
@@ -65,7 +65,7 @@ The current serialization implemented in `src/app.rs` is exactly the envelope `{
 
 ## Serialization details
 
-- `profile`, `title`, and `workspace` are JSON `null` when unavailable.
+- `profile`, `title`, and `workspace` are JSON `null` when unavailable. A non-null `title` may be an explicit native title or a bounded, truncated summary excerpt of the first user message.
 - `support`, `activity`, and `risk` are the Rust debug-form strings currently emitted by the v1 serializer. In particular, an active value can include its observed timestamp inside the string; consumers must not assume these fields are lower-case enums.
 - Paths and native IDs are converted to display strings for JSON. The native launch boundary retains OS-native path/argument values separately.
 - `errors` entries expose only a redacted category and aggregate count. Verbose paths/chains remain diagnostics on stderr and do not enter JSON.
