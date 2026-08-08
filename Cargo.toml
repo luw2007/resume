@@ -35,4 +35,5 @@ codex-sqlite = ["dep:rusqlite"]
 
 [dev-dependencies]
 portable-pty = "0.9"
+proptest = "1"
 tempfile = "3"
