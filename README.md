@@ -24,10 +24,7 @@ resume /path/to/worktree       # derive Scope from another directory
 resume --list                  # stable text listing after discovery completes
 resume --json                  # machine-readable v1 output
 resume -a pi -a codex          # replace the configured agent list
-resume --since 7d              # accepted: Nm, Nh, Nd, Nw, YYYY-MM-DD, or all
 ```
-
-`--since` is part of the v0.1.0 CLI/config surface, but the current discovery pipeline does not yet apply it as a time filter.
 
 The interactive picker receives candidates asynchronously. Late candidates can change Skim's visible rank order, but selection remains attached to an opaque Session identity rather than a row number. Do not rely on exact global display order while loading.
 
@@ -116,14 +113,13 @@ resume config example
 
 ```toml
 agents = ["codex", "claude", "pi", "omp"]
-since = "30d"
 confirm_always = false
 preview = "hidden"               # hidden | visible
 preview_position = "auto"        # auto | right | bottom
 verbose = false
 ```
 
-A repeatable `-a/--agent <AGENT>` replaces, rather than extends, the configured `agents` list. `--confirm-always` requests confirmation for every Resume. `--no-confirm` suppresses ordinary confirmation but cannot bypass a risk prompt. CLI `--verbose` enables verbose diagnostics. As noted above, `since` is parsed and validated but is not yet applied by the assembled discovery path.
+A repeatable `-a/--agent <AGENT>` replaces, rather than extends, the configured `agents` list. `--confirm-always` requests confirmation for every Resume. `--no-confirm` suppresses ordinary confirmation but cannot bypass a risk prompt. CLI `--verbose` enables verbose diagnostics.
 
 ## Native Resume boundary
 
