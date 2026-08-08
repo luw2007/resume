@@ -945,9 +945,56 @@ fn duplicate_files_within_same_profile_root_are_deduped() {
     }
     let outcome = fx.discover(fx.roots_default());
     #[cfg(unix)]
-    assert_eq!(outcome.parsed.len(), 1);
+    {
+        assert_eq!(outcome.parsed.len(), 1);
+        assert_eq!(outcome.skipped_files, 0, "symlink was read, not skipped");
+    }
     #[cfg(not(unix))]
     assert_eq!(outcome.parsed.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_session_inside_effective_root_is_read() {
+    let fx = Fixture::new();
+    let target = fx.default_agent_root.join("target.data");
+    fx.write_jsonl(
+        &target,
+        &[
+            header_v3("inside-link", &fx.workspace, 1700000000),
+            user_message_string("followed safely", 1700000010),
+        ],
+    );
+    let link_dir = fx.default_agent_root.join("ws");
+    fs::create_dir_all(&link_dir).unwrap();
+    std::os::unix::fs::symlink(&target, link_dir.join("inside.jsonl")).unwrap();
+
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(outcome.parsed.len(), 1);
+    assert_eq!(outcome.parsed[0].id, "inside-link");
+    assert_eq!(outcome.skipped_files, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_session_outside_effective_root_is_rejected_with_diagnostic_count() {
+    let fx = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("foreign.data");
+    fx.write_jsonl(
+        &target,
+        &[
+            header_v3("outside-link", &fx.workspace, 1700000000),
+            user_message_string("must not leak", 1700000010),
+        ],
+    );
+    let link_dir = fx.default_agent_root.join("ws");
+    fs::create_dir_all(&link_dir).unwrap();
+    std::os::unix::fs::symlink(&target, link_dir.join("outside.jsonl")).unwrap();
+
+    let outcome = fx.discover(fx.roots_default());
+    assert!(outcome.parsed.is_empty());
+    assert_eq!(outcome.skipped_files, 1, "rejection must be diagnosed");
 }
 
 // ===========================================================================

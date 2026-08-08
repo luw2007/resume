@@ -158,6 +158,65 @@ fn discover_outcomes(home: &Path) -> Vec<DiscoveredSession> {
 // Storage shape and root resolution
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+#[test]
+fn symlinked_rollout_inside_effective_root_is_read() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let target = write_rollout(
+        home.path(),
+        "inside-target.data",
+        &[
+            session_meta("inside-link", workspace.canonicalize().unwrap().to_str().unwrap()),
+            event_msg_user("followed safely"),
+        ],
+    );
+    let link = home.path().join("sessions/2026/08/07/rollout-inside.jsonl");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let outcomes = discover_outcomes(home.path());
+    let sessions: Vec<_> = outcomes.iter().filter_map(DiscoveredSession::session).collect();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].resumable_id.to_str(), Some("inside-link"));
+    assert_eq!(sessions[0].title.as_deref(), Some("followed safely"));
+    assert!(!outcomes.iter().any(|outcome| matches!(outcome, DiscoveredSession::Error { .. })));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_rollout_outside_effective_root_is_rejected_with_error() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = write_rollout(
+        outside.path(),
+        "foreign.data",
+        &[
+            session_meta("outside-link", workspace.canonicalize().unwrap().to_str().unwrap()),
+            event_msg_user("must not leak"),
+        ],
+    );
+    let link = home.path().join("sessions/2026/08/07/rollout-outside.jsonl");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let outcomes = discover_outcomes(home.path());
+    assert!(!outcomes.iter().any(|outcome| outcome.session().is_some()));
+    assert!(outcomes.iter().any(|outcome| match outcome {
+        DiscoveredSession::Error {
+            error: IntegrationError::Io { diagnostic, .. },
+            ..
+        } => diagnostic
+            .verbose_chain
+            .as_deref()
+            .is_some_and(|chain| chain.contains("outside effective root")),
+        DiscoveredSession::Error { .. } | DiscoveredSession::Session(_) => false,
+    }));
+}
+
 #[test]
 fn discovers_modern_session_under_dated_sessions_subdir() {
     let home = codex_home();
