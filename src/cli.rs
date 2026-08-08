@@ -1,4 +1,4 @@
-use std::{ffi::OsString, path::PathBuf, str::FromStr};
+use std::{ffi::OsString, path::PathBuf, str::FromStr, time::SystemTime};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
@@ -21,6 +21,63 @@ impl FromStr for Distance {
                 .map_err(|_| "expected a non-negative integer or 'all'".into())
         }
     }
+}
+
+/// A `--since <duration|date|all>` cutoff. `All` means no filtering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Since {
+    All,
+    /// A relative duration such as `7d`, resolved against a reference time.
+    Duration(std::time::Duration),
+    /// An absolute `YYYY-MM-DD` date, resolved as UTC midnight.
+    Date(SystemTime),
+}
+
+impl FromStr for Since {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("all") {
+            return Ok(Self::All);
+        }
+        if let Some(duration) = crate::time::parse_relative_duration(value) {
+            return Ok(Self::Duration(duration));
+        }
+        if let Some(date) = parse_since_date(value) {
+            return Ok(Self::Date(date));
+        }
+        Err("expected a duration (e.g. 7d, 2h, 30m, 1w), a YYYY-MM-DD date, or 'all'".into())
+    }
+}
+
+impl Since {
+    /// Resolve to an inclusive cutoff `SystemTime`: Sessions with activity at
+    /// or after this instant pass the filter. `All` never filters, so it has
+    /// no cutoff.
+    pub fn cutoff(&self, now: SystemTime) -> Option<SystemTime> {
+        match self {
+            Self::All => None,
+            Self::Duration(duration) => Some(now.checked_sub(*duration).unwrap_or(now)),
+            Self::Date(cutoff) => Some(*cutoff),
+        }
+    }
+}
+
+/// Parse a strict `YYYY-MM-DD` date (rejecting any other ISO-8601 shape, to
+/// keep `--since` inputs unambiguous) as UTC midnight.
+fn parse_since_date(value: &str) -> Option<SystemTime> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    {
+        return None;
+    }
+    crate::time::parse_iso8601(value)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -65,6 +122,9 @@ pub struct Cli {
     #[arg(short = 'a', long, action = clap::ArgAction::Append)]
     pub agent: Vec<OsString>,
 
+    #[arg(long, value_name = "duration|date|all")]
+    pub since: Option<Since>,
+
     #[arg(long)]
     pub list: bool,
     #[arg(long)]
@@ -89,6 +149,7 @@ pub fn command() -> clap::Command {
 
 pub fn config_example() -> &'static str {
     r#"agents = ["codex", "claude", "pi", "omp"]
+since = "all"
 confirm_always = false
 preview = "hidden"
 preview_position = "auto"
@@ -115,22 +176,51 @@ mod tests {
     }
 
     #[test]
-    fn invalid_distance_is_usage_error() {
-        assert_eq!(
-            Cli::try_parse_from(["resume", "--up", "-1"])
-                .unwrap_err()
-                .exit_code(),
-            2
-        );
+    fn invalid_distance_and_since_are_usage_errors() {
+        for argv in [
+            vec!["resume", "--up", "-1"],
+            vec!["resume", "--since", "yesterday"],
+            vec!["resume", "--since", "-7d"],
+            vec!["resume", "--since", "2026-13-40"],
+        ] {
+            assert_eq!(Cli::try_parse_from(argv).unwrap_err().exit_code(), 2);
+        }
     }
 
     #[test]
-    fn obsolete_since_option_is_rejected() {
+    fn since_accepts_duration_date_and_all() {
         assert_eq!(
             Cli::try_parse_from(["resume", "--since", "7d"])
-                .unwrap_err()
-                .exit_code(),
-            2
+                .unwrap()
+                .since,
+            Some(Since::Duration(std::time::Duration::from_secs(7 * 86_400)))
+        );
+        assert_eq!(
+            Cli::try_parse_from(["resume", "--since", "all"])
+                .unwrap()
+                .since,
+            Some(Since::All)
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["resume", "--since", "2026-01-01"])
+                .unwrap()
+                .since,
+            Some(Since::Date(_))
+        ));
+    }
+
+    #[test]
+    fn since_cutoff_all_never_filters() {
+        assert_eq!(Since::All.cutoff(SystemTime::now()), None);
+    }
+
+    #[test]
+    fn since_cutoff_duration_subtracts_from_now() {
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let since = Since::Duration(std::time::Duration::from_secs(100));
+        assert_eq!(
+            since.cutoff(now),
+            Some(now - std::time::Duration::from_secs(100))
         );
     }
 

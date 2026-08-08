@@ -1,6 +1,21 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, str::FromStr};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+use crate::cli::Since;
+
+/// Deserialize a `since` TOML string (e.g. `"7d"`, `"2026-01-01"`, `"all"`)
+/// through the same [`Since::from_str`] parser the CLI flag uses, so config
+/// and CLI accept identical syntax and reject the same malformed inputs.
+fn deserialize_since<'de, D>(deserializer: D) -> Result<Option<Since>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<String> = Option::deserialize(deserializer)?;
+    value
+        .map(|s| Since::from_str(&s).map_err(serde::de::Error::custom))
+        .transpose()
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +36,8 @@ pub enum PreviewPosition {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub agents: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_since")]
+    pub since: Option<Since>,
     pub confirm_always: Option<bool>,
     pub preview: Option<PreviewMode>,
     pub preview_position: Option<PreviewPosition>,
@@ -117,7 +134,7 @@ mod tests {
             ("unknown.toml", "mystery = true"),
             ("position.toml", "preview_position = 'left'"),
             ("preview.toml", "preview = 'sometimes'"),
-            ("since.toml", "since = '7d'"),
+            ("since.toml", "since = 'yesterday'"),
         ] {
             let path = dir.path().join(name);
             fs::write(&path, body).unwrap();
@@ -131,12 +148,31 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(
             &path,
-            "agents=['pi']\nconfirm_always=true\nverbose=true\npreview='hidden'\npreview_position='bottom'",
+            "agents=['pi']\nsince='7d'\nconfirm_always=true\nverbose=true\npreview='hidden'\npreview_position='bottom'",
         )
         .unwrap();
         let config = load_path(path).unwrap();
         assert_eq!(config.agents, Some(vec!["pi".into()]));
+        assert_eq!(
+            config.since,
+            Some(Since::Duration(std::time::Duration::from_secs(7 * 86_400)))
+        );
         assert_eq!(config.preview, Some(PreviewMode::Hidden));
         assert_eq!(config.preview_position, Some(PreviewPosition::Bottom));
+    }
+
+    #[test]
+    fn since_all_and_date_load_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let all_path = dir.path().join("all.toml");
+        fs::write(&all_path, "since = 'all'").unwrap();
+        assert_eq!(load_path(all_path).unwrap().since, Some(Since::All));
+
+        let date_path = dir.path().join("date.toml");
+        fs::write(&date_path, "since = '2026-01-01'").unwrap();
+        assert!(matches!(
+            load_path(date_path).unwrap().since,
+            Some(Since::Date(_))
+        ));
     }
 }
