@@ -177,7 +177,7 @@ where
     let mut out = Vec::new();
     for root in rollout_roots(effective_root) {
         for path in list_rollout_files(&root.path) {
-            match parse_rollout_file(&path, bounds) {
+            match parse_rollout_file(&path, &canonical_root, bounds) {
                 Ok(parsed_opt) => match parsed_opt {
                     None => {}
                     Some(mut parsed) => {
@@ -243,7 +243,7 @@ where
     let mut pending: Vec<Pending> = Vec::new();
     for root in rollout_roots(effective_root) {
         for path in list_rollout_files(&root.path) {
-            match parse_rollout_file(&path, bounds) {
+            match parse_rollout_file(&path, &canonical_root, bounds) {
                 Ok(None) => {}
                 Ok(Some(mut parsed)) => {
                     parsed.effective_root = Some(canonical_root.clone());
@@ -434,16 +434,19 @@ pub struct ImportMeta {
 /// case the caller treats it as a non-discoverable file, not an error.
 pub fn parse_rollout_file(
     path: &Path,
+    effective_root: &Path,
     bounds: &Bounds,
 ) -> Result<Option<ParsedSession>, IntegrationError> {
-    let read = jsonl::read_file(path, bounds).map_err(|source| IntegrationError::Io {
-        diagnostic: crate::session::Diagnostic {
-            category: "codex_io",
-            count: 1,
-            verbose_path: Some(path.to_path_buf()),
-            verbose_chain: Some(source.to_string()),
-        },
-        source,
+    let read = jsonl::read_file_confined(path, effective_root, bounds).map_err(|source| {
+        IntegrationError::Io {
+            diagnostic: crate::session::Diagnostic {
+                category: "codex_io",
+                count: 1,
+                verbose_path: Some(path.to_path_buf()),
+                verbose_chain: Some(source.to_string()),
+            },
+            source,
+        }
     })?;
     parse_rollout_records(path, &read)
 }
