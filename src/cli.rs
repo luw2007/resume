@@ -113,10 +113,22 @@ pub enum ConfigCommand {
 pub struct Cli {
     pub directory: Option<PathBuf>,
 
-    #[arg(short = 'U', long, value_name = "N|all", conflicts_with = "down")]
+    #[arg(
+        short = 'U',
+        long,
+        value_name = "N|all",
+        conflicts_with = "down",
+        allow_hyphen_values = true
+    )]
     pub up: Option<Distance>,
 
-    #[arg(short = 'D', long, value_name = "N|all", conflicts_with = "up")]
+    #[arg(
+        short = 'D',
+        long,
+        value_name = "N|all",
+        conflicts_with = "up",
+        allow_hyphen_values = true
+    )]
     pub down: Option<Distance>,
 
     #[arg(short = 'a', long, action = clap::ArgAction::Append)]
@@ -193,6 +205,28 @@ mod tests {
         ] {
             assert_eq!(Cli::try_parse_from(argv).unwrap_err().exit_code(), 2);
         }
+    }
+
+    #[test]
+    fn config_example_round_trips_through_config_schema() {
+        let config: crate::config::Config = toml::from_str(config_example()).unwrap();
+        assert_eq!(
+            config.agents,
+            Some(vec![
+                "codex".into(),
+                "claude".into(),
+                "pi".into(),
+                "omp".into()
+            ])
+        );
+        assert_eq!(config.since, Some(Since::All));
+        assert_eq!(config.confirm_always, Some(false));
+        assert_eq!(config.preview, Some(crate::config::PreviewMode::Hidden));
+        assert_eq!(
+            config.preview_position,
+            Some(crate::config::PreviewPosition::Auto)
+        );
+        assert_eq!(config.verbose, Some(false));
     }
 
     #[test]
