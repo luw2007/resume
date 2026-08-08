@@ -164,6 +164,37 @@ fn no_sessions_is_success_and_invalid_agent_is_usage_error() {
     );
 }
 
+/// `docs/product-design.md` Â§7: "list mode rejects confirmation
+/// options" and "`config example` and `completions` reject Session-query
+/// options". Exercised end-to-end through the compiled binary so it covers
+/// `main`'s `Cli::validate()` wiring, not just the unit-level parser.
+#[test]
+fn meaningless_option_combinations_are_usage_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    for args in [
+        vec!["--list", "--confirm-always"],
+        vec!["--list", "--no-confirm"],
+        vec!["--json", "--confirm-always"],
+        vec!["--up", "1", "config", "example"],
+        vec!["-a", "codex", "completions", "bash"],
+    ] {
+        let output = run(tmp.path(), &ws, &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+    // Sanity: the same subcommands without Session-query options, and
+    // ordinary --list/--json without confirmation options, still succeed.
+    for args in [
+        vec!["config", "example"],
+        vec!["completions", "bash"],
+        vec!["--list"],
+    ] {
+        let output = run(tmp.path(), &ws, &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+}
+
 #[test]
 fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
     let (tmp, ws) = fixtures();

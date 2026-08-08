@@ -457,7 +457,7 @@ pub fn preflight() -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn tty_size() -> Option<(usize, usize)> {
+pub fn tty_size() -> Option<(usize, usize)> {
     use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -496,7 +496,7 @@ fn tty_size() -> Option<(usize, usize)> {
 }
 
 #[cfg(not(unix))]
-fn tty_size() -> Option<(usize, usize)> {
+pub fn tty_size() -> Option<(usize, usize)> {
     None
 }
 

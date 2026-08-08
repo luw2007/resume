@@ -46,12 +46,17 @@ pub struct Config {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("unable to read config {path:?}")]
+    #[error("unable to read config {path:?}: {source}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("invalid config {path:?}")]
+    /// `toml::de::Error`'s own `Display` already renders `line/column` plus
+    /// the offending field, matching the documented "errors with
+    /// file/line/column when possible" contract; interpolating `{source}`
+    /// here (rather than only `{path:?}`) is what actually surfaces it to
+    /// the user instead of silently discarding it.
+    #[error("invalid config {path:?}: {source}")]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
@@ -140,6 +145,20 @@ mod tests {
             fs::write(&path, body).unwrap();
             assert!(load_path(path).is_err(), "{name}");
         }
+    }
+
+    /// `docs/product-design.md` Â§7: "Unknown fields and invalid values
+    /// are errors with file/line/column when possible". `toml::de::Error`'s
+    /// `Display` already carries this detail; `ConfigError::Parse`'s message
+    /// must forward it (`{source}`) rather than only naming the file path.
+    #[test]
+    fn parse_error_message_includes_line_and_field_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown.toml");
+        fs::write(&path, "mystery = true").unwrap();
+        let error = load_path(path).unwrap_err().to_string();
+        assert!(error.contains("line 1"), "{error}");
+        assert!(error.contains("mystery"), "{error}");
     }
 
     #[test]
