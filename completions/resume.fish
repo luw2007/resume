@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_resume_global_optspecs
-    string join \n U/up= D/down= a/agent= list json verbose config= confirm-always no-confirm h/help V/version
+    string join \n U/up= D/down= a/agent= since= list json verbose config= confirm-always no-confirm h/help V/version
 end
 
 function __fish_resume_needs_command
@@ -27,6 +27,7 @@ end
 complete -c resume -n "__fish_resume_needs_command" -s U -l up -r
 complete -c resume -n "__fish_resume_needs_command" -s D -l down -r
 complete -c resume -n "__fish_resume_needs_command" -s a -l agent -r
+complete -c resume -n "__fish_resume_needs_command" -l since -r
 complete -c resume -n "__fish_resume_needs_command" -l config -r -F
 complete -c resume -n "__fish_resume_needs_command" -l list
 complete -c resume -n "__fish_resume_needs_command" -l json

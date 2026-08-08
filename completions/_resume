@@ -21,6 +21,7 @@ _resume() {
 '(-U --up)--down=[]:N|all:_default' \
 '*-a+[]:AGENT:_default' \
 '*--agent=[]:AGENT:_default' \
+'--since=[]:duration|date|all:_default' \
 '--config=[]:CONFIG:_files' \
 '--list[]' \
 '--json[]' \
