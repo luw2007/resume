@@ -31,6 +31,7 @@ pub enum DefaultScope {
 pub struct Scope {
     base: PathBuf,
     mode: ScopeMode,
+    git_warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +55,10 @@ pub struct WorkspaceCandidate<'a> {
 
 impl Scope {
     pub fn new(base: PathBuf, direction: Option<Direction>, default: DefaultScope) -> Self {
+        let git_warning = match &default {
+            DefaultScope::Exact { git_warning } => git_warning.clone(),
+            DefaultScope::Git { .. } => None,
+        };
         let mode = match direction {
             Some(Direction::Up(distance)) => ScopeMode::Up(distance),
             Some(Direction::Down(distance)) => ScopeMode::Down(distance),
@@ -68,13 +73,14 @@ impl Scope {
                 DefaultScope::Exact { .. } => ScopeMode::Exact,
             },
         };
-        Self { base, mode }
+        Self {
+            base,
+            mode,
+            git_warning,
+        }
     }
 
     pub fn contains(&self, candidate: WorkspaceCandidate<'_>) -> bool {
-        if !candidate.exists {
-            return false;
-        }
         match &self.mode {
             ScopeMode::Exact => candidate.real_path == self.base,
             ScopeMode::Up(distance) => self
@@ -104,8 +110,28 @@ impl Scope {
         }
     }
 
+    /// Match a recorded Workspace using its canonical path when it still
+    /// exists, or its last-known absolute path when it has disappeared.
+    pub fn contains_workspace(&self, workspace: &Path) -> bool {
+        let canonical = canonical_workspace(workspace);
+        let last_known_real = canonical
+            .clone()
+            .or_else(|| resolve_missing_workspace_path(workspace));
+        let real_path = last_known_real.as_deref().unwrap_or(workspace);
+        let git_common_dir = canonical.as_deref().and_then(workspace_git_common_dir);
+        self.contains(WorkspaceCandidate {
+            real_path,
+            git_common_dir: git_common_dir.as_deref(),
+            exists: canonical.is_some(),
+        })
+    }
+
     pub fn base(&self) -> &Path {
         &self.base
+    }
+
+    pub fn git_warning(&self) -> Option<&str> {
+        self.git_warning.as_deref()
     }
 }
 
@@ -122,6 +148,43 @@ pub fn canonical_base(path: &Path) -> io::Result<PathBuf> {
 
 pub fn canonical_workspace(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
+}
+
+/// Resolve symlinks in the nearest existing ancestor while retaining the
+/// missing suffix. This preserves the last-known real path on platforms where
+/// lexical absolute paths (for example `/var`) alias another real path.
+fn resolve_missing_workspace_path(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            return Some(
+                suffix
+                    .iter()
+                    .rev()
+                    .fold(real, |resolved, component| resolved.join(component)),
+            );
+        }
+        suffix.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?;
+    }
+}
+
+fn workspace_git_common_dir(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args([
+            OsStr::new("-C"),
+            path.as_os_str(),
+            OsStr::new("rev-parse"),
+            OsStr::new("--path-format=absolute"),
+            OsStr::new("--git-common-dir"),
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| bytes_to_path(trim_newline(&output.stdout)))
 }
 
 pub fn broad_workspace_risk(evidence: &WorkspaceEvidence, home: Option<&Path>) -> RiskStatus {
@@ -333,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn non_git_fallback_is_exact_and_missing_workspace_is_excluded() {
+    fn non_git_fallback_is_exact_and_missing_workspace_is_matched_by_last_known_path() {
         let scope = Scope::new(
             "/real/base".into(),
             None,
@@ -343,11 +406,61 @@ mod tests {
         );
         assert!(scope.contains(candidate("/real/base")));
         assert!(!scope.contains(candidate("/real/base/child")));
-        assert!(!scope.contains(WorkspaceCandidate {
+        assert!(scope.contains(WorkspaceCandidate {
             real_path: Path::new("/real/base"),
             git_common_dir: None,
             exists: false
         }));
+    }
+
+    #[test]
+    fn live_git_scope_rejects_a_distinct_nested_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let nested = repo.join("vendor/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&nested)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let repo = repo.canonicalize().unwrap();
+        let nested = nested.canonicalize().unwrap();
+        let scope = Scope::new(
+            repo.clone(),
+            None,
+            DefaultScope::Git {
+                common_dir: repo.join(".git"),
+                worktrees: vec![repo.clone()],
+            },
+        );
+
+        assert!(scope.contains_workspace(&repo.join("vendor")));
+        assert!(!scope.contains_workspace(&nested));
+    }
+
+    #[test]
+    fn missing_workspace_uses_its_last_known_path_for_scope_matching() {
+        let scope = Scope::new(
+            "/real/base".into(),
+            Some(Direction::Down(Distance::All)),
+            DefaultScope::Exact { git_warning: None },
+        );
+
+        assert!(scope.contains_workspace(Path::new("/real/base/deleted")));
+        assert!(!scope.contains_workspace(Path::new("/other/deleted")));
     }
 
     #[test]
