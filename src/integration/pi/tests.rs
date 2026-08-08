@@ -1198,6 +1198,12 @@ fn run_resume_spec_capturing(spec: &crate::session::ResumeSpec) -> std::io::Resu
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.argv);
     cmd.current_dir(&spec.cwd);
+    cmd.env_clear();
+    cmd.env("HOME", &spec.cwd);
+    cmd.env("XDG_CONFIG_HOME", spec.cwd.join(".xdg-config"));
+    cmd.env("XDG_DATA_HOME", spec.cwd.join(".xdg-data"));
+    cmd.env("XDG_STATE_HOME", spec.cwd.join(".xdg-state"));
+    cmd.env("XDG_CACHE_HOME", spec.cwd.join(".xdg-cache"));
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
