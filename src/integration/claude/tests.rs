@@ -222,7 +222,10 @@ fn symlinked_transcript_inside_effective_root_is_read() {
 
     let discovery = claude::discover(&root).unwrap();
     assert_eq!(discovery.sessions.len(), 1);
-    assert_eq!(discovery.sessions[0].title.as_deref(), Some("followed safely"));
+    assert_eq!(
+        discovery.sessions[0].title.as_deref(),
+        Some("followed safely")
+    );
     assert!(discovery.diagnostics.is_empty());
 }
 

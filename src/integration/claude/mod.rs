@@ -252,13 +252,14 @@ fn parse_transcript(
     path: &Path,
     effective_root: &Path,
 ) -> Result<(ParsedTranscript, ReadResult), Diagnostic> {
-    let read = jsonl::read_file_confined(path, effective_root, &Bounds::default()).map_err(|source| {
-        diagnostic_chain(
-            "claude_io",
-            path,
-            &format!("failed to read transcript: {source}"),
-        )
-    })?;
+    let read =
+        jsonl::read_file_confined(path, effective_root, &Bounds::default()).map_err(|source| {
+            diagnostic_chain(
+                "claude_io",
+                path,
+                &format!("failed to read transcript: {source}"),
+            )
+        })?;
 
     let mut parsed = ParsedTranscript {
         session_id: None,
