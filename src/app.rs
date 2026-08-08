@@ -741,6 +741,25 @@ mod tests {
         assert!(item.search_text.contains("/workspace"));
     }
     #[test]
+    fn verbose_diagnostic_output_is_redacted() {
+        let diagnostic = Diagnostic {
+            category: "io_error",
+            count: 1,
+            verbose_path: Some(PathBuf::from("/sessions/https://secret.example/transcript.jsonl")),
+            verbose_chain: Some(
+                "failed fetching git@github.com:private/repo.git https://secret.example/api"
+                    .into(),
+            ),
+        };
+
+        let rendered = render_diagnostic(&diagnostic, true);
+        assert!(!rendered.contains("secret.example"));
+        assert!(!rendered.contains("github.com"));
+        assert!(rendered.contains("[redacted-url]"));
+        assert!(rendered.contains("[redacted-remote]"));
+    }
+
+    #[test]
     fn unknown_agent_is_usage_error() {
         let cli = Cli {
             directory: None,
