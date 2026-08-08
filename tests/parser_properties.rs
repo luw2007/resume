@@ -89,10 +89,10 @@ proptest! {
     #[test]
     fn strict_config_parser_is_bounded_and_never_panics(value in ".{0,4096}") {
         let parsed = toml::from_str::<Config>(&value);
-        if let Ok(config) = parsed {
-            if let Some(since) = config.since {
-                let _ = Since::from_str(&since);
-            }
+        if let Ok(config) = parsed
+            && let Some(since) = config.since
+        {
+            let _ = Since::from_str(&since);
         }
     }
 }

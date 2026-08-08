@@ -43,6 +43,7 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
     // agent/config root at a deliberately nonexistent fixture path so a
     // regression can never scan the runner's real HOME or credentials.
     let isolated = std::env::temp_dir().join(format!("resume-pty-{}", std::process::id()));
+    std::fs::create_dir_all(&isolated).expect("create isolated PTY home");
     cmd.env("HOME", &isolated);
     cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
     cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
@@ -560,6 +561,7 @@ fn works_with_redirected_stdin() {
     cmd.arg(&shell_cmd);
     cmd.env("TERM", "xterm-256color");
     let isolated = std::env::temp_dir().join(format!("resume-pty-redirect-{}", std::process::id()));
+    std::fs::create_dir_all(&isolated).expect("create isolated redirected-stdin home");
     cmd.env("HOME", &isolated);
     cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
     cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
