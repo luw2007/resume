@@ -49,6 +49,7 @@ struct DiscoveryState {
 #[derive(Clone)]
 struct EffectiveOptions {
     agents: Vec<String>,
+    since_cutoff: Option<std::time::SystemTime>,
     confirm_always: bool,
     no_confirm: bool,
     preview: PreviewMode,
@@ -109,8 +110,17 @@ fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, Stri
             return Err(format!("unknown agent {agent:?}"));
         }
     }
+    // CLI `--since` replaces a configured `since`, matching the `-a/--agent`
+    // precedence pattern above. Absent both, there is no cutoff (equivalent
+    // to `all`).
+    let since_cutoff = cli
+        .since
+        .clone()
+        .or_else(|| config.since.clone())
+        .and_then(|since| since.cutoff(std::time::SystemTime::now()));
     Ok(EffectiveOptions {
         agents,
+        since_cutoff,
         confirm_always: cli.confirm_always || config.confirm_always.unwrap_or(false),
         no_confirm: cli.no_confirm,
         preview: config.preview.unwrap_or(PreviewMode::Hidden),
@@ -156,8 +166,9 @@ fn discover_all(
         let state = state.clone();
         let records = records.clone();
         let cancel = cancel.clone();
+        let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, &cancel);
+            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -192,8 +203,9 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
         let next_key = next_key.clone();
         let cancel = cancel.clone();
         let tx = tx.clone();
+        let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, &cancel);
+            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -305,16 +317,60 @@ impl AgentDiscovery {
     }
 }
 
-fn discover_agent(agent: &str, scope: &Scope, cancel: &CancelToken) -> AgentDiscovery {
+fn discover_agent(
+    agent: &str,
+    scope: &Scope,
+    since_cutoff: Option<std::time::SystemTime>,
+    cancel: &CancelToken,
+) -> AgentDiscovery {
     if cancel.is_cancelled() {
         return AgentDiscovery::ok(vec![], vec![]);
     }
-    match agent {
+    let mut discovery = match agent {
         "pi" => discover_pi(scope),
         "claude" => discover_claude(scope),
         "codex" => discover_codex(scope),
         "omp" => discover_omp(scope),
         _ => AgentDiscovery::failed("unknown_agent"),
+    };
+    if let Some(cutoff) = since_cutoff {
+        discovery
+            .records
+            .retain(|record| session_at_or_after(record, cutoff));
+    }
+    discovery
+}
+
+/// Resolve the on-disk transcript path backing a `Session`'s identity,
+/// regardless of which integration produced it. Pi/OMP/Claude embed the
+/// transcript path directly as `native_locator`; Codex embeds it after a
+/// `native_id::path` separator (see `codex_transcript_path`).
+fn record_transcript_path(session: &Session) -> Option<PathBuf> {
+    if session.key.agent == codex::AGENT {
+        codex_transcript_path(session)
+    } else {
+        Some(PathBuf::from(&session.key.native_locator))
+    }
+}
+
+/// `--since` filter: keep a Session only when its best-available activity
+/// signal is at or after `cutoff`. There is no positive-evidence activity
+/// timestamp uniformly available on the assembled `Session` (only
+/// `ActivityStatus`, which is `Unknown` by default for most integrations),
+/// so this uses the transcript file's own mtime as the universal fallback
+/// signal, consistent with each integration's own `activity_time` fallback
+/// chain (message time, then header time, then file mtime). A Session whose
+/// transcript cannot be stat'd (e.g. Workspace/transcript already gone) is
+/// conservatively kept rather than silently dropped, since discovery/list
+/// output elsewhere already surfaces unavailable Sessions for diagnosis
+/// rather than hiding them.
+fn session_at_or_after(record: &CandidateRecord, cutoff: std::time::SystemTime) -> bool {
+    let Some(path) = record_transcript_path(&record.session) else {
+        return true;
+    };
+    match std::fs::metadata(&path).and_then(|meta| meta.modified()) {
+        Ok(modified) => modified >= cutoff,
+        Err(_) => true,
     }
 }
 
@@ -925,6 +981,7 @@ mod tests {
             up: None,
             down: None,
             agent: vec![OsString::from("bad")],
+            since: None,
             list: false,
             json: false,
             verbose: false,
