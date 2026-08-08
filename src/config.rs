@@ -1,8 +1,6 @@
-use std::{env, fs, path::PathBuf, str::FromStr};
+use std::{env, fs, path::PathBuf};
 
 use serde::Deserialize;
-
-use crate::cli::Since;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -23,7 +21,6 @@ pub enum PreviewPosition {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub agents: Option<Vec<String>>,
-    pub since: Option<String>,
     pub confirm_always: Option<bool>,
     pub preview: Option<PreviewMode>,
     pub preview_position: Option<PreviewPosition>,
@@ -42,8 +39,6 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
-    #[error("invalid since value in config {path:?}: {value}")]
-    InvalidSince { path: PathBuf, value: String },
 }
 
 /// Selects one user-level file only; configuration files are never merged.
@@ -84,19 +79,7 @@ pub fn load_path(path: PathBuf) -> Result<Config, ConfigError> {
         path: path.clone(),
         source,
     })?;
-    let config: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-        path: path.clone(),
-        source,
-    })?;
-    if let Some(value) = config.since.as_ref()
-        && Since::from_str(value).is_err()
-    {
-        return Err(ConfigError::InvalidSince {
-            path,
-            value: value.clone(),
-        });
-    }
-    Ok(config)
+    toml::from_str(&text).map_err(|source| ConfigError::Parse { path, source })
 }
 
 #[cfg(test)]
@@ -134,7 +117,7 @@ mod tests {
             ("unknown.toml", "mystery = true"),
             ("position.toml", "preview_position = 'left'"),
             ("preview.toml", "preview = 'sometimes'"),
-            ("since.toml", "since = 'yesterday'"),
+            ("since.toml", "since = '7d'"),
         ] {
             let path = dir.path().join(name);
             fs::write(&path, body).unwrap();
@@ -148,7 +131,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(
             &path,
-            "agents=['pi']\nsince='7d'\nconfirm_always=true\nverbose=true\npreview='hidden'\npreview_position='bottom'",
+            "agents=['pi']\nconfirm_always=true\nverbose=true\npreview='hidden'\npreview_position='bottom'",
         )
         .unwrap();
         let config = load_path(path).unwrap();

@@ -691,9 +691,43 @@ fn print_list(records: &[CandidateRecord]) {
     }
 }
 fn print_diagnostics(state: &DiscoveryState, verbose: bool) {
-    for error in state.errors.lock().unwrap().iter() {
-        eprintln!("{}", render_diagnostic(error, verbose));
+    for error in aggregate_diagnostics(&state.errors.lock().unwrap()) {
+        eprintln!("{}", render_diagnostic(&error, verbose));
     }
+}
+
+/// Collapse diagnostics into one entry per distinct `(category, verbose_path,
+/// verbose_chain)`, summing counts. A `Diagnostic` is defined as "redacted
+/// category, count, optional verbose path/error chain" (see
+/// `plans/v0.1.0-implementation.md`), so N occurrences of the same shape must
+/// render as one line with `count: N`, never N duplicate lines.
+fn aggregate_diagnostics(errors: &[Diagnostic]) -> Vec<Diagnostic> {
+    let mut order: Vec<(&'static str, Option<PathBuf>, Option<String>)> = Vec::new();
+    let mut totals: HashMap<(&'static str, Option<PathBuf>, Option<String>), usize> =
+        HashMap::new();
+    for error in errors {
+        let key = (
+            error.category,
+            error.verbose_path.clone(),
+            error.verbose_chain.clone(),
+        );
+        if !totals.contains_key(&key) {
+            order.push(key.clone());
+        }
+        *totals.entry(key).or_insert(0) += error.count;
+    }
+    order
+        .into_iter()
+        .map(|key| {
+            let count = totals[&key];
+            Diagnostic {
+                category: key.0,
+                count,
+                verbose_path: key.1,
+                verbose_chain: key.2,
+            }
+        })
+        .collect()
 }
 
 fn render_diagnostic(error: &Diagnostic, verbose: bool) -> String {
@@ -779,7 +813,6 @@ mod tests {
             up: None,
             down: None,
             agent: vec![OsString::from("bad")],
-            since: None,
             list: false,
             json: false,
             verbose: false,

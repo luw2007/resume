@@ -6,11 +6,11 @@
 //! per property, giving deterministic resource bounds while continuously
 //! exercising JSONL, terminal text, Scope paths, durations, and strict config.
 
-use std::{io::Cursor, path::PathBuf, str::FromStr};
+use std::{io::Cursor, path::PathBuf};
 
 use proptest::prelude::*;
 use resume::{
-    cli::{Distance, Since},
+    cli::Distance,
     config::Config,
     jsonl::{Bounds, FileOutcome, read_buffered},
     scope::{DefaultScope, Direction, Scope, WorkspaceCandidate},
@@ -72,28 +72,8 @@ proptest! {
     }
 
     #[test]
-    fn duration_parser_accepts_only_bounded_grammar(value in ".{0,128}") {
-        let parsed = Since::from_str(&value);
-        if let Ok(since) = parsed {
-            match since {
-                Since::All => prop_assert_eq!(value.to_ascii_lowercase(), "all"),
-                Since::Date(date) => prop_assert_eq!(date.len(), 10),
-                Since::Duration(duration) => {
-                    prop_assert!(matches!(duration.as_bytes().last(), Some(b'm' | b'h' | b'd' | b'w')));
-                    prop_assert!(duration[..duration.len() - 1].bytes().all(|byte| byte.is_ascii_digit()));
-                }
-            }
-        }
-    }
-
-    #[test]
     fn strict_config_parser_is_bounded_and_never_panics(value in ".{0,4096}") {
-        let parsed = toml::from_str::<Config>(&value);
-        if let Ok(config) = parsed
-            && let Some(since) = config.since
-        {
-            let _ = Since::from_str(&since);
-        }
+        let _ = toml::from_str::<Config>(&value);
     }
 }
 
