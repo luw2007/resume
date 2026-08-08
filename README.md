@@ -85,7 +85,7 @@ resume --json
 resume /path/to/repo --json -a claude -a codex
 ```
 
-`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
+`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session. Rows use `STATUS AGENT[PROFILE] UPDATED TITLE BRANCH WORKSPACE`; in v0.1.0, `BRANCH` is always the literal `-`, a placeholder for a future feature rather than live Git-branch data. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
 
 ```sh
 resume --json 2>resume.errors | jq '.sessions[] | {agent, id, workspace}'
@@ -97,7 +97,7 @@ The v1 envelope is:
 {"schemaVersion":1,"sessions":[],"errors":[]}
 ```
 
-Session objects contain `agent`, `profile`, `id`, `title`, `workspace`, `support`, `activity`, and `risk`. Error objects contain only `category` and `count`. JSON output contains no message bodies. See [`docs/json-schema.md`](docs/json-schema.md) for the complete schema and serialization notes.
+Session objects contain `agent`, `profile`, `id`, `title`, `workspace`, `support`, `activity`, and `risk`. Error objects contain only `category` and `count`. JSON output never includes a `messages` array or full/raw transcript content. A Session `title` may intentionally contain a bounded, truncated summary excerpt derived from the first user message (or an explicit native title), so treat titles as potentially conversation-derived text. See [`docs/json-schema.md`](docs/json-schema.md) for the complete schema and serialization notes.
 
 ## Configuration
 
@@ -158,8 +158,8 @@ Preview parsing here means read-only extraction and terminal-safe normalization 
 
 - Discovery and Preview do not modify Session files, indexes, databases, mtimes, or directory entries.
 - No telemetry is collected.
-- Message bodies are not logged and are absent from JSON output.
-- Normal diagnostics contain redacted categories and counts. `--verbose` may add source paths and error chains to **stderr**, but still does not log message bodies or sensitive remotes/URLs.
+- Full message bodies and raw transcript content are not logged and are never included as a `messages` array in JSON output. A Session `title` may intentionally include a bounded, truncated excerpt of the first user message.
+- Normal diagnostics contain redacted categories and counts. `--verbose` may add source paths and error chains to **stderr**, but still does not log full message bodies or sensitive remotes/URLs.
 - Preview and list text neutralize terminal control sequences; raw Preview remains terminal-safe.
 - There is no persistent Preview cache and no machine-wide scan.
 
