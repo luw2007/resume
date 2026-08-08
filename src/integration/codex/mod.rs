@@ -462,6 +462,14 @@ pub(crate) fn parse_rollout_records(
     let rollout_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     let meta = match find_session_meta(&read.records) {
+        None if read.malformed_middle > 0
+            || matches!(read.outcome, FileOutcome::IncompleteTail) =>
+        {
+            return Err(invalid(
+                path,
+                "rollout contains malformed JSON and no recognizable session_meta",
+            ));
+        }
         None => return Ok(None),
         Some(meta) => meta,
     };

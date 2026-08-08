@@ -403,6 +403,11 @@ impl ParsedSession {
             },
             None => WorkspaceEvidence::Unknown,
         };
+        let title = match (self.title, self.import) {
+            (Some(title), Some(import)) => Some(format!("{title} [{}]", import.to_display())),
+            (None, Some(import)) => Some(import.to_display()),
+            (title, None) => title,
+        };
         Session {
             key: SessionKey {
                 agent: OsString::from(AGENT),
@@ -411,7 +416,7 @@ impl ParsedSession {
                 native_locator: self.transcript_path.clone().into_os_string(),
             },
             resumable_id: OsString::from(self.id),
-            title: self.title,
+            title,
             workspace: workspace_evidence,
             support: SupportStatus::Supported,
             activity,

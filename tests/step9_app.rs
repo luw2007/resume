@@ -19,6 +19,15 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, p).unwrap();
 }
 fn run(home: &Path, workspace: &Path, args: &[&str]) -> std::process::Output {
+    run_with_env(home, workspace, args, &[])
+}
+
+fn run_with_env(
+    home: &Path,
+    workspace: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &Path)],
+) -> std::process::Output {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
     for agent in ["pi", "claude", "codex", "omp"] {
@@ -28,7 +37,8 @@ fn run(home: &Path, workspace: &Path, args: &[&str]) -> std::process::Output {
     for directory in ["config", "data", "state", "cache"] {
         fs::create_dir_all(xdg.join(directory)).unwrap();
     }
-    Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .current_dir(workspace)
         // Clear the inherited environment so integration tests cannot observe
@@ -44,9 +54,11 @@ fn run(home: &Path, workspace: &Path, args: &[&str]) -> std::process::Output {
         .env("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
         .env("PI_CONFIG_DIR", home.join(".omp"))
         .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
-        .env("CODEX_HOME", home.join(".codex"))
-        .output()
-        .unwrap()
+        .env("CODEX_HOME", home.join(".codex"));
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().unwrap()
 }
 fn line(path: &Path, value: serde_json::Value) {
     let mut file = fs::OpenOptions::new()
@@ -150,6 +162,156 @@ fn no_sessions_is_success_and_invalid_agent_is_usage_error() {
             .code(),
         Some(2)
     );
+}
+
+#[test]
+fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
+    let (tmp, ws) = fixtures();
+    let corrupt = tmp
+        .path()
+        .join(".codex/sessions/2026/01/01/rollout-corrupt.jsonl");
+    fs::write(corrupt, "not-json").unwrap();
+
+    let output = run(tmp.path(), &ws, &["--json", "--agent", "codex"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| { session["id"] == "codex-id" })
+    );
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_invalid_session" })
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("codex_invalid_session"));
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_cross_root_symlink_rejection_is_diagnosed() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let codex_dir = tmp.path().join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let transcript = outside.path().join("evil.jsonl");
+    line(
+        &transcript,
+        serde_json::json!({"type":"session_meta","payload":{"id":"EVIL","cwd":ws}}),
+    );
+    symlink(&transcript, codex_dir.join("rollout-evil.jsonl")).unwrap();
+
+    let output = run(
+        tmp.path(),
+        &ws,
+        &["--verbose", "--json", "--agent", "codex"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["sessions"].as_array().unwrap().is_empty());
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_io" })
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("codex_io"));
+}
+
+#[test]
+fn omp_import_badge_is_visible_without_origin_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let omp_dir = tmp.path().join(".omp/agent");
+    fs::create_dir_all(&omp_dir).unwrap();
+    let transcript = omp_dir.join("import.jsonl");
+    line(
+        &transcript,
+        serde_json::json!({"type":"title","v":1,"title":"Imported Session"}),
+    );
+    line(
+        &transcript,
+        serde_json::json!({"type":"session","version":3,"id":"omp-import","timestamp":1700000000,"cwd":ws}),
+    );
+    line(
+        &transcript,
+        serde_json::json!({"type":"custom","foreign_session_import":{"source_kind":"codex","origin_id":"1234567890abcdef","origin_cwd":"/SECRET/PATH"}}),
+    );
+
+    let output = run_with_env(
+        tmp.path(),
+        &ws,
+        &["--json", "--agent", "omp"],
+        &[("PI_CODING_AGENT_DIR", omp_dir.as_path())],
+    );
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let title = value["sessions"][0]["title"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing title in {value}"));
+    assert!(title.contains("imported from codex origin:12345678"));
+    assert!(!text.contains("1234567890abcdef"));
+    assert!(!text.contains("/SECRET/PATH"));
+}
+
+#[cfg(feature = "codex-sqlite")]
+#[test]
+fn codex_sqlite_precedence_diagnostic_reaches_json_and_stderr() {
+    use rusqlite::Connection;
+
+    let (tmp, ws) = fixtures();
+    let rollout = tmp
+        .path()
+        .join(".codex/sessions/2026/01/01/rollout-test.jsonl");
+    let db = tmp.path().join(".codex/state_5.sqlite");
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            rollout_path TEXT PRIMARY KEY,
+            thread_id TEXT,
+            cwd TEXT,
+            title TEXT,
+            updated_at TEXT,
+            archived INTEGER DEFAULT 0
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions VALUES (?1, 'WRONG-ID', ?2, 'wrong title', NULL, 0)",
+        rusqlite::params![rollout.to_str().unwrap(), ws.to_str().unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let output = run(
+        tmp.path(),
+        &ws,
+        &["--verbose", "--json", "--agent", "codex"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["sessions"][0]["id"], "codex-id");
+    assert_ne!(value["sessions"][0]["title"], "wrong title");
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_sqlite_id_mismatch" })
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("codex_sqlite_id_mismatch"));
 }
 
 #[test]
