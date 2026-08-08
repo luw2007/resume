@@ -24,6 +24,9 @@ resume /path/to/worktree       # derive Scope from another directory
 resume --list                  # stable text listing after discovery completes
 resume --json                  # machine-readable v1 output
 resume -a pi -a codex          # replace the configured agent list
+resume --since 7d              # only Sessions active in the last 7 days
+resume --since 2026-01-01      # only Sessions active on or after a date
+resume --since all             # no time filtering (default)
 ```
 
 The interactive picker receives candidates asynchronously. Late candidates can change Skim's visible rank order, but selection remains attached to an opaque Session identity rather than a row number. Do not rely on exact global display order while loading.
@@ -113,6 +116,7 @@ resume config example
 
 ```toml
 agents = ["codex", "claude", "pi", "omp"]
+since = "all"                    # duration (7d, 2h, 30m, 1w) | YYYY-MM-DD | all
 confirm_always = false
 preview = "hidden"               # hidden | visible
 preview_position = "auto"        # auto | right | bottom
@@ -120,6 +124,8 @@ verbose = false
 ```
 
 A repeatable `-a/--agent <AGENT>` replaces, rather than extends, the configured `agents` list. `--confirm-always` requests confirmation for every Resume. `--no-confirm` suppresses ordinary confirmation but cannot bypass a risk prompt. CLI `--verbose` enables verbose diagnostics.
+
+`--since <duration|date|all>` filters Sessions to those active at or after a cutoff, overriding a configured `since` the same way `--agent` overrides `agents`. A relative duration is `<N>` followed by `m` (minutes), `h` (hours), `d` (days), or `w` (weeks); an absolute cutoff is `YYYY-MM-DD` (UTC midnight); `all` (the default) applies no filtering. The cutoff compares against each Session's best-available activity signal, falling back to the transcript file's own modification time when no other signal is available — this is Discovery-time filtering, not a claim that every agent's own activity timestamp is used.
 
 ## Native Resume boundary
 
