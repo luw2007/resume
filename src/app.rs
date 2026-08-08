@@ -441,19 +441,28 @@ fn discover_codex(scope: &Scope) -> AgentDiscovery {
     let Some(root) = codex::effective_root() else {
         return AgentDiscovery::failed("codex_root_unavailable");
     };
-    let outcomes = codex::discover_with_filter_enriched(&root, &Bounds::default(), |parsed| {
-        parsed.cwd.as_ref().is_none_or(|cwd| {
-            scope.contains(WorkspaceCandidate {
-                real_path: cwd,
-                git_common_dir: None,
-                exists: cwd.exists(),
+    let (outcomes, sqlite_outcome) =
+        codex::discover_with_filter_enriched(&root, &Bounds::default(), |parsed| {
+            parsed.cwd.as_ref().is_none_or(|cwd| {
+                scope.contains(WorkspaceCandidate {
+                    real_path: cwd,
+                    git_common_dir: None,
+                    exists: cwd.exists(),
+                })
             })
-        })
-    });
-    let mut errors = Vec::new();
+        });
+    let mut errors = match sqlite_outcome {
+        codex::sqlite::SqliteOutcome::Used { diagnostics, .. } => diagnostics,
+        codex::sqlite::SqliteOutcome::Degraded { category } => vec![Diagnostic {
+            category,
+            count: 1,
+            verbose_path: Some(codex::sqlite::state_db_path(&root)),
+            verbose_chain: Some("SQLite enrichment degraded; using authoritative JSONL".into()),
+        }],
+        codex::sqlite::SqliteOutcome::Absent => Vec::new(),
+    };
     let default_root = home().unwrap_or_default().join(".codex");
     let records = outcomes
-        .0
         .into_iter()
         .filter_map(|outcome| match outcome {
             codex::DiscoveredSession::Session(mut session) => {
