@@ -39,6 +39,19 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(&exe);
     cmd.arg(sub);
     cmd.env("TERM", "xterm-256color");
+    // The spike uses only in-memory candidates. Point every conventional
+    // agent/config root at a deliberately nonexistent fixture path so a
+    // regression can never scan the runner's real HOME or credentials.
+    let isolated = std::env::temp_dir().join(format!("resume-pty-{}", std::process::id()));
+    cmd.env("HOME", &isolated);
+    cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
+    cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
+    cmd.env("XDG_STATE_HOME", isolated.join("xdg-state"));
+    cmd.env("XDG_CACHE_HOME", isolated.join("xdg-cache"));
+    cmd.env("PI_CODING_AGENT_DIR", isolated.join("pi"));
+    cmd.env("PI_CONFIG_DIR", isolated.join("omp"));
+    cmd.env("CLAUDE_CONFIG_DIR", isolated.join("claude"));
+    cmd.env("CODEX_HOME", isolated.join("codex"));
     cmd
 }
 
@@ -546,6 +559,16 @@ fn works_with_redirected_stdin() {
     cmd.arg("-c");
     cmd.arg(&shell_cmd);
     cmd.env("TERM", "xterm-256color");
+    let isolated = std::env::temp_dir().join(format!("resume-pty-redirect-{}", std::process::id()));
+    cmd.env("HOME", &isolated);
+    cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
+    cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
+    cmd.env("XDG_STATE_HOME", isolated.join("xdg-state"));
+    cmd.env("XDG_CACHE_HOME", isolated.join("xdg-cache"));
+    cmd.env("PI_CODING_AGENT_DIR", isolated.join("pi"));
+    cmd.env("PI_CONFIG_DIR", isolated.join("omp"));
+    cmd.env("CLAUDE_CONFIG_DIR", isolated.join("claude"));
+    cmd.env("CODEX_HOME", isolated.join("codex"));
     let mut child = pair.slave.spawn_command(cmd).expect("spawn");
     let mut writer = pair.master.take_writer().expect("writer");
     let mut reader = pair.master.try_clone_reader().expect("reader");

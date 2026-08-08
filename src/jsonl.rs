@@ -293,7 +293,12 @@ fn nesting_depth(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{
+        io::Write,
+        sync::{Arc, Barrier},
+        thread,
+        time::Duration,
+    };
 
     fn write_temp(content: &[u8]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -383,6 +388,57 @@ mod tests {
         let result = read_file(&path, &Bounds::default()).unwrap();
         assert_eq!(result.records.len(), 2);
         assert_eq!(result.outcome, FileOutcome::IncompleteTail);
+    }
+
+    #[test]
+    fn concurrent_writer_append_is_read_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.jsonl");
+        fs::write(&path, b"{\"seq\":0}\n").unwrap();
+        let start = Arc::new(Barrier::new(2));
+        let writer_path = path.clone();
+        let writer_start = Arc::clone(&start);
+        let writer = thread::spawn(move || {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(writer_path)
+                .unwrap();
+            writer_start.wait();
+            for seq in 1..=32 {
+                writeln!(file, "{{\"seq\":{seq}}}").unwrap();
+                file.flush().unwrap();
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        start.wait();
+
+        // Re-open on every read, as discovery does. Every snapshot must retain
+        // the complete prefix and may only classify the concurrently-written
+        // tail as incomplete; it must never invent or reorder records.
+        for _ in 0..32 {
+            let result = read_file(
+                &path,
+                &Bounds {
+                    max_line_bytes: 1024,
+                    max_file_bytes: 64 * 1024,
+                    max_records: 64,
+                    max_nesting: 8,
+                },
+            )
+            .unwrap();
+            let sequences: Vec<u64> = result
+                .records
+                .iter()
+                .filter_map(|record| record.get("seq").and_then(Value::as_u64))
+                .collect();
+            assert_eq!(sequences.first(), Some(&0));
+            assert!(sequences.windows(2).all(|pair| pair[1] == pair[0] + 1));
+            thread::sleep(Duration::from_millis(1));
+        }
+        writer.join().unwrap();
+        let final_read = read_file(&path, &Bounds::default()).unwrap();
+        assert_eq!(final_read.record_count(), 33);
+        assert_eq!(final_read.outcome, FileOutcome::Complete);
     }
 
     #[test]
