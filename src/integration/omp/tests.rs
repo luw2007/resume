@@ -116,6 +116,7 @@ impl Fixture {
     fn roots_default(&self) -> EffectiveRoots {
         EffectiveRoots {
             config_root: self.base_root.clone(),
+            config_root_overridden: false,
             agent_root: self.default_agent_root.clone(),
             session_root: self.default_agent_root.clone(),
             custom_session_root: false,
@@ -127,6 +128,7 @@ impl Fixture {
         let agent = self.profile_agent_root(name);
         EffectiveRoots {
             config_root: self.base_root.clone(),
+            config_root_overridden: false,
             agent_root: agent.clone(),
             session_root: agent,
             custom_session_root: false,
@@ -143,6 +145,7 @@ impl Fixture {
         };
         EffectiveRoots {
             config_root: self.base_root.clone(),
+            config_root_overridden: false,
             agent_root,
             session_root,
             custom_session_root: true,
@@ -1284,7 +1287,7 @@ fn resume_spec_custom_session_dir_preserved() {
 }
 
 #[test]
-fn resume_spec_preserves_config_root_env() {
+fn resume_spec_omits_default_config_root_env() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
@@ -1297,12 +1300,34 @@ fn resume_spec_preserves_config_root_env() {
     );
     let outcome = fx.discover(fx.roots_default());
     let spec = outcome.parsed[0].resume_spec(&fx.roots_default());
-    let env_map: std::collections::HashMap<OsString, OsString> = spec.env.into_iter().collect();
+    assert!(spec.env.is_empty());
+}
+
+#[test]
+fn resume_spec_preserves_explicit_config_root_env() {
+    let fx = Fixture::new();
+    let roots = omp::resolve(&ResolutionInputs {
+        config_dir_env: Some(fx.base_root.clone()),
+        ..fx.inputs_default()
+    })
+    .unwrap();
+    fx.write(
+        &roots.agent_root,
+        "ws",
+        "e.jsonl",
+        &[
+            header_v3("e", &fx.workspace, 1700000000),
+            user_message_string("x", 1700000010),
+        ],
+    );
+    let outcome = fx.discover(roots.clone());
+    let spec = outcome.parsed[0].resume_spec(&roots);
     assert_eq!(
-        env_map
-            .get(OsString::from("PI_CONFIG_DIR").as_os_str())
-            .map(PathBuf::from),
-        Some(fx.base_root.clone())
+        spec.env,
+        vec![(
+            OsString::from("PI_CONFIG_DIR"),
+            fx.base_root.clone().into_os_string(),
+        )]
     );
 }
 
@@ -1618,12 +1643,8 @@ fn fake_omp_captures_exact_cwd_argv_for_default_profile() {
     );
     assert_eq!(fields[1], "--resume");
     assert_eq!(fields[2], "exec");
-    // PI_CONFIG_DIR preserved.
-    assert!(
-        fields.iter().any(
-            |f| f.starts_with("PI_CONFIG_DIR=") && f.contains(&*fx.base_root.to_string_lossy())
-        )
-    );
+    // No default PI_CONFIG_DIR override is injected.
+    assert!(fields.iter().any(|f| f == "PI_CONFIG_DIR="));
 }
 
 #[cfg(unix)]
