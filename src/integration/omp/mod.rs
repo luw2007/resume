@@ -70,7 +70,7 @@ use serde_json::Value;
 use crate::{
     jsonl::{self, Bounds, FileOutcome, ReadResult},
     message::{self, UserMessage},
-    scope::{self, Scope, WorkspaceCandidate},
+    scope::{self, Scope},
     session::{
         ActivityStatus, ResumeSpec, RiskStatus, Session, SessionKey, SupportStatus,
         WorkspaceEvidence,
@@ -528,13 +528,7 @@ pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
         // Scope filtering via authoritative header cwd.
         match &parsed.workspace {
             Some(workspace) => {
-                let real = scope::canonical_workspace(workspace);
-                let candidate = WorkspaceCandidate {
-                    real_path: real.as_deref().unwrap_or(workspace),
-                    git_common_dir: None,
-                    exists: real.is_some(),
-                };
-                if !config.scope.contains(candidate) {
+                if !config.scope.contains_workspace(workspace) {
                     outcome.out_of_scope += 1;
                     continue;
                 }
