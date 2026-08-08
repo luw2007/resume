@@ -177,8 +177,16 @@ mod tests {
 
     #[test]
     fn invalid_distance_and_since_are_usage_errors() {
+        let negative_distance = Cli::try_parse_from(["resume", "--up", "-1"]).unwrap_err();
+        assert_eq!(negative_distance.exit_code(), 2);
+        assert!(
+            negative_distance
+                .to_string()
+                .contains("expected a non-negative integer or 'all'"),
+            "unexpected error: {negative_distance}"
+        );
+
         for argv in [
-            vec!["resume", "--up", "-1"],
             vec!["resume", "--since", "yesterday"],
             vec!["resume", "--since", "-7d"],
             vec!["resume", "--since", "2026-13-40"],
