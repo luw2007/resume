@@ -691,40 +691,61 @@ fn print_list(records: &[CandidateRecord]) {
     }
 }
 fn print_diagnostics(state: &DiscoveryState, verbose: bool) {
-    for error in aggregate_diagnostics(&state.errors.lock().unwrap()) {
+    for error in aggregate_diagnostics(&state.errors.lock().unwrap(), verbose) {
         eprintln!("{}", render_diagnostic(&error, verbose));
     }
 }
 
-/// Collapse diagnostics into one entry per distinct `(category, verbose_path,
-/// verbose_chain)`, summing counts. A `Diagnostic` is defined as "redacted
-/// category, count, optional verbose path/error chain" (see
-/// `plans/v0.1.0-implementation.md`), so N occurrences of the same shape must
-/// render as one line with `count: N`, never N duplicate lines.
-fn aggregate_diagnostics(errors: &[Diagnostic]) -> Vec<Diagnostic> {
-    let mut order: Vec<(&'static str, Option<PathBuf>, Option<String>)> = Vec::new();
-    let mut totals: HashMap<(&'static str, Option<PathBuf>, Option<String>), usize> =
-        HashMap::new();
+/// Collapse diagnostics for stderr rendering. A `Diagnostic` is defined as
+/// "redacted category, count, optional verbose path/error chain" (see
+/// `plans/v0.1.0-implementation.md`): repeated occurrences of the same
+/// problem must render as one line with a summed `count`, never as one
+/// duplicate line per occurrence.
+///
+/// In non-verbose mode, path/chain are never printed (see
+/// [`render_diagnostic`]), so entries are collapsed purely by `category`,
+/// summing every occurrence's count into a single line.
+///
+/// In verbose mode, path/chain carry distinct per-occurrence detail (e.g.
+/// which file was skipped), so entries are collapsed by the full
+/// `(category, verbose_path, verbose_chain)` shape instead, preserving one
+/// line per distinct detail while still merging exact duplicates.
+fn aggregate_diagnostics(errors: &[Diagnostic], verbose: bool) -> Vec<Diagnostic> {
+    if verbose {
+        aggregate_by(errors, |e| {
+            (e.category, e.verbose_path.clone(), e.verbose_chain.clone())
+        })
+    } else {
+        aggregate_by(errors, |e| (e.category, None::<PathBuf>, None::<String>))
+    }
+}
+
+fn aggregate_by<K, F>(errors: &[Diagnostic], key_fn: F) -> Vec<Diagnostic>
+where
+    K: Eq + std::hash::Hash + Clone,
+    F: Fn(&Diagnostic) -> K,
+{
+    let mut order: Vec<K> = Vec::new();
+    let mut totals: HashMap<K, (usize, &Diagnostic)> = HashMap::new();
     for error in errors {
-        let key = (
-            error.category,
-            error.verbose_path.clone(),
-            error.verbose_chain.clone(),
-        );
-        if !totals.contains_key(&key) {
-            order.push(key.clone());
+        let key = key_fn(error);
+        match totals.get_mut(&key) {
+            Some((count, _)) => *count += error.count,
+            None => {
+                order.push(key.clone());
+                totals.insert(key, (error.count, error));
+            }
         }
-        *totals.entry(key).or_insert(0) += error.count;
     }
     order
         .into_iter()
         .map(|key| {
-            let count = totals[&key];
+            let (count, template) = &totals[&key];
             Diagnostic {
-                category: key.0,
-                count,
-                verbose_path: key.1,
-                verbose_chain: key.2,
+                category: template.category,
+                count: *count,
+                verbose_path: template.verbose_path.clone(),
+                verbose_chain: template.verbose_chain.clone(),
             }
         })
         .collect()
@@ -786,6 +807,97 @@ mod tests {
         assert!(item.display.starts_with("READY     omp[work]"));
         assert!(item.search_text.contains("/workspace"));
     }
+    #[test]
+    fn non_verbose_diagnostics_collapse_by_category_summing_counts() {
+        // Reproduces the real-world spam of N distinct-path diagnostics in
+        // the same category (e.g. many `claude_no_session_id` skips) each
+        // rendering as their own duplicate line instead of one aggregated
+        // count, per `Diagnostic`'s "redacted category, count, ..." contract.
+        let errors = vec![
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/one.jsonl")),
+                verbose_chain: Some("no embedded sessionId and no cwd; skipped".into()),
+            },
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/two.jsonl")),
+                verbose_chain: Some("no embedded sessionId and no cwd; skipped".into()),
+            },
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/three.jsonl")),
+                verbose_chain: Some("no embedded sessionId and no cwd; skipped".into()),
+            },
+            Diagnostic {
+                category: "pi_skipped",
+                count: 2,
+                verbose_path: None,
+                verbose_chain: None,
+            },
+        ];
+
+        let collapsed = aggregate_diagnostics(&errors, false);
+        assert_eq!(collapsed.len(), 2, "one line per distinct category");
+        let claude = collapsed
+            .iter()
+            .find(|d| d.category == "claude_no_session_id")
+            .expect("claude category present");
+        assert_eq!(claude.count, 3, "three occurrences summed into one count");
+        let pi = collapsed
+            .iter()
+            .find(|d| d.category == "pi_skipped")
+            .expect("pi category present");
+        assert_eq!(pi.count, 2);
+
+        let rendered: Vec<String> = collapsed
+            .iter()
+            .map(|d| render_diagnostic(d, false))
+            .collect();
+        assert!(rendered.contains(&"resume: claude_no_session_id: 3".to_string()));
+        assert!(rendered.contains(&"resume: pi_skipped: 2".to_string()));
+    }
+
+    #[test]
+    fn verbose_diagnostics_keep_distinct_paths_but_merge_exact_duplicates() {
+        let errors = vec![
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/one.jsonl")),
+                verbose_chain: Some("skipped".into()),
+            },
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/two.jsonl")),
+                verbose_chain: Some("skipped".into()),
+            },
+            // Exact duplicate of the first entry (same category/path/chain).
+            Diagnostic {
+                category: "claude_no_session_id",
+                count: 1,
+                verbose_path: Some(PathBuf::from("/a/one.jsonl")),
+                verbose_chain: Some("skipped".into()),
+            },
+        ];
+
+        let collapsed = aggregate_diagnostics(&errors, true);
+        assert_eq!(
+            collapsed.len(),
+            2,
+            "distinct paths remain separate lines in verbose mode"
+        );
+        let one = collapsed
+            .iter()
+            .find(|d| d.verbose_path.as_deref() == Some(std::path::Path::new("/a/one.jsonl")))
+            .expect("path one present");
+        assert_eq!(one.count, 2, "exact duplicates merged and summed");
+    }
+
     #[test]
     fn verbose_diagnostic_output_is_redacted() {
         let diagnostic = Diagnostic {
