@@ -10,7 +10,7 @@
 //! never produces false negatives.
 
 use std::io::{Read, Write};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,9 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
 
 /// A PTY session with a background reader draining rendered bytes.
 struct PtySession {
+    // macOS can fail `openpty` under a burst of parallel integration tests.
+    // Serialize PTY ownership while still exercising the full interaction.
+    _serial: MutexGuard<'static, ()>,
     writer: Box<dyn Write + Send>,
     #[allow(dead_code)]
     reader: Box<dyn Read + Send>,
@@ -70,7 +73,16 @@ struct PtySession {
     accumulated: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
+fn pty_serial() -> MutexGuard<'static, ()> {
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
+    let serial = pty_serial();
     let pair = native_pty_system()
         .openpty(PtySize {
             rows,
@@ -109,6 +121,7 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
         }
     });
     PtySession {
+        _serial: serial,
         writer,
         reader: Box::new(std::io::empty()),
         child,
@@ -370,6 +383,7 @@ fn resize_does_not_crash() {
     if !pty_available() {
         return;
     }
+    let _serial = pty_serial();
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -541,6 +555,7 @@ fn works_with_redirected_stdin() {
     if !pty_available() {
         return;
     }
+    let _serial = pty_serial();
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
