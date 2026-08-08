@@ -22,7 +22,7 @@ use crate::{
     launch::{self, LaunchEvidence},
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
     runtime::{CancelToken, JOIN_BUDGET, join_with_budget},
-    scope::{DefaultScope, Direction, Scope, WorkspaceCandidate},
+    scope::{DefaultScope, Direction, Scope},
     session::{ActivityStatus, Diagnostic, ResumeSpec, Session, SupportStatus},
     text,
 };
@@ -157,6 +157,9 @@ fn discover_all(
     scope: Arc<Scope>,
 ) -> (Vec<CandidateRecord>, Arc<DiscoveryState>) {
     let state = Arc::new(DiscoveryState::default());
+    if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
+        state.errors.lock().unwrap().push(diagnostic);
+    }
     let records = Arc::new(Mutex::new(Vec::new()));
     let cancel = CancelToken::new();
     let mut handles = Vec::new();
@@ -189,6 +192,9 @@ fn discover_all(
 
 fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
     let state = Arc::new(DiscoveryState::default());
+    if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
+        state.errors.lock().unwrap().push(diagnostic);
+    }
     let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let next_key = Arc::new(AtomicU64::new(1));
@@ -442,13 +448,10 @@ fn discover_codex(scope: &Scope) -> AgentDiscovery {
         return AgentDiscovery::failed("codex_root_unavailable");
     };
     let outcomes = codex::discover_with_filter_enriched(&root, &Bounds::default(), |parsed| {
-        parsed.cwd.as_ref().is_none_or(|cwd| {
-            scope.contains(WorkspaceCandidate {
-                real_path: cwd,
-                git_common_dir: None,
-                exists: cwd.exists(),
-            })
-        })
+        parsed
+            .cwd
+            .as_ref()
+            .is_none_or(|cwd| scope.contains_workspace(cwd))
     });
     let mut errors = Vec::new();
     let default_root = home().unwrap_or_default().join(".codex");
@@ -575,13 +578,17 @@ fn normalize_availability(session: &mut Session) {
     }
 }
 fn in_scope(scope: &Scope, session: &Session) -> bool {
-    session.workspace.workspace().is_none_or(|workspace| {
-        let canonical = workspace.canonicalize().ok();
-        scope.contains(WorkspaceCandidate {
-            real_path: canonical.as_deref().unwrap_or(workspace),
-            git_common_dir: None,
-            exists: canonical.is_some(),
-        })
+    session
+        .workspace
+        .workspace()
+        .is_none_or(|workspace| scope.contains_workspace(workspace))
+}
+fn scope_warning_diagnostic(warning: Option<String>) -> Option<Diagnostic> {
+    warning.map(|warning| Diagnostic {
+        category: "git_scope_discovery_failed",
+        count: 1,
+        verbose_path: None,
+        verbose_chain: Some(warning),
     })
 }
 fn home() -> Option<PathBuf> {
@@ -972,6 +979,23 @@ mod tests {
         assert!(!rendered.contains("github.com"));
         assert!(rendered.contains("[redacted-url]"));
         assert!(rendered.contains("[redacted-remote]"));
+    }
+
+    #[test]
+    fn git_scope_failure_becomes_a_visible_diagnostic() {
+        let warning = scope_warning_diagnostic(Some("git executable unavailable".into()))
+            .expect("Git failure should be surfaced");
+
+        assert_eq!(warning.category, "git_scope_discovery_failed");
+        assert_eq!(warning.count, 1);
+        assert_eq!(
+            render_diagnostic(&warning, false),
+            "resume: git_scope_discovery_failed: 1"
+        );
+        assert!(
+            render_diagnostic(&warning, true).contains("git executable unavailable"),
+            "verbose diagnostics should explain the Git failure"
+        );
     }
 
     #[test]
