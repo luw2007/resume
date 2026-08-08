@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Isolate agent and XDG roots
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/resume-ci-home"
+          mkdir -p "$root"/{home,xdg-config,xdg-data,xdg-state,xdg-cache,pi,omp,claude,codex,bin}
+          {
+            echo "HOME=$root/home"
+            echo "XDG_CONFIG_HOME=$root/xdg-config"
+            echo "XDG_DATA_HOME=$root/xdg-data"
+            echo "XDG_STATE_HOME=$root/xdg-state"
+            echo "XDG_CACHE_HOME=$root/xdg-cache"
+            echo "PI_CODING_AGENT_DIR=$root/pi"
+            echo "PI_CODING_AGENT_SESSION_DIR=$root/pi/sessions"
+            echo "PI_CONFIG_DIR=$root/omp"
+            echo "CLAUDE_CONFIG_DIR=$root/claude"
+            echo "CODEX_HOME=$root/codex"
+          } >> "$GITHUB_ENV"
+          for agent in pi claude codex omp; do
+            printf '#!/bin/sh\nexit 0\n' > "$root/bin/$agent"
+            chmod +x "$root/bin/$agent"
+          done
+          echo "$root/bin" >> "$GITHUB_PATH"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-features --locked
+
+  msrv:
+    name: Rust 1.91 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - run: cargo build --all-features --locked
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans advisories sources
+
+  # Periodic and release artifact-build scaffolding. Pull requests avoid the
+  # expensive cross matrix; workflow_dispatch can exercise it before release.
+  target-builds:
+    name: Target ${{ matrix.target }}
+    if: github.event_name == 'schedule' || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            command: cargo build --release --locked --all-features --target aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+            command: cargo build --release --locked --all-features --target x86_64-apple-darwin
+          # `rusqlite` uses bundled libsqlite3-sys, which invokes a C compiler.
+          # cargo-zigbuild supplies the audited cross C toolchain and musl libc;
+          # keeping `bundled` means no host SQLite or OpenSSL is linked.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            command: cargo zigbuild --release --locked --all-features --target aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            command: cargo zigbuild --release --locked --all-features --target x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        uses: goto-bus-stop/setup-zig@v2
+      - if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --locked
+      - run: ${{ matrix.command }}

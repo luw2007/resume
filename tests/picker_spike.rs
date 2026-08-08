@@ -10,7 +10,7 @@
 //! never produces false negatives.
 
 use std::io::{Read, Write};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,11 +39,28 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(&exe);
     cmd.arg(sub);
     cmd.env("TERM", "xterm-256color");
+    // The spike uses only in-memory candidates. Point every conventional
+    // agent/config root at a deliberately nonexistent fixture path so a
+    // regression can never scan the runner's real HOME or credentials.
+    let isolated = std::env::temp_dir().join(format!("resume-pty-{}", std::process::id()));
+    std::fs::create_dir_all(&isolated).expect("create isolated PTY home");
+    cmd.env("HOME", &isolated);
+    cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
+    cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
+    cmd.env("XDG_STATE_HOME", isolated.join("xdg-state"));
+    cmd.env("XDG_CACHE_HOME", isolated.join("xdg-cache"));
+    cmd.env("PI_CODING_AGENT_DIR", isolated.join("pi"));
+    cmd.env("PI_CONFIG_DIR", isolated.join("omp"));
+    cmd.env("CLAUDE_CONFIG_DIR", isolated.join("claude"));
+    cmd.env("CODEX_HOME", isolated.join("codex"));
     cmd
 }
 
 /// A PTY session with a background reader draining rendered bytes.
 struct PtySession {
+    // macOS can fail `openpty` under a burst of parallel integration tests.
+    // Serialize PTY ownership while still exercising the full interaction.
+    _serial: MutexGuard<'static, ()>,
     writer: Box<dyn Write + Send>,
     #[allow(dead_code)]
     reader: Box<dyn Read + Send>,
@@ -56,7 +73,16 @@ struct PtySession {
     accumulated: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
+fn pty_serial() -> MutexGuard<'static, ()> {
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
+    let serial = pty_serial();
     let pair = native_pty_system()
         .openpty(PtySize {
             rows,
@@ -95,6 +121,7 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
         }
     });
     PtySession {
+        _serial: serial,
         writer,
         reader: Box::new(std::io::empty()),
         child,
@@ -356,6 +383,7 @@ fn resize_does_not_crash() {
     if !pty_available() {
         return;
     }
+    let _serial = pty_serial();
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -527,6 +555,7 @@ fn works_with_redirected_stdin() {
     if !pty_available() {
         return;
     }
+    let _serial = pty_serial();
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -546,6 +575,17 @@ fn works_with_redirected_stdin() {
     cmd.arg("-c");
     cmd.arg(&shell_cmd);
     cmd.env("TERM", "xterm-256color");
+    let isolated = std::env::temp_dir().join(format!("resume-pty-redirect-{}", std::process::id()));
+    std::fs::create_dir_all(&isolated).expect("create isolated redirected-stdin home");
+    cmd.env("HOME", &isolated);
+    cmd.env("XDG_CONFIG_HOME", isolated.join("xdg-config"));
+    cmd.env("XDG_DATA_HOME", isolated.join("xdg-data"));
+    cmd.env("XDG_STATE_HOME", isolated.join("xdg-state"));
+    cmd.env("XDG_CACHE_HOME", isolated.join("xdg-cache"));
+    cmd.env("PI_CODING_AGENT_DIR", isolated.join("pi"));
+    cmd.env("PI_CONFIG_DIR", isolated.join("omp"));
+    cmd.env("CLAUDE_CONFIG_DIR", isolated.join("claude"));
+    cmd.env("CODEX_HOME", isolated.join("codex"));
     let mut child = pair.slave.spawn_command(cmd).expect("spawn");
     let mut writer = pair.master.take_writer().expect("writer");
     let mut reader = pair.master.try_clone_reader().expect("reader");

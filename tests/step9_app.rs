@@ -24,16 +24,27 @@ fn run(home: &Path, workspace: &Path, args: &[&str]) -> std::process::Output {
     for agent in ["pi", "claude", "codex", "omp"] {
         executable(&bin.join(agent), "#!/bin/sh\nexit 0\n");
     }
+    let xdg = home.join("xdg");
+    for directory in ["config", "data", "state", "cache"] {
+        fs::create_dir_all(xdg.join(directory)).unwrap();
+    }
     Command::new(binary())
         .args(args)
         .current_dir(workspace)
+        // Clear the inherited environment so integration tests cannot observe
+        // runner credentials, agent roots, config, or executable search paths.
+        .env_clear()
         .env("HOME", home)
         .env("PATH", &bin)
-        .env_remove("PI_CODING_AGENT_DIR")
-        .env_remove("PI_CODING_AGENT_SESSION_DIR")
-        .env_remove("CLAUDE_CONFIG_DIR")
-        .env_remove("CODEX_HOME")
-        .env_remove("PI_CONFIG_DIR")
+        .env("TERM", "dumb")
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_STATE_HOME", xdg.join("state"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .env("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
+        .env("PI_CONFIG_DIR", home.join(".omp"))
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"))
         .output()
         .unwrap()
 }
