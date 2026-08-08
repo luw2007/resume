@@ -155,6 +155,58 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+impl Cli {
+    /// Whether any Session-query option or bare positional `DIRECTORY` was
+    /// supplied. `config example` and `completions` must reject these: they
+    /// dispatch before config/Scope/discovery ever run, so a query option
+    /// would be silently ignored rather than honored, which the design
+    /// documents as an error rather than a silent no-op.
+    fn has_session_query_options(&self) -> bool {
+        self.directory.is_some()
+            || self.up.is_some()
+            || self.down.is_some()
+            || !self.agent.is_empty()
+            || self.since.is_some()
+            || self.list
+            || self.json
+            || self.verbose
+            || self.config.is_some()
+            || self.confirm_always
+            || self.no_confirm
+    }
+
+    /// Reject argument combinations that are individually valid but
+    /// meaningless together, per `docs/product-design.md` Â§7: `--list`
+    /// (with or without `--json`) never opens a confirmation prompt, so
+    /// `--confirm-always`/`--no-confirm` alongside it is a silent no-op
+    /// rather than an honored setting; `config example` and `completions`
+    /// dispatch before Scope/discovery, so any Session-query option
+    /// alongside them would likewise be silently ignored.
+    pub fn validate(&self) -> Result<(), clap::Error> {
+        if (self.list || self.json) && (self.confirm_always || self.no_confirm) {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--confirm-always/--no-confirm have no effect with --list/--json and cannot be combined with them",
+            ));
+        }
+        match &self.command {
+            Some(Command::Config(_)) if self.has_session_query_options() => {
+                Err(Cli::command().error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "`config example` does not scan Sessions and cannot be combined with Session-query options",
+                ))
+            }
+            Some(Command::Completions { .. }) if self.has_session_query_options() => {
+                Err(Cli::command().error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "`completions` does not scan Sessions and cannot be combined with Session-query options",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn command() -> clap::Command {
     Cli::command()
 }
@@ -288,5 +340,65 @@ mod tests {
                 .command,
             Some(Command::Completions { shell: Shell::Fish })
         ));
+    }
+
+    /// `docs/product-design.md` Â§7: "list mode rejects confirmation
+    /// options". `--list`/`--json` never open a confirmation prompt, so
+    /// `--confirm-always`/`--no-confirm` alongside either must be a usage
+    /// error (exit 2) rather than a silently-ignored no-op.
+    #[test]
+    fn list_or_json_with_confirmation_options_is_usage_error() {
+        for argv in [
+            vec!["resume", "--list", "--confirm-always"],
+            vec!["resume", "--list", "--no-confirm"],
+            vec!["resume", "--json", "--confirm-always"],
+            vec!["resume", "--json", "--no-confirm"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap();
+            let error = cli.validate().unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    /// `docs/product-design.md` Â§7: "`config example` and `completions`
+    /// reject Session-query options" because both subcommands dispatch
+    /// before config/Scope/discovery ever run, so a query option would be
+    /// silently ignored rather than honored.
+    #[test]
+    fn config_and_completions_reject_session_query_options() {
+        for argv in [
+            vec!["resume", "--up", "1", "config", "example"],
+            vec!["resume", "--down", "2", "config", "example"],
+            vec!["resume", "-a", "codex", "config", "example"],
+            vec!["resume", "--since", "7d", "config", "example"],
+            vec!["resume", "--verbose", "config", "example"],
+            vec!["resume", "/tmp", "config", "example"],
+            vec!["resume", "-a", "codex", "completions", "bash"],
+            vec!["resume", "--up", "1", "completions", "zsh"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap();
+            let error = cli.validate().unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    /// Plain `config example` / `completions` (no Session-query options) and
+    /// ordinary `--list`/`--json` (no confirmation options) remain valid;
+    /// `validate` must not reject sessions-query-free or confirmation-free
+    /// combinations.
+    #[test]
+    fn validate_accepts_ordinary_combinations() {
+        for argv in [
+            vec!["resume", "config", "example"],
+            vec!["resume", "completions", "bash"],
+            vec!["resume", "--list"],
+            vec!["resume", "--json"],
+            vec!["resume", "--list", "--json"],
+            vec!["resume", "--up", "1"],
+            vec!["resume", "--confirm-always"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap();
+            assert!(cli.validate().is_ok(), "{argv:?}");
+        }
     }
 }

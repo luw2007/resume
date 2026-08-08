@@ -616,6 +616,30 @@ fn count_errors(category: &'static str, count: usize) -> Vec<Diagnostic> {
     }
 }
 
+/// Title/Workspace column budget, per `docs/product-design.md` Â§3: "at
+/// most 60 columns on a wide terminal and at least 16 columns in the compact
+/// layout". Derived from the controlling terminal width when one is
+/// available (interactive picker, or `--list` run at a real TTY); falls back
+/// to a fixed mid-range default when no TTY can be queried (redirected
+/// stdout, pipes, CI), so scripted `--list` output stays stable.
+const TITLE_WIDTH_MIN: usize = 16;
+const TITLE_WIDTH_MAX: usize = 60;
+const TITLE_WIDTH_DEFAULT: usize = 48;
+
+fn title_column_width() -> usize {
+    // Fixed-width columns before TITLE: `STATUS(9) AGENT(18) UPDATED(10)` plus
+    // three separating spaces, then TITLE, then " - " and WORKSPACE sharing
+    // the remaining budget evenly with TITLE.
+    const LEADING_COLUMNS: usize = 9 + 1 + 18 + 1 + 10 + 1;
+    match crate::picker::tty_size() {
+        Some((width, _)) if width > LEADING_COLUMNS => {
+            let remaining = width - LEADING_COLUMNS;
+            (remaining / 2).clamp(TITLE_WIDTH_MIN, TITLE_WIDTH_MAX)
+        }
+        _ => TITLE_WIDTH_DEFAULT,
+    }
+}
+
 fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
     let agent = agent_label(session);
     let status = status_label(session);
@@ -626,14 +650,15 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         .workspace()
         .map_or_else(|| "<missing>".into(), |p| p.display().to_string());
     let branch = "-";
+    let column_width = title_column_width();
     let display = format!(
         "{:<9} {:<18} {:<10} {} {} {}",
         status,
         agent,
         updated,
-        text::truncate_to_width(title, 48),
+        text::truncate_to_width(title, column_width),
         branch,
-        text::truncate_to_width(&workspace, 48)
+        text::truncate_to_width(&workspace, column_width)
     );
     let search_text = text::normalize(
         &format!(
@@ -878,6 +903,24 @@ mod tests {
         let item = picker_candidate(CandidateKey(1), &session);
         assert!(item.display.starts_with("READY     omp[work]"));
         assert!(item.search_text.contains("/workspace"));
+    }
+
+    /// `docs/product-design.md` Â§3: "Title allocation is at most 60
+    /// columns on a wide terminal and at least 16 columns in the compact
+    /// layout". `title_column_width` must stay within `[16, 60]` for every
+    /// plausible terminal width, and fall back to a stable default with no
+    /// controlling terminal (the common case for `--list`/`--json` in tests,
+    /// CI, and redirected/piped invocations).
+    #[test]
+    fn title_column_width_stays_within_documented_bounds() {
+        let width = title_column_width();
+        assert!(
+            (TITLE_WIDTH_MIN..=TITLE_WIDTH_MAX).contains(&width),
+            "width {width} outside [{TITLE_WIDTH_MIN}, {TITLE_WIDTH_MAX}]"
+        );
+        // No controlling terminal in the test harness: falls back to the
+        // fixed default rather than clamping to an arbitrary bound.
+        assert_eq!(width, TITLE_WIDTH_DEFAULT);
     }
     #[test]
     fn non_verbose_diagnostics_collapse_by_category_summing_counts() {

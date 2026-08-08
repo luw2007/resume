@@ -6,6 +6,9 @@ use resume::cli::{Cli, Command, ConfigCommand, Shell};
 
 fn main() {
     let cli = Cli::parse();
+    if let Err(error) = cli.validate() {
+        error.exit();
+    }
     match &cli.command {
         Some(Command::Config(config)) => match config.command {
             ConfigCommand::Example => print!("{}", resume::cli::config_example()),
