@@ -175,12 +175,20 @@ fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
     let output = run(tmp.path(), &ws, &["--json", "--agent", "codex"]);
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(value["sessions"].as_array().unwrap().iter().any(|session| {
-        session["id"] == "codex-id"
-    }));
-    assert!(value["errors"].as_array().unwrap().iter().any(|error| {
-        error["category"] == "codex_invalid_session"
-    }));
+    assert!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| { session["id"] == "codex-id" })
+    );
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_invalid_session" })
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("codex_invalid_session"));
 }
 
@@ -202,13 +210,21 @@ fn codex_cross_root_symlink_rejection_is_diagnosed() {
     );
     symlink(&transcript, codex_dir.join("rollout-evil.jsonl")).unwrap();
 
-    let output = run(tmp.path(), &ws, &["--verbose", "--json", "--agent", "codex"]);
+    let output = run(
+        tmp.path(),
+        &ws,
+        &["--verbose", "--json", "--agent", "codex"],
+    );
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["sessions"].as_array().unwrap().is_empty());
-    assert!(value["errors"].as_array().unwrap().iter().any(|error| {
-        error["category"] == "codex_io"
-    }));
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_io" })
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("codex_io"));
 }
 
@@ -233,11 +249,18 @@ fn omp_import_badge_is_visible_without_origin_secrets() {
         serde_json::json!({"type":"custom","foreign_session_import":{"source_kind":"codex","origin_id":"1234567890abcdef","origin_cwd":"/SECRET/PATH"}}),
     );
 
-    let output = run(tmp.path(), &ws, &["--json", "--agent", "omp"]);
+    let output = run_with_env(
+        tmp.path(),
+        &ws,
+        &["--json", "--agent", "omp"],
+        &[("PI_CODING_AGENT_DIR", omp_dir.as_path())],
+    );
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let title = value["sessions"][0]["title"].as_str().unwrap();
+    let title = value["sessions"][0]["title"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing title in {value}"));
     assert!(title.contains("imported from codex origin:12345678"));
     assert!(!text.contains("1234567890abcdef"));
     assert!(!text.contains("/SECRET/PATH"));
@@ -281,9 +304,13 @@ fn codex_sqlite_precedence_diagnostic_reaches_json_and_stderr() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["sessions"][0]["id"], "codex-id");
     assert_ne!(value["sessions"][0]["title"], "wrong title");
-    assert!(value["errors"].as_array().unwrap().iter().any(|error| {
-        error["category"] == "codex_sqlite_id_mismatch"
-    }));
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["category"] == "codex_sqlite_id_mismatch" })
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("codex_sqlite_id_mismatch"));
 }
 

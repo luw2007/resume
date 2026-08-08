@@ -786,6 +786,17 @@ fn import_creates_safe_badge_and_keeps_new_omp_id() {
     assert!(display.contains("imported from codex"));
     assert!(display.contains("origin:codex-or"));
     assert!(!display.contains("codex-origin-id-1234"));
+
+    let session = parsed.clone().into_session(
+        &fx.roots_default(),
+        crate::session::RiskStatus::Normal,
+        crate::session::ActivityStatus::Unknown,
+    );
+    let title = session.title.expect("safe import badge is user-visible");
+    assert!(title.contains("Imported Session"));
+    assert!(title.contains("imported from codex origin:codex-or"));
+    assert!(!title.contains("codex-origin-id-1234"));
+    assert!(!title.contains(origin_cwd.to_str().unwrap()));
 }
 
 #[test]
