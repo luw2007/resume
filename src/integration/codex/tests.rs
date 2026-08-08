@@ -168,7 +168,10 @@ fn symlinked_rollout_inside_effective_root_is_read() {
         home.path(),
         "inside-target.data",
         &[
-            session_meta("inside-link", workspace.canonicalize().unwrap().to_str().unwrap()),
+            session_meta(
+                "inside-link",
+                workspace.canonicalize().unwrap().to_str().unwrap(),
+            ),
             event_msg_user("followed safely"),
         ],
     );
@@ -177,11 +180,18 @@ fn symlinked_rollout_inside_effective_root_is_read() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
     let outcomes = discover_outcomes(home.path());
-    let sessions: Vec<_> = outcomes.iter().filter_map(DiscoveredSession::session).collect();
+    let sessions: Vec<_> = outcomes
+        .iter()
+        .filter_map(DiscoveredSession::session)
+        .collect();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].resumable_id.to_str(), Some("inside-link"));
     assert_eq!(sessions[0].title.as_deref(), Some("followed safely"));
-    assert!(!outcomes.iter().any(|outcome| matches!(outcome, DiscoveredSession::Error { .. })));
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, DiscoveredSession::Error { .. }))
+    );
 }
 
 #[cfg(unix)]
@@ -195,25 +205,32 @@ fn symlinked_rollout_outside_effective_root_is_rejected_with_error() {
         outside.path(),
         "foreign.data",
         &[
-            session_meta("outside-link", workspace.canonicalize().unwrap().to_str().unwrap()),
+            session_meta(
+                "outside-link",
+                workspace.canonicalize().unwrap().to_str().unwrap(),
+            ),
             event_msg_user("must not leak"),
         ],
     );
-    let link = home.path().join("sessions/2026/08/07/rollout-outside.jsonl");
+    let link = home
+        .path()
+        .join("sessions/2026/08/07/rollout-outside.jsonl");
     fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
     let outcomes = discover_outcomes(home.path());
     assert!(!outcomes.iter().any(|outcome| outcome.session().is_some()));
-    assert!(outcomes.iter().any(|outcome| match outcome {
-        DiscoveredSession::Error {
-            error: IntegrationError::Io { diagnostic, .. },
-            ..
-        } => diagnostic
-            .verbose_chain
-            .as_deref()
-            .is_some_and(|chain| chain.contains("outside effective root")),
-        DiscoveredSession::Error { .. } | DiscoveredSession::Session(_) => false,
+    assert!(outcomes.iter().any(|outcome| {
+        match outcome {
+            DiscoveredSession::Error {
+                error: IntegrationError::Io { diagnostic, .. },
+                ..
+            } => diagnostic
+                .verbose_chain
+                .as_deref()
+                .is_some_and(|chain| chain.contains("outside effective root")),
+            DiscoveredSession::Error { .. } | DiscoveredSession::Session(_) => false,
+        }
     }));
 }
 

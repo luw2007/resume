@@ -437,14 +437,16 @@ pub fn parse_rollout_file(
     effective_root: &Path,
     bounds: &Bounds,
 ) -> Result<Option<ParsedSession>, IntegrationError> {
-    let read = jsonl::read_file_confined(path, effective_root, bounds).map_err(|source| IntegrationError::Io {
-        diagnostic: crate::session::Diagnostic {
-            category: "codex_io",
-            count: 1,
-            verbose_path: Some(path.to_path_buf()),
-            verbose_chain: Some(source.to_string()),
-        },
-        source,
+    let read = jsonl::read_file_confined(path, effective_root, bounds).map_err(|source| {
+        IntegrationError::Io {
+            diagnostic: crate::session::Diagnostic {
+                category: "codex_io",
+                count: 1,
+                verbose_path: Some(path.to_path_buf()),
+                verbose_chain: Some(source.to_string()),
+            },
+            source,
+        }
     })?;
     parse_rollout_records(path, &read)
 }
