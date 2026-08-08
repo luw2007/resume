@@ -45,8 +45,8 @@
 //!
 //! Default: `omp --resume <id>`. Named profile:
 //! `omp --profile <name> --resume <id>`. `--session-dir <root>` is added when
-//! discovery used it, and the process runs from the header `cwd`. A nondefault
-//! base (`PI_CONFIG_DIR`) is preserved through the environment.
+//! discovery used it, and the process runs from the header `cwd`. An explicit
+//! `PI_CONFIG_DIR` override is preserved through the environment.
 //!
 //! Terminal breadcrumbs map TTY names to cwd/session path but can be stale and
 //! contain no PID. Active is reported only after correlating a live OMP
@@ -132,12 +132,14 @@ impl ProfileSelection {
 ///
 /// The `agent_root` is where OMP stores Sessions for the selected profile; the
 /// `session_root` is where Session JSONL files live and may be custom. The
-/// `config_root` is the base directory used to preserve `PI_CONFIG_DIR` in the
-/// resume environment.
+/// `config_root` and its provenance determine whether `PI_CONFIG_DIR` must be
+/// preserved in the resume environment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveRoots {
     /// Base config root (`PI_CONFIG_DIR` or `~/.omp`).
     pub config_root: PathBuf,
+    /// Whether `config_root` was selected by an explicit `PI_CONFIG_DIR`.
+    pub config_root_overridden: bool,
     /// Agent root for the selected profile (`<base>/agent` or
     /// `<base>/profiles/<name>/agent`).
     pub agent_root: PathBuf,
@@ -257,6 +259,7 @@ pub fn resolve(inputs: &ResolutionInputs) -> Option<EffectiveRoots> {
     let (session_root, custom_session_root) = session_root(&agent_root, inputs);
     Some(EffectiveRoots {
         config_root,
+        config_root_overridden: inputs.config_dir_env.is_some(),
         agent_root,
         session_root,
         custom_session_root,
@@ -427,8 +430,8 @@ impl ParsedSession {
     /// Build the [`ResumeSpec`]: default `omp --resume <id>`, or
     /// `omp --profile <name> --resume <id>` for a named profile. Adds
     /// `--session-dir <root>` when discovery used a custom root, sets the
-    /// process cwd to the header Workspace, and preserves a nondefault
-    /// `PI_CONFIG_DIR` in the environment. Never uses a shell.
+    /// process cwd to the header Workspace, and preserves an explicit
+    /// `PI_CONFIG_DIR` override in the environment. Never uses a shell.
     pub fn resume_spec(&self, roots: &EffectiveRoots) -> ResumeSpec {
         let mut argv: Vec<OsString> = Vec::with_capacity(6);
         if let ProfileSelection::Named(name) = &roots.profile {
@@ -443,10 +446,8 @@ impl ParsedSession {
         }
         let cwd = self.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
 
-        // Preserve the root environment: propagate PI_CONFIG_DIR only when it
-        // is nondefault (i.e. the config root differs from ~/.omp). For named
-        // profiles we always preserve the config root because profile
-        // resolution depends on it.
+        // Preserve only an explicit root override. Injecting the default root
+        // changes OMP's native resume lookup relative to direct invocation.
         let env = resume_env(roots);
 
         ResumeSpec {
@@ -459,19 +460,17 @@ impl ParsedSession {
 }
 
 /// Build the narrowly scoped environment overrides for an OMP resume.
-/// Propagates a nondefault `PI_CONFIG_DIR`. When the default profile uses an
-/// `XDG_DATA_HOME` override or `PI_CODING_AGENT_DIR`, those are propagated so
-/// OMP resolves the same agent root on resume.
+/// Propagates an explicitly configured `PI_CONFIG_DIR` only. Default root
+/// resolution must remain inherited from the child process environment.
 fn resume_env(roots: &EffectiveRoots) -> Vec<(OsString, OsString)> {
-    // Always propagate PI_CONFIG_DIR if it is not the ~/.omp default. We
-    // cannot know the user's real $HOME from the roots alone for certain, so
-    // we propagate whenever config_root is set (which it always is after
-    // resolve). The caller is expected to start from the current process
-    // environment; this override only narrows to the discovered config root.
-    vec![(
-        OsString::from(ENV_CONFIG_DIR),
-        roots.config_root.clone().into_os_string(),
-    )]
+    if roots.config_root_overridden {
+        vec![(
+            OsString::from(ENV_CONFIG_DIR),
+            roots.config_root.clone().into_os_string(),
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Outcome of discovering OMP sessions in the effective session root.
