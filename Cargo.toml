@@ -3,6 +3,10 @@ name = "resume"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
+description = "Read-only terminal launcher that discovers and resumes local coding-agent sessions."
+repository = "https://github.com/luw2007/resume"
+readme = "README.md"
+authors = ["resume contributors"]
 license = "MIT"
 
 [[example]]
@@ -37,3 +41,7 @@ codex-sqlite = ["dep:rusqlite"]
 portable-pty = "0.9"
 proptest = "1"
 tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1

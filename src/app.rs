@@ -18,13 +18,13 @@ use crate::{
     config::{Config, PreviewMode, PreviewPosition},
     diagnostics::{redact_path, redact_text},
     integration::{claude, codex, omp, pi},
-    jsonl::Bounds,
     launch::{self, LaunchEvidence},
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
+    preview::jsonl::Bounds,
+    preview::text,
     runtime::{CancelToken, JOIN_BUDGET, join_with_budget},
     scope::{DefaultScope, Direction, Scope},
     session::{ActivityStatus, Diagnostic, ResumeSpec, Session, SupportStatus},
-    text,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -82,11 +82,14 @@ pub fn run(cli: Cli) -> i32 {
 
     if cli.list || cli.json {
         let (records, state) = discover_all(&options, scope);
-        print_diagnostics(&state, options.verbose);
         if cli.json {
+            print_diagnostics(&state, options.verbose);
             print_json(&records, &state);
         } else {
             print_list(&records);
+            if options.verbose {
+                print_diagnostics(&state, true);
+            }
         }
         return discovery_exit(&records, &state);
     }
@@ -780,12 +783,20 @@ fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
     );
 }
 fn print_list(records: &[CandidateRecord]) {
+    if let Some(message) = empty_list_message(records) {
+        println!("{message}");
+        return;
+    }
     for record in records {
         println!(
             "{}",
             picker_candidate(CandidateKey(0), &record.session).display
         );
     }
+}
+
+fn empty_list_message(records: &[CandidateRecord]) -> Option<&'static str> {
+    records.is_empty().then_some("No Sessions found in Scope.")
 }
 fn print_diagnostics(state: &DiscoveryState, verbose: bool) {
     for error in aggregate_diagnostics(&state.errors.lock().unwrap(), verbose) {
@@ -881,6 +892,11 @@ mod tests {
     use super::*;
     use crate::session::{RiskStatus, WorkspaceEvidence};
     use std::ffi::OsString;
+    #[test]
+    fn empty_list_has_human_readable_fallback() {
+        assert_eq!(empty_list_message(&[]), Some("No Sessions found in Scope."));
+    }
+
     #[test]
     fn row_priority_and_search_keep_full_fields() {
         let session = Session {
