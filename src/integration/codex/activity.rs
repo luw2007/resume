@@ -1,223 +1,455 @@
 //! Codex activity detection (positive evidence only).
 //!
-//! A Codex session is reported [`ActivityStatus::Active`] only when a live
-//! process whose command name begins with `codex` holds an open file
-//! descriptor on the *exact* rollout file backing that session. Absence of
-//! such evidence is [`ActivityStatus::Unknown`], never `Inactive`: this probe
-//! can fail for reasons that have nothing to do with the session (no `lsof`
-//! on `PATH`, unreadable foreign processes, a hardened kernel), and a missing
-//! signal must never be rendered as a negative one.
-//!
-//! ## One probe per discovery run
-//!
-//! [`probe`] spawns **exactly one** child process for the whole run: `lsof`
-//! is asked for the open files of every Codex process at once, and the result
-//! is indexed into an [`ActivitySnapshot`]. Discovery then answers each
-//! session with a hash lookup, so the number of spawned processes is
-//! independent of how many sessions exist. The snapshot is taken before the
-//! per-agent discovery threads start and shared immutably.
-//!
-//! ## Path identity
-//!
-//! `lsof` reports fully symlink-resolved paths (`/private/tmp/...`) while a
-//! [`ParsedSession`][super::ParsedSession] may carry either the canonical or
-//! the pre-canonical form, because canonicalization there is best effort. The
-//! snapshot therefore indexes each open rollout three ways: by resolved path,
-//! by `(device, inode)`, and by file name. A file-name hit alone is never
-//! enough — it only selects a candidate that is then confirmed by device and
-//! inode, so an ancestor symlink can neither lose nor fabricate evidence.
-//!
-//! ## Failure isolation
-//!
-//! `lsof` exits nonzero when any selected process is unreadable, and also
-//! when nothing matched at all, even though it still prints every readable
-//! row. The exit status is therefore ignored entirely and standard output is
-//! parsed on a best-effort, per-record basis: one unreadable process costs
-//! that process's evidence and a [`Diagnostic`], never the rest of the batch.
-//!
-//! ## Consequence for resume
-//!
-//! An Active session is a risk reason ([`crate::launch::risk_reasons`]), so
-//! resuming one always confirms, including under `--no-confirm`. That is the
-//! intended guard against two clients writing one rollout file, not a
-//! regression: `--no-confirm` has never bypassed risk prompts
-//! (`plans/v0.1.0-implementation.md:362`).
-//!
-//! ## Status
-//!
-//! Signatures only. See `docs/design/codex-active-detection-plan.md` for the
-//! design of record; this module is not yet declared in `mod.rs` and is not
-//! compiled until the module split lands.
+//! One process-first probe indexes rollout files held open by Codex processes.
+//! An exact path or confirmed device/inode match is Active; missing evidence is
+//! Unknown, never Inactive. The immutable snapshot is shared by all discovery
+//! workers, keeping subprocess use constant regardless of session count.
 
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
+    process::Command,
     time::SystemTime,
 };
 
 use crate::session::{ActivityStatus, Diagnostic};
 
-/// External program used to enumerate open file descriptors.
+use super::roots::is_rollout_filename;
+
 pub(crate) const PROBE_PROGRAM: &str = "lsof";
-
-/// Command-name prefix selecting Codex processes. `lsof -c` matches commands
-/// that *begin* with the given characters, so this also selects helper
-/// processes such as `codex-code-mode-host`.
 pub(crate) const CODEX_COMMAND_PREFIX: &str = "codex";
-
-/// Seconds allowed for each `stat`/`lstat`/`readlink` that `lsof` performs,
-/// so a wedged mount cannot stall discovery. `lsof` rejects values below 2.
 pub(crate) const PROBE_STAT_TIMEOUT_SECONDS: &str = "2";
-
-/// `lsof` could not be spawned at all. A missing `lsof` is *not* this case:
-/// an uninstalled tool degrades silently, mirroring an absent SQLite DB.
 pub(crate) const DIAG_PROBE_FAILED: &str = "codex_activity_probe_failed";
-
-/// `lsof` returned usable rows but also reported records it could not read.
 pub(crate) const DIAG_PROBE_PARTIAL: &str = "codex_activity_probe_partial";
 
-/// One live process holding an open descriptor on a rollout file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FdEvidence {
-    /// PID of the holding process, as reported by `lsof`.
     pub pid: u32,
-    /// Command name of the holding process (e.g. `codex`).
     pub command: String,
-    /// Path `lsof` reported, already symlink-resolved by the kernel.
     pub path: PathBuf,
-    /// Device number of the open file, when a parsable one was reported.
     pub device: Option<u64>,
-    /// Inode number of the open file, when a parsable one was reported.
     pub inode: Option<u64>,
 }
 
-/// Indexed result of one activity probe, shared across discovery threads.
 #[derive(Clone, Debug)]
 pub struct ActivitySnapshot {
-    /// When the probe was taken; reused verbatim as every `observed_at`.
     observed_at: SystemTime,
-    /// Every open rollout descriptor observed, in `lsof` output order.
     entries: Vec<FdEvidence>,
-    /// Resolved path to index into `entries`.
     by_path: HashMap<PathBuf, usize>,
-    /// `(device, inode)` to index into `entries`.
-    by_identity: HashMap<(u64, u64), usize>,
-    /// File name to candidate indices, each confirmed by device and inode.
+    by_identity: HashMap<(u64, u64), Vec<usize>>,
     by_name: HashMap<OsString, Vec<usize>>,
 }
 
 impl ActivitySnapshot {
-    /// An empty snapshot: every lookup yields Unknown. Used when the probe is
-    /// unavailable or failed, and by callers that do not discover Codex.
     pub fn empty() -> Self {
-        unimplemented!()
+        Self::from_entries(Vec::new(), SystemTime::now())
     }
 
-    /// When this snapshot was taken.
     pub fn observed_at(&self) -> SystemTime {
-        unimplemented!()
+        self.observed_at
     }
 
-    /// Number of open rollout descriptors observed.
     pub fn len(&self) -> usize {
-        unimplemented!()
+        self.entries.len()
     }
 
-    /// True when no open rollout descriptor was observed.
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.entries.is_empty()
     }
 
-    /// Look up positive evidence for one rollout path.
-    ///
-    /// Resolution order, cheapest first: exact resolved path, then
-    /// `(device, inode)`, then a file-name candidate confirmed by
-    /// `(device, inode)`. Only a name candidate can trigger a `stat` of the
-    /// caller's path, and at most one, so the syscall cost scales with live
-    /// sessions rather than with all discovered sessions.
-    pub fn lookup(&self, _rollout_path: &Path) -> Option<&FdEvidence> {
-        unimplemented!()
+    pub fn lookup(&self, rollout_path: &Path) -> Option<&FdEvidence> {
+        if let Some(index) = self.by_path.get(rollout_path) {
+            return self.entries.get(*index);
+        }
+        let candidates = self.by_name.get(rollout_path.file_name()?)?;
+        let identity = file_identity(rollout_path)?;
+        self.by_identity
+            .get(&identity)?
+            .iter()
+            .find(|index| candidates.contains(index))
+            .and_then(|index| self.entries.get(*index))
     }
 
-    /// Build the three indexes over already-parsed evidence.
-    fn from_entries(_entries: Vec<FdEvidence>, _observed_at: SystemTime) -> Self {
-        unimplemented!()
+    fn from_entries(entries: Vec<FdEvidence>, observed_at: SystemTime) -> Self {
+        let mut by_path = HashMap::new();
+        let mut by_identity: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+        let mut by_name: HashMap<OsString, Vec<usize>> = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            by_path.entry(entry.path.clone()).or_insert(index);
+            if let (Some(device), Some(inode)) = (entry.device, entry.inode) {
+                by_identity.entry((device, inode)).or_default().push(index);
+            }
+            if let Some(name) = entry.path.file_name() {
+                by_name.entry(name.to_owned()).or_default().push(index);
+            }
+        }
+        Self {
+            observed_at,
+            entries,
+            by_path,
+            by_identity,
+            by_name,
+        }
     }
 }
 
-/// Determine the [`ActivityStatus`] of a rollout path against an optional
-/// snapshot. Active only on a confirmed open descriptor; absence of evidence
-/// is Unknown, never Inactive. Mirrors `pi::activity_status` and
-/// `omp::activity_status`.
-pub fn activity_status(
-    _rollout_path: &Path,
-    _snapshot: Option<&ActivitySnapshot>,
-) -> ActivityStatus {
-    unimplemented!()
+pub fn activity_status(rollout_path: &Path, snapshot: Option<&ActivitySnapshot>) -> ActivityStatus {
+    match snapshot.and_then(|snapshot| snapshot.lookup(rollout_path)) {
+        Some(_) => ActivityStatus::Active {
+            observed_at: snapshot.expect("matched snapshot exists").observed_at(),
+        },
+        None => ActivityStatus::Unknown,
+    }
 }
 
-/// Take one activity snapshot for the whole discovery run.
-///
-/// Spawns at most one child process. Returns an empty snapshot when `lsof`
-/// is absent — silently, with no diagnostic, exactly as an absent SQLite DB
-/// produces none. Never fails, never panics, never reports Inactive.
 pub fn probe() -> (ActivitySnapshot, Vec<Diagnostic>) {
-    unimplemented!()
+    let observed_at = SystemTime::now();
+    if crate::launch::command_available(OsStr::new(PROBE_PROGRAM)) {
+        return probe_with(OsStr::new(PROBE_PROGRAM), observed_at);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (entries, skipped) = probe_proc(observed_at);
+        let snapshot = ActivitySnapshot::from_entries(entries, observed_at);
+        return (
+            snapshot.clone(),
+            partial_diagnostics(&snapshot, skipped, false),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    (
+        ActivitySnapshot::from_entries(Vec::new(), observed_at),
+        Vec::new(),
+    )
 }
 
-/// Probe using an explicit program name and observation time so tests can
-/// substitute a stub that replays recorded `lsof` field output.
 pub(crate) fn probe_with(
-    _program: &OsStr,
-    _observed_at: SystemTime,
+    program: &OsStr,
+    observed_at: SystemTime,
 ) -> (ActivitySnapshot, Vec<Diagnostic>) {
-    unimplemented!()
+    let output = match Command::new(program).args(probe_argv()).output() {
+        Ok(output) => output,
+        Err(_) => {
+            return (
+                ActivitySnapshot::from_entries(Vec::new(), observed_at),
+                vec![Diagnostic {
+                    category: DIAG_PROBE_FAILED,
+                    count: 1,
+                    verbose_path: None,
+                    verbose_chain: Some("unable to run Codex activity probe".into()),
+                }],
+            );
+        }
+    };
+    let (entries, skipped) = parse_lsof_output(&output.stdout);
+    let snapshot = ActivitySnapshot::from_entries(entries, observed_at);
+    let diagnostics = partial_diagnostics(&snapshot, skipped, !output.stderr.is_empty());
+    (snapshot, diagnostics)
 }
 
-/// Exact argv passed to [`PROBE_PROGRAM`]:
-/// `-n -P -w -S 2 -F0pcfnDi -c codex`. No shell is involved, every argument
-/// is a fixed literal, and no session-derived value is ever interpolated.
+fn partial_diagnostics(
+    snapshot: &ActivitySnapshot,
+    skipped: usize,
+    stderr_present: bool,
+) -> Vec<Diagnostic> {
+    if snapshot.is_empty() || (skipped == 0 && !stderr_present) {
+        return Vec::new();
+    }
+    vec![Diagnostic {
+        category: DIAG_PROBE_PARTIAL,
+        count: skipped.max(1),
+        verbose_path: None,
+        verbose_chain: Some("lsof reported unreadable processes; evidence is partial".into()),
+    }]
+}
+
 pub(crate) fn probe_argv() -> Vec<OsString> {
-    unimplemented!()
+    [
+        "-n",
+        "-P",
+        "-w",
+        "-S",
+        PROBE_STAT_TIMEOUT_SECONDS,
+        "-F0pcfnDi",
+        "-c",
+        CODEX_COMMAND_PREFIX,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
-/// Enumerate open rollout descriptors from `/proc` without spawning anything.
-/// Used only when `lsof` is not installed; unreadable processes are skipped
-/// individually and counted, exactly like the `lsof` path.
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_proc(_observed_at: SystemTime) -> (Vec<FdEvidence>, usize) {
-    unimplemented!()
+    use std::os::unix::fs::MetadataExt;
+
+    let mut entries = Vec::new();
+    let mut skipped = 0;
+    let processes = match fs::read_dir("/proc") {
+        Ok(processes) => processes,
+        Err(_) => return (entries, 1),
+    };
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|pid| pid.parse().ok())
+        else {
+            continue;
+        };
+        let root = process.path();
+        let command = match fs::read_to_string(root.join("comm")) {
+            Ok(command) if command.trim_end().starts_with(CODEX_COMMAND_PREFIX) => {
+                command.trim_end().to_owned()
+            }
+            Ok(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let descriptors = match fs::read_dir(root.join("fd")) {
+            Ok(descriptors) => descriptors,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        for descriptor in descriptors.flatten() {
+            let path = match fs::read_link(descriptor.path()) {
+                Ok(path) if is_rollout_filename(path.file_name()) => path,
+                Ok(_) => continue,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let metadata = fs::metadata(descriptor.path()).ok();
+            entries.push(FdEvidence {
+                pid,
+                command: command.clone(),
+                path,
+                device: metadata.as_ref().map(MetadataExt::dev),
+                inode: metadata.as_ref().map(MetadataExt::ino),
+            });
+        }
+    }
+    (entries, skipped)
 }
 
-/// Parse `lsof -F0` output into rollout evidence.
-///
-/// Fields are NUL terminated and grouped into newline-terminated sets; a `p`
-/// set opens a process context and each following `f` set describes one
-/// descriptor. Sets that are truncated, non-UTF-8, or missing a name are
-/// skipped individually, and only names accepted by
-/// [`is_rollout_filename`][super::roots::is_rollout_filename] are retained.
-/// Returns the evidence plus the number of skipped sets, which the caller
-/// renders as [`DIAG_PROBE_PARTIAL`].
-pub(crate) fn parse_lsof_output(_stdout: &[u8]) -> (Vec<FdEvidence>, usize) {
-    unimplemented!()
+pub(crate) fn parse_lsof_output(stdout: &[u8]) -> (Vec<FdEvidence>, usize) {
+    let mut entries = Vec::new();
+    let mut skipped = 0;
+    let mut process: Option<(u32, String)> = None;
+    for set in stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|set| !set.is_empty())
+    {
+        let fields: Vec<&[u8]> = set
+            .split(|byte| *byte == b'\0')
+            .filter(|field| !field.is_empty())
+            .collect();
+        let Some(first) = fields.first().and_then(|field| field.first()) else {
+            continue;
+        };
+        match first {
+            b'p' => {
+                let pid = fields
+                    .iter()
+                    .find(|field| field.first() == Some(&b'p'))
+                    .and_then(|field| std::str::from_utf8(&field[1..]).ok())
+                    .and_then(|pid| pid.parse::<u32>().ok());
+                let command = fields
+                    .iter()
+                    .find(|field| field.first() == Some(&b'c'))
+                    .and_then(|field| std::str::from_utf8(&field[1..]).ok());
+                process = match (pid, command) {
+                    (Some(pid), Some(command)) => Some((pid, command.to_owned())),
+                    _ => {
+                        skipped += 1;
+                        None
+                    }
+                };
+            }
+            b'f' => {
+                let Some((pid, command)) = process.as_ref() else {
+                    skipped += 1;
+                    continue;
+                };
+                let field = |tag| fields.iter().find(|field| field.first() == Some(&tag));
+                let Some(path) = field(b'n')
+                    .and_then(|field| std::str::from_utf8(&field[1..]).ok())
+                    .map(PathBuf::from)
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                if !is_rollout_filename(path.file_name()) {
+                    continue;
+                }
+                let device = field(b'D')
+                    .and_then(|field| std::str::from_utf8(&field[1..]).ok())
+                    .and_then(parse_device_field);
+                let inode = field(b'i')
+                    .and_then(|field| std::str::from_utf8(&field[1..]).ok())
+                    .and_then(parse_inode_field);
+                entries.push(FdEvidence {
+                    pid: *pid,
+                    command: command.clone(),
+                    path,
+                    device,
+                    inode,
+                });
+            }
+            _ => skipped += 1,
+        }
+    }
+    (entries, skipped)
 }
 
-/// Parse an `lsof` `D` field (`0x`-prefixed hexadecimal device number).
-/// `None` on any other encoding, in which case the entry is indexed by path
-/// and file name only rather than being dropped.
-fn parse_device_field(_value: &str) -> Option<u64> {
-    unimplemented!()
+fn parse_device_field(value: &str) -> Option<u64> {
+    value
+        .strip_prefix("0x")
+        .and_then(|value| u64::from_str_radix(value, 16).ok())
 }
 
-/// Parse an `lsof` `i` field (decimal inode number).
-fn parse_inode_field(_value: &str) -> Option<u64> {
-    unimplemented!()
+fn parse_inode_field(value: &str) -> Option<u64> {
+    value.parse().ok()
 }
 
-/// Read `(device, inode)` for a path, to confirm a file-name candidate.
-/// `None` when the path cannot be stat'd (e.g. removed mid-scan), which keeps
-/// the session Unknown rather than guessing.
-fn file_identity(_path: &Path) -> Option<(u64, u64)> {
-    unimplemented!()
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    #[test]
+    fn parser_isolates_bad_processes_and_descriptors() {
+        let bytes = b"p12\0ccodex\0\nfcwd\0n/tmp/not-a-rollout\0\nf11\0D0x10\0i20\0n/tmp/rollout-good.jsonl\0\npbad\0ccodex\0\nf12\0n/tmp/rollout-lost.jsonl\0\np13\0ccodex-helper\0\nf9\0Dgarbage\0i21\0n/tmp/rollout-second.jsonl\0\nf10\0D0x10\0i22\0\n";
+        let (entries, skipped) = parse_lsof_output(bytes);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(skipped, 3);
+        assert_eq!(entries[0].pid, 12);
+        assert_eq!(entries[1].device, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_handles_symlinked_ancestor_without_basename_false_positive() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let linked = temp.path().join("linked");
+        symlink(&real, &linked).unwrap();
+        let rollout = real.join("rollout-shared.jsonl");
+        fs::write(&rollout, "{}").unwrap();
+        let metadata = fs::metadata(&rollout).unwrap();
+        let snapshot = ActivitySnapshot::from_entries(
+            vec![FdEvidence {
+                pid: 7,
+                command: "codex".into(),
+                path: rollout.clone(),
+                device: Some(metadata.dev()),
+                inode: Some(metadata.ino()),
+            }],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(
+            snapshot
+                .lookup(&linked.join("rollout-shared.jsonl"))
+                .is_some()
+        );
+
+        let other = temp.path().join("other");
+        fs::create_dir(&other).unwrap();
+        let copy = other.join("rollout-shared.jsonl");
+        fs::write(&copy, "different").unwrap();
+        assert!(snapshot.lookup(&copy).is_none());
+        fs::remove_file(&copy).unwrap();
+        assert!(snapshot.lookup(&copy).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_matches_each_duplicate_identity_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let first = real.join("rollout-first.jsonl");
+        let second = real.join("rollout-second.jsonl");
+        fs::write(&first, "{}").unwrap();
+        fs::hard_link(&first, &second).unwrap();
+        let linked = temp.path().join("linked");
+        symlink(&real, &linked).unwrap();
+        let metadata = fs::metadata(&first).unwrap();
+        let evidence = |path| FdEvidence {
+            pid: 7,
+            command: "codex".into(),
+            path,
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+        };
+        let snapshot = ActivitySnapshot::from_entries(
+            vec![evidence(first), evidence(second)],
+            SystemTime::UNIX_EPOCH,
+        );
+
+        let matched = snapshot
+            .lookup(&linked.join("rollout-second.jsonl"))
+            .expect("the second hard-link path should retain identity evidence");
+        assert_eq!(matched.path, real.join("rollout-second.jsonl"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_probe_serves_many_session_lookups() {
+        let temp = tempfile::tempdir().unwrap();
+        let count = temp.path().join("count");
+        let rollout = temp.path().join("rollout-live.jsonl");
+        fs::write(&rollout, "{}").unwrap();
+        let metadata = fs::metadata(&rollout).unwrap();
+        let script = temp.path().join("fake-lsof");
+        let mut file = fs::File::create(&script).unwrap();
+        writeln!(
+            file,
+            "#!/bin/sh\necho x >> '{}'\nprintf 'p44\\0ccodex\\0\\nf3\\0D0x{:x}\\0i{}\\0n{}\\0\\n'",
+            count.display(),
+            metadata.dev(),
+            metadata.ino(),
+            rollout.display()
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let (snapshot, diagnostics) = probe_with(script.as_os_str(), SystemTime::UNIX_EPOCH);
+        assert!(diagnostics.is_empty());
+        for _ in 0..100 {
+            assert!(snapshot.lookup(&rollout).is_some());
+        }
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
+        assert_eq!(
+            probe_argv(),
+            ["-n", "-P", "-w", "-S", "2", "-F0pcfnDi", "-c", "codex"]
+        );
+    }
 }

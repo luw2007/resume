@@ -160,6 +160,14 @@ fn discover_all(
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
+    let (activity, activity_diagnostics) =
+        if options.agents.iter().any(|agent| agent == codex::AGENT) {
+            codex::activity::probe()
+        } else {
+            (codex::activity::ActivitySnapshot::empty(), Vec::new())
+        };
+    state.errors.lock().unwrap().extend(activity_diagnostics);
+    let activity = Arc::new(activity);
     let records = Arc::new(Mutex::new(Vec::new()));
     let cancel = CancelToken::new();
     let mut handles = Vec::new();
@@ -167,11 +175,12 @@ fn discover_all(
         let agent = agent.clone();
         let scope = scope.clone();
         let state = state.clone();
+        let activity = activity.clone();
         let records = records.clone();
         let cancel = cancel.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &activity, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -195,6 +204,14 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
+    let (activity, activity_diagnostics) =
+        if options.agents.iter().any(|agent| agent == codex::AGENT) {
+            codex::activity::probe()
+        } else {
+            (codex::activity::ActivitySnapshot::empty(), Vec::new())
+        };
+    state.errors.lock().unwrap().extend(activity_diagnostics);
+    let activity = Arc::new(activity);
     let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let next_key = Arc::new(AtomicU64::new(1));
@@ -205,13 +222,14 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
         let agent = agent.clone();
         let scope = scope.clone();
         let state = state.clone();
+        let activity = activity.clone();
         let map = map.clone();
         let next_key = next_key.clone();
         let cancel = cancel.clone();
         let tx = tx.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &activity, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -326,6 +344,7 @@ impl AgentDiscovery {
 fn discover_agent(
     agent: &str,
     scope: &Scope,
+    activity: &codex::activity::ActivitySnapshot,
     since_cutoff: Option<std::time::SystemTime>,
     cancel: &CancelToken,
 ) -> AgentDiscovery {
@@ -335,7 +354,7 @@ fn discover_agent(
     let mut discovery = match agent {
         "pi" => discover_pi(scope),
         "claude" => discover_claude(scope),
-        "codex" => discover_codex(scope),
+        "codex" => discover_codex(scope, activity),
         "omp" => discover_omp(scope),
         _ => AgentDiscovery::failed("unknown_agent"),
     };
@@ -443,7 +462,7 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
     }
 }
 
-fn discover_codex(scope: &Scope) -> AgentDiscovery {
+fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -> AgentDiscovery {
     let Some(root) = codex::effective_root() else {
         return AgentDiscovery::failed("codex_root_unavailable");
     };
@@ -472,6 +491,9 @@ fn discover_codex(scope: &Scope) -> AgentDiscovery {
                 session.risk =
                     crate::scope::broad_workspace_risk(&session.workspace, home().as_deref());
                 normalize_availability(&mut session);
+                if let Some(rollout) = codex_transcript_path(&session) {
+                    session.activity = codex::activity::activity_status(&rollout, Some(activity));
+                }
                 let spec = codex::resume_spec(&session, &default_root);
                 let evidence = codex_transcript_path(&session)
                     .and_then(|path| LaunchEvidence::capture_with_transcript(&session, path).ok());
