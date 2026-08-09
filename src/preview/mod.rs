@@ -4,6 +4,13 @@
 //! is bounded to a maximum size with explicit truncation notice and source
 //! path. The total cache is bounded to a maximum byte budget with LRU eviction.
 
+pub mod injection;
+pub mod jsonl;
+pub mod message;
+pub mod snapshot;
+pub mod summary;
+pub mod text;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

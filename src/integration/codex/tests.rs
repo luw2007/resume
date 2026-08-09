@@ -17,9 +17,9 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    jsonl::Bounds,
+    preview::jsonl::Bounds,
+    preview::snapshot,
     session::{ActivityStatus, RiskStatus, SupportStatus, WorkspaceEvidence},
-    snapshot,
 };
 
 // ---------------------------------------------------------------------------

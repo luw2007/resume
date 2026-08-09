@@ -71,7 +71,7 @@ impl Attachment {
 /// Build a [`UserMessage`] from extracted text and attachment list, applying
 /// terminal-safe normalization and injection filtering to the text.
 pub fn build_user_message(raw_text: Option<String>, attachments: Vec<Attachment>) -> UserMessage {
-    use crate::{injection::collapse_known_injections, text};
+    use super::{injection::collapse_known_injections, text};
 
     let text = raw_text
         .map(|t| {

@@ -54,9 +54,9 @@
 //! alone is Unknown.
 //!
 //! This module never invokes OMP during discovery/preview. It reads JSONL
-//! read-only through the shared [`crate::jsonl`] reader and interprets records
-//! with the shared [`crate::message`], [`crate::injection`], and
-//! [`crate::summary`] helpers.
+//! read-only through the shared [`crate::preview::jsonl`] reader and interprets records
+//! with the shared [`crate::preview::message`], [`crate::preview::injection`], and
+//! [`crate::preview::summary`] helpers.
 
 use std::{
     ffi::OsString,
@@ -68,8 +68,8 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    jsonl::{self, Bounds, FileOutcome, ReadResult},
-    message::{self, UserMessage},
+    preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
+    preview::message::{self, UserMessage},
     scope::{self, Scope},
     session::{
         ActivityStatus, ResumeSpec, RiskStatus, Session, SessionKey, SupportStatus,
@@ -704,7 +704,7 @@ fn extract_session(
     // first valid human message.
     let title = title_state.current.or_else(|| {
         let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
-        crate::summary::summarize_texts(texts, crate::summary::default_width())
+        crate::preview::summary::summarize_texts(texts, crate::preview::summary::default_width())
     });
 
     Some(ParsedSession {
