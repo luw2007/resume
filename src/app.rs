@@ -57,6 +57,26 @@ struct EffectiveOptions {
     verbose: bool,
 }
 
+/// Read-only process evidence shared by all discovery workers.
+struct DiscoveryContext {
+    procs: crate::proc::ProcessTable,
+}
+
+impl DiscoveryContext {
+    fn probe(options: &EffectiveOptions) -> Self {
+        let needed = options
+            .agents
+            .iter()
+            .any(|agent| agent == "omp" || agent == "pi");
+        let procs = if needed {
+            crate::proc::snapshot().unwrap_or_else(|_| crate::proc::ProcessTable::empty())
+        } else {
+            crate::proc::ProcessTable::empty()
+        };
+        Self { procs }
+    }
+}
+
 pub fn run(cli: Cli) -> i32 {
     let (config, _) = match crate::config::load(cli.config.clone()) {
         Ok(value) => value,
@@ -79,9 +99,10 @@ pub fn run(cli: Cli) -> i32 {
             return EXIT_USAGE;
         }
     };
+    let discovery_ctx = Arc::new(DiscoveryContext::probe(&options));
 
     if cli.list || cli.json {
-        let (records, state) = discover_all(&options, scope);
+        let (records, state) = discover_all(&options, scope, discovery_ctx);
         print_diagnostics(&state, options.verbose);
         if cli.json {
             print_json(&records, &state);
@@ -91,7 +112,7 @@ pub fn run(cli: Cli) -> i32 {
         return discovery_exit(&records, &state);
     }
 
-    run_interactive(&options, scope)
+    run_interactive(&options, scope, discovery_ctx)
 }
 
 fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, String> {
@@ -155,6 +176,7 @@ fn build_scope(cli: &Cli) -> io::Result<Scope> {
 fn discover_all(
     options: &EffectiveOptions,
     scope: Arc<Scope>,
+    ctx: Arc<DiscoveryContext>,
 ) -> (Vec<CandidateRecord>, Arc<DiscoveryState>) {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
@@ -166,12 +188,13 @@ fn discover_all(
     for agent in &options.agents {
         let agent = agent.clone();
         let scope = scope.clone();
+        let ctx = ctx.clone();
         let state = state.clone();
         let records = records.clone();
         let cancel = cancel.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -190,7 +213,11 @@ fn discover_all(
     (result, state)
 }
 
-fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
+fn run_interactive(
+    options: &EffectiveOptions,
+    scope: Arc<Scope>,
+    ctx: Arc<DiscoveryContext>,
+) -> i32 {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
@@ -204,6 +231,7 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
     for agent in &options.agents {
         let agent = agent.clone();
         let scope = scope.clone();
+        let ctx = ctx.clone();
         let state = state.clone();
         let map = map.clone();
         let next_key = next_key.clone();
@@ -211,7 +239,7 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
         let tx = tx.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -326,6 +354,7 @@ impl AgentDiscovery {
 fn discover_agent(
     agent: &str,
     scope: &Scope,
+    ctx: &DiscoveryContext,
     since_cutoff: Option<std::time::SystemTime>,
     cancel: &CancelToken,
 ) -> AgentDiscovery {
@@ -333,10 +362,10 @@ fn discover_agent(
         return AgentDiscovery::ok(vec![], vec![]);
     }
     let mut discovery = match agent {
-        "pi" => discover_pi(scope),
+        "pi" => discover_pi(scope, ctx),
         "claude" => discover_claude(scope),
         "codex" => discover_codex(scope),
-        "omp" => discover_omp(scope),
+        "omp" => discover_omp(scope, ctx),
         _ => AgentDiscovery::failed("unknown_agent"),
     };
     if let Some(cutoff) = since_cutoff {
@@ -380,7 +409,8 @@ fn session_at_or_after(record: &CandidateRecord, cutoff: std::time::SystemTime) 
     }
 }
 
-fn discover_pi(scope: &Scope) -> AgentDiscovery {
+fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
+    let _ = ctx;
     let mut inputs = pi::ResolutionInputs::from_env();
     if let Some(root) = inputs.agent_dir_env.clone().or_else(|| {
         inputs
@@ -494,7 +524,7 @@ fn discover_codex(scope: &Scope) -> AgentDiscovery {
     AgentDiscovery::ok(records, errors)
 }
 
-fn discover_omp(scope: &Scope) -> AgentDiscovery {
+fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
     let base_inputs = omp::ResolutionInputs::from_env();
     let Some(base_roots) = omp::resolve(&base_inputs) else {
         return AgentDiscovery::failed("omp_root_unavailable");
@@ -517,6 +547,7 @@ fn discover_omp(scope: &Scope) -> AgentDiscovery {
             }
         }
     }
+    let live = omp::correlate_live(&ctx.procs, &roots);
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for root in roots {
@@ -528,7 +559,7 @@ fn discover_omp(scope: &Scope) -> AgentDiscovery {
                     let mut session = parsed.clone().into_session(
                         &root,
                         omp::risk_status(&parsed, home().as_deref()),
-                        omp::activity_status(&parsed, None),
+                        omp::activity_status(&parsed, live.for_transcript(&parsed.transcript_path)),
                     );
                     normalize_availability(&mut session);
                     record(session, spec)

@@ -143,16 +143,16 @@ The recorded Workspace is the child working directory. Missing or changed Worksp
 
 ## Support list
 
-“Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi or OMP, and Codex/Claude Sessions therefore normally report `Unknown`.
+“Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. OMP correlates one read-only process snapshot with its per-profile terminal breadcrumbs; Pi, Codex, and Claude Sessions normally remain `Unknown` because the assembled app supplies no proven live-session correlation for them.
 
 | Agent | Discovery | Preview parsing | Exact Resume | Profiles | Active Detection |
 |---|---|---|---|---|---|
 | Pi | Supported | Supported | Supported | Not applicable | Conditional: validated ID + Session path evidence; Unknown by default |
 | Claude Code | Supported | Supported | Supported | Not applicable | Unknown (no proven correlation) |
 | Codex | Supported | Supported | Supported | Not applicable | Unknown by default; integration design permits only exact rollout/process positive evidence |
-| OMP | Supported | Supported | Supported | Supported | Conditional: live process + TTY + matching breadcrumb; Unknown by default |
+| OMP | Supported | Supported | Supported | Supported | Supported: live OMP process + resolved TTY + matching existing per-profile breadcrumb |
 
-Preview parsing here means read-only extraction and terminal-safe normalization are covered by integration/foundation tests. It does not promise native title precedence or a full transcript in the current production picker.
+Preview parsing here means read-only extraction and terminal-safe normalization are covered by integration/foundation tests. It does not promise native title precedence or a full transcript in the current production picker. Set `RESUME_DISABLE_PROC_PROBE` to any value to disable process probing and force positive-evidence activity detection to fall back to `Unknown`.
 
 ## Privacy and diagnostics
 
