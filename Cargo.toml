@@ -9,6 +9,10 @@ license = "MIT"
 name = "resume-spike"
 path = "examples/resume-spike.rs"
 
+[[bench]]
+name = "discovery"
+harness = false
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
@@ -34,6 +38,7 @@ default = []
 codex-sqlite = ["dep:rusqlite"]
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 portable-pty = "0.9"
 proptest = "1"
 tempfile = "3"
