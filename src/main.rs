@@ -9,6 +9,10 @@ fn main() {
     if let Err(error) = cli.validate() {
         error.exit();
     }
+    if cli.man {
+        print!("{}", resume::man::page());
+        return;
+    }
     match &cli.command {
         Some(Command::Config(config)) => match config.command {
             ConfigCommand::Example => print!("{}", resume::cli::config_example()),
