@@ -526,12 +526,11 @@ pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
 
         // Scope filtering via authoritative header cwd.
         match &parsed.workspace {
-            Some(workspace) => {
-                if !config.scope.contains_workspace(workspace) {
-                    outcome.out_of_scope += 1;
-                    continue;
-                }
+            Some(workspace) if !config.scope.contains_workspace(workspace) => {
+                outcome.out_of_scope += 1;
+                continue;
             }
+            Some(_) => {}
             None => {
                 // Missing Workspace: surfaced for diagnosis (Unavailable).
             }
