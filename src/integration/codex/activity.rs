@@ -463,13 +463,28 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
+        // `probe_with` swallows the underlying `io::Error` into an opaque
+        // `codex_activity_probe_failed` diagnostic (by design, for
+        // production redaction). If the assertion below fails, this
+        // sidesteps that redaction to surface the real OS error (kind +
+        // message) directly, without invoking the script a second time
+        // (which would double the `echo x >> count` side effect the
+        // subsequent count-lines assertion relies on).
         let (snapshot, diagnostics) = probe_with(script.as_os_str(), SystemTime::UNIX_EPOCH);
-        assert!(
-            diagnostics.is_empty(),
-            "diagnostics: {diagnostics:?}, snapshot.is_empty()={}, lookup={:?}",
-            snapshot.is_empty(),
-            snapshot.lookup(&rollout)
-        );
+        if !diagnostics.is_empty() {
+            let direct = Command::new(script.as_os_str()).args(probe_argv()).output();
+            panic!(
+                "diagnostics: {diagnostics:?}, snapshot.is_empty()={}, lookup={:?}, \
+                 direct re-exec result: {:?} (script={}, exists={}, is_file={}, len={:?})",
+                snapshot.is_empty(),
+                snapshot.lookup(&rollout),
+                direct,
+                script.display(),
+                script.exists(),
+                script.is_file(),
+                fs::metadata(&script).map(|m| m.len())
+            );
+        }
         for _ in 0..100 {
             assert!(snapshot.lookup(&rollout).is_some());
         }
