@@ -24,9 +24,9 @@ use serde_json::json;
 use super::*;
 use crate::{
     integration::codex::{DiscoveredSession, discover_with_filter_enriched, sqlite::SqliteOutcome},
-    jsonl::Bounds,
+    preview::jsonl::Bounds,
+    preview::snapshot,
     session::{RiskStatus, SupportStatus, WorkspaceEvidence},
-    snapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -1315,7 +1315,7 @@ fn enrich_fills_title_only_when_jsonl_has_no_user_messages() {
     );
 
     // Parse to get a ParsedSession with empty user_messages.
-    let read = crate::jsonl::read_file(&rollout_path, &Bounds::default()).unwrap();
+    let read = crate::preview::jsonl::read_file(&rollout_path, &Bounds::default()).unwrap();
     let parsed = crate::integration::codex::parse_rollout_records(&rollout_path, &read)
         .unwrap()
         .unwrap();

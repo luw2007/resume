@@ -21,9 +21,9 @@
 //!   reliably tied to a Session; process presence alone is insufficient.
 //!
 //! This module never invokes Pi during discovery/preview. It reads JSONL
-//! read-only through the shared [`crate::jsonl`] reader, interprets records
-//! using the shared [`crate::message`], [`crate::injection`], and
-//! [`crate::summary`] helpers, and produces [`Session`] entries and
+//! read-only through the shared [`crate::preview::jsonl`] reader, interprets records
+//! using the shared [`crate::preview::message`], [`crate::preview::injection`], and
+//! [`crate::preview::summary`] helpers, and produces [`Session`] entries and
 //! [`ResumeSpec`]s.
 
 use std::{
@@ -36,8 +36,8 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    jsonl::{self, Bounds, FileOutcome, ReadResult},
-    message::{self, UserMessage},
+    preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
+    preview::message::{self, UserMessage},
     scope::Scope,
     session::{
         ActivityStatus, ResumeSpec, RiskStatus, Session, SessionKey, SupportStatus,
@@ -265,7 +265,7 @@ impl ParsedSession {
             }
         }
         let texts: Vec<&str> = self.messages.iter().map(|m| m.text.as_str()).collect();
-        crate::summary::summarize_texts(texts, crate::summary::default_width())
+        crate::preview::summary::summarize_texts(texts, crate::preview::summary::default_width())
     }
 
     /// Build a [`Session`] from this parsed data.

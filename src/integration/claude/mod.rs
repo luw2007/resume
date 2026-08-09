@@ -41,13 +41,13 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    jsonl::{self, Bounds, FileOutcome, ReadResult},
-    message,
+    preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
+    preview::message,
+    preview::summary,
     session::{
         ActivityStatus, Diagnostic, IntegrationError, ResumeSpec, Session, SessionKey,
         SupportStatus, WorkspaceEvidence,
     },
-    summary,
 };
 
 /// Agent name used in [`SessionKey::agent`] and the Resume `program`.

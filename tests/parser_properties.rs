@@ -12,9 +12,11 @@ use proptest::prelude::*;
 use resume::{
     cli::Distance,
     config::Config,
-    jsonl::{Bounds, FileOutcome, read_buffered},
+    preview::{
+        jsonl::{Bounds, FileOutcome, read_buffered},
+        text::{Mode, normalize, strip_terminal_controls},
+    },
     scope::{DefaultScope, Direction, Scope, WorkspaceCandidate},
-    text::{Mode, normalize, strip_terminal_controls},
 };
 
 const CASES: u32 = 64;

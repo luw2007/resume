@@ -38,8 +38,8 @@ use crate::{
         self, ActivityEvidence, DiscoverConfig, EffectiveRoots, ImportBadge, ParsedSession,
         ProfileSelection, ResolutionInputs,
     },
+    preview::snapshot,
     scope::{Direction, Scope},
-    snapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -1101,14 +1101,14 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     );
 
     // Header-only → header time.
-    let bounds = crate::jsonl::Bounds::default();
+    let bounds = crate::preview::jsonl::Bounds::default();
     let path2 = fx.write(
         &fx.default_agent_root,
         "ws",
         "ho.jsonl",
         &[header_v3("ho", &fx.workspace, 1700000000)],
     );
-    let result2 = crate::jsonl::read_file(&path2, &bounds).unwrap();
+    let result2 = crate::preview::jsonl::read_file(&path2, &bounds).unwrap();
     let parsed2 = omp::extract_session_pub(&path2, &result2, None).unwrap();
     assert_eq!(
         parsed2.activity_time,
@@ -1119,7 +1119,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let header_no_ts = json!({ "type": "session", "id": "nts", "cwd": fx.workspace });
     let path3 = fx.write(&fx.default_agent_root, "ws", "nts.jsonl", &[header_no_ts]);
     let mtime = fs::metadata(&path3).unwrap().modified().unwrap();
-    let result3 = crate::jsonl::read_file(&path3, &bounds).unwrap();
+    let result3 = crate::preview::jsonl::read_file(&path3, &bounds).unwrap();
     let parsed3 = omp::extract_session_pub(&path3, &result3, Some(mtime)).unwrap();
     assert_eq!(parsed3.activity_time, Some(mtime));
     let _ = path;
