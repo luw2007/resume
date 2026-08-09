@@ -36,6 +36,15 @@ jobs:
           root="$RUNNER_TEMP/resume-ci-home"
           mkdir -p "$root"/{home,xdg-config,xdg-data,xdg-state,xdg-cache,pi,omp,claude,codex,bin}
           {
+            # Pin rustup/cargo to their real install roots *before*
+            # redirecting HOME below. Both default to `$HOME/.rustup` and
+            # `$HOME/.cargo`; once HOME points at the isolated fixture
+            # directory, an unpinned rustup can no longer find the toolchain
+            # `dtolnay/rust-toolchain` just installed and every `cargo`
+            # invocation fails with "could not choose a version of cargo to
+            # run, because ... no default is configured".
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+            echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
             echo "HOME=$root/home"
             echo "XDG_CONFIG_HOME=$root/xdg-config"
             echo "XDG_DATA_HOME=$root/xdg-data"
