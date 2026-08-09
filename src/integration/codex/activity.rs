@@ -464,7 +464,12 @@ mod tests {
         fs::set_permissions(&script, permissions).unwrap();
 
         let (snapshot, diagnostics) = probe_with(script.as_os_str(), SystemTime::UNIX_EPOCH);
-        assert!(diagnostics.is_empty());
+        assert!(
+            diagnostics.is_empty(),
+            "diagnostics: {diagnostics:?}, snapshot.is_empty()={}, lookup={:?}",
+            snapshot.is_empty(),
+            snapshot.lookup(&rollout)
+        );
         for _ in 0..100 {
             assert!(snapshot.lookup(&rollout).is_some());
         }
