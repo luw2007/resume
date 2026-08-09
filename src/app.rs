@@ -61,8 +61,7 @@ pub fn run(cli: Cli) -> i32 {
     let (config, _) = match crate::config::load(cli.config.clone()) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("resume: {error}");
-            return EXIT_USAGE;
+            return crate::errors::E1004.report_with(error).emit();
         }
     };
     let options = match effective_options(&cli, config) {
@@ -266,15 +265,17 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
 
 fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {
     if record.session.support != SupportStatus::Supported {
-        eprintln!(
-            "resume: selected Session is unavailable: {:?}",
-            record.session.support
-        );
-        return EXIT_USAGE;
+        return crate::errors::E3003
+            .report(format!(
+                "selected Session is unavailable: {:?}",
+                record.session.support
+            ))
+            .emit();
     }
     let (Some(spec), Some(evidence)) = (record.spec.as_ref(), record.evidence.as_ref()) else {
-        eprintln!("resume: selected Session cannot be resumed");
-        return EXIT_USAGE;
+        return crate::errors::E3003
+            .report("selected Session cannot be resumed")
+            .emit();
     };
     if let Err(error) = launch::revalidate(&record.session, spec, evidence) {
         eprintln!("resume: {error}");
@@ -1080,6 +1081,7 @@ mod tests {
             config: None,
             confirm_always: false,
             no_confirm: false,
+            man: false,
             command: None,
         };
         assert!(effective_options(&cli, Config::default()).is_err());

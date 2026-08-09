@@ -421,7 +421,7 @@ Agent names are case-insensitive. An unknown name is exit 2. A supported integra
 `--since` accepts:
 
 - relative `30m`, `12h`, `7d`;
-- local date `YYYY-MM-DD`, beginning at local midnight;
+- absolute date `YYYY-MM-DD`, beginning at UTC midnight;
 - `all`, which clears configured time filtering without changing Scope.
 
 Use native last activity time, then documented fallback. When `--since` is active, exclude unknown-time Sessions. Invalid values exit 2.
@@ -445,7 +445,7 @@ resume --json
 `--list` is an adaptive human table with:
 
 ```text
-STATUS AGENT UPDATED BRANCH TITLE WORKSPACE
+STATUS AGENT[PROFILE] UPDATED TITLE BRANCH WORKSPACE
 ```
 
 It is not a stable machine format and does not switch automatically when stdout is redirected.
