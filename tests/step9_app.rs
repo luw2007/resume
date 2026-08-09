@@ -45,6 +45,8 @@ fn run_with_env(
         // runner credentials, agent roots, config, or executable search paths.
         .env_clear()
         .env("HOME", home)
+        // Load-bearing for deterministic activity assertions: do not inherit a
+        // host `lsof`, which could correlate fixtures with unrelated processes.
         .env("PATH", &bin)
         .env("TERM", "dumb")
         .env("XDG_CONFIG_HOME", xdg.join("config"))
