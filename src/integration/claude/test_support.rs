@@ -19,9 +19,9 @@ use std::{
 
 use crate::{
     integration::claude,
-    jsonl,
+    preview::jsonl,
+    preview::snapshot,
     session::{ActivityStatus, SupportStatus, WorkspaceEvidence},
-    snapshot,
 };
 
 // --- helpers ---

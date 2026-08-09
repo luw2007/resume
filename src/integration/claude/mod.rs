@@ -41,7 +41,6 @@ pub use discover::*;
 pub use resume::*;
 pub use roots::*;
 
-
 pub const AGENT: &str = "claude";
 pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 

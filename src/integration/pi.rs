@@ -45,7 +45,6 @@ pub const SETTINGS_FILE: &str = "settings.json";
 pub const SETTINGS_SESSION_DIR_KEY: &str = "sessionDir";
 const DISCOVERY_SCAN_RECORDS: usize = 50_000;
 
-
 #[cfg(test)]
 #[path = "pi/test_support.rs"]
 mod test_support;

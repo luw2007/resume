@@ -5,8 +5,8 @@ use crate::{
         self, DiscoverConfig, EffectiveRoots, ParsedSession, ResolutionInputs,
         SessionControlEvidence,
     },
+    preview::snapshot,
     scope::{Direction, Scope},
-    snapshot,
 };
 use serde_json::json;
 use std::{
@@ -230,7 +230,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1700000050);
     assert_eq!(parsed.activity_time, Some(expected));
 
-    let bounds = crate::jsonl::Bounds::default();
+    let bounds = crate::preview::jsonl::Bounds::default();
 
     // Now a file with no messages: falls back to header time.
     let path2 = fx.write_grouped(
@@ -238,7 +238,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
         "header-only.jsonl",
         &[header_v3("ho", &fx.workspace, 1700000000)],
     );
-    let result2 = crate::jsonl::read_file(&path2, &bounds).unwrap();
+    let result2 = crate::preview::jsonl::read_file(&path2, &bounds).unwrap();
     let parsed2 = pi::extract_session_pub(&path2, &result2, None).unwrap();
     assert_eq!(
         parsed2.activity_time,
@@ -249,7 +249,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let header_no_ts = json!({ "type": "session", "id": "nts", "cwd": fx.workspace });
     let path3 = fx.write_grouped("encoded-ws", "no-ts.jsonl", &[header_no_ts]);
     let mtime = fs::metadata(&path3).unwrap().modified().unwrap();
-    let result3 = crate::jsonl::read_file(&path3, &bounds).unwrap();
+    let result3 = crate::preview::jsonl::read_file(&path3, &bounds).unwrap();
     let parsed3 = pi::extract_session_pub(&path3, &result3, Some(mtime)).unwrap();
     assert_eq!(parsed3.activity_time, Some(mtime));
 

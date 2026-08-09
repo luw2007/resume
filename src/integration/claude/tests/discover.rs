@@ -2,9 +2,9 @@
 use crate::integration::claude::test_support::*;
 use crate::{
     integration::claude,
-    jsonl,
+    preview::jsonl,
+    preview::snapshot,
     session::{ActivityStatus, SupportStatus, WorkspaceEvidence},
-    snapshot,
 };
 use std::{
     ffi::{OsStr, OsString},

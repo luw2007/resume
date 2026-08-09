@@ -1,8 +1,8 @@
 use super::DISCOVERY_SCAN_RECORDS;
 use super::roots::EffectiveRoots;
 use crate::{
-    jsonl::{self, Bounds, ReadResult},
-    message::{self, UserMessage},
+    preview::jsonl::{self, Bounds, ReadResult},
+    preview::message::{self, UserMessage},
     scope::Scope,
 };
 use serde_json::Value;
