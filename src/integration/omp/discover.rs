@@ -1,0 +1,165 @@
+//! Read-only OMP transcript discovery.
+
+use super::{
+    format::{self, ParsedSession},
+    roots::EffectiveRoots,
+};
+use crate::{
+    jsonl::{self, Bounds, FileOutcome, ReadResult},
+    scope::Scope,
+};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+const DISCOVERY_SCAN_RECORDS: usize = 50_000;
+
+/// Configuration for an OMP discovery pass.
+#[derive(Clone, Debug)]
+pub struct DiscoverConfig<'a> {
+    /// Effective OMP roots for the selected profile.
+    pub roots: EffectiveRoots,
+    /// Scope used to filter Sessions by header `cwd`.
+    pub scope: &'a Scope,
+    /// Bounds for the JSONL reader. Discovery uses a record cap.
+    pub bounds: Bounds,
+}
+
+impl<'a> DiscoverConfig<'a> {
+    /// Discovery bounds with the default size limits and a record cap.
+    pub fn new(roots: EffectiveRoots, scope: &'a Scope) -> Self {
+        let bounds = Bounds {
+            max_records: DISCOVERY_SCAN_RECORDS,
+            ..Bounds::default()
+        };
+        Self {
+            roots,
+            scope,
+            bounds,
+        }
+    }
+}
+
+/// Outcome of discovering OMP sessions in the effective session root.
+#[derive(Clone, Debug, Default)]
+pub struct DiscoverOutcome {
+    /// Parsed sessions, before dedupe and Session construction.
+    pub parsed: Vec<ParsedSession>,
+    /// Number of JSONL files skipped due to read/parse errors (aggregated).
+    pub skipped_files: usize,
+    /// Number of files with no valid `session` header.
+    pub no_header_files: usize,
+    /// Number of files skipped because the header `cwd` was outside Scope.
+    pub out_of_scope: usize,
+}
+
+/// Discover OMP sessions under the effective session root. Reads JSONL
+/// read-only through the shared reader, parses the title sidecar + v3 header
+/// (never assuming the header is the first record), and filters by header
+/// `cwd` through Scope. Never invokes OMP or migrates files.
+///
+/// Discovery scans `.jsonl` files one level (or more) under the session root.
+/// Header `cwd` is authoritative; directory names are never reversed.
+pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
+    let session_root = config.roots.session_root.clone();
+    let confined_root = session_root
+        .canonicalize()
+        .unwrap_or_else(|_| session_root.clone());
+    let mut outcome = DiscoverOutcome::default();
+    let mut seen: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    for jsonl_path in iter_session_files(&session_root)? {
+        let parsed = match parse_session_file(&jsonl_path, &confined_root, &config.bounds) {
+            Ok(Some(parsed)) => parsed,
+            Ok(None) => {
+                outcome.no_header_files += 1;
+                continue;
+            }
+            Err(_) => {
+                outcome.skipped_files += 1;
+                continue;
+            }
+        };
+
+        // Dedupe: effective session root + canonical transcript locator.
+        let canonical = jsonl_path
+            .canonicalize()
+            .unwrap_or_else(|_| jsonl_path.clone());
+        let dedupe_key = (config.roots.session_root.clone(), canonical.clone());
+        if seen.contains(&dedupe_key) {
+            continue;
+        }
+        seen.push(dedupe_key);
+
+        // Scope filtering via authoritative header cwd.
+        match &parsed.workspace {
+            Some(workspace) => {
+                if !config.scope.contains_workspace(workspace) {
+                    outcome.out_of_scope += 1;
+                    continue;
+                }
+            }
+            None => {
+                // Missing Workspace: surfaced for diagnosis (Unavailable).
+            }
+        }
+
+        outcome.parsed.push(parsed);
+    }
+
+    Ok(outcome)
+}
+
+/// Enumerate `.jsonl` files reachable from the session root. Tolerates a
+/// missing session root (returns empty).
+fn iter_session_files(session_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if !session_root.exists() {
+        return Ok(paths);
+    }
+    collect_jsonl(session_root, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+/// Recursively collect `.jsonl` file paths over the storage layout (not Scope).
+fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            collect_jsonl(&path, out)?;
+        } else if (file_type.is_file() || file_type.is_symlink())
+            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Parse a single OMP JSONL session file read-only. Returns `Ok(None)` when
+/// the file has no valid `session` header.
+fn parse_session_file(
+    path: &Path,
+    effective_root: &Path,
+    bounds: &Bounds,
+) -> io::Result<Option<ParsedSession>> {
+    let result = jsonl::read_file_confined(path, effective_root, bounds)?;
+    let file_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
+    Ok(format::extract_session(path, &result, file_mtime))
+}
+
+/// Whether a read result indicates a file that was being actively written.
+#[allow(dead_code)]
+pub(super) fn was_live_growing(result: &ReadResult) -> bool {
+    matches!(result.outcome, FileOutcome::IncompleteTail)
+}

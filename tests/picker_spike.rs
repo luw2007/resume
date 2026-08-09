@@ -39,6 +39,7 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(&exe);
     cmd.arg(sub);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("RESUME_DISABLE_PROC_PROBE", "1");
     // The spike uses only in-memory candidates. Point every conventional
     // agent/config root at a deliberately nonexistent fixture path so a
     // regression can never scan the runner's real HOME or credentials.
@@ -575,6 +576,7 @@ fn works_with_redirected_stdin() {
     cmd.arg("-c");
     cmd.arg(&shell_cmd);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("RESUME_DISABLE_PROC_PROBE", "1");
     let isolated = std::env::temp_dir().join(format!("resume-pty-redirect-{}", std::process::id()));
     std::fs::create_dir_all(&isolated).expect("create isolated redirected-stdin home");
     cmd.env("HOME", &isolated);

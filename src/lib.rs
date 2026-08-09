@@ -9,6 +9,7 @@ pub mod launch;
 pub mod message;
 pub mod picker;
 pub mod preview;
+pub mod proc;
 pub mod runtime;
 pub mod scope;
 pub mod session;
