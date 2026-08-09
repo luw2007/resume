@@ -143,13 +143,13 @@ The recorded Workspace is the child working directory. Missing or changed Worksp
 
 ## Support list
 
-“Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi or OMP, and Codex/Claude Sessions therefore normally report `Unknown`.
+“Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi or OMP. Claude Sessions also report `Unknown`; Codex Sessions report `Active` only when one process-wide `lsof` probe finds a live Codex process holding the exact rollout file open.
 
 | Agent | Discovery | Preview parsing | Exact Resume | Profiles | Active Detection |
 |---|---|---|---|---|---|
 | Pi | Supported | Supported | Supported | Not applicable | Conditional: validated ID + Session path evidence; Unknown by default |
 | Claude Code | Supported | Supported | Supported | Not applicable | Unknown (no proven correlation) |
-| Codex | Supported | Supported | Supported | Not applicable | Unknown by default; integration design permits only exact rollout/process positive evidence |
+| Codex | Supported | Supported | Supported | Not applicable | Supported: one `lsof` probe per run; exact rollout path or confirmed device/inode evidence; Unknown otherwise |
 | OMP | Supported | Supported | Supported | Supported | Conditional: live process + TTY + matching breadcrumb; Unknown by default |
 
 Preview parsing here means read-only extraction and terminal-safe normalization are covered by integration/foundation tests. It does not promise native title precedence or a full transcript in the current production picker.

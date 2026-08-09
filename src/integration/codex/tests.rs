@@ -15,12 +15,22 @@ use std::{
 
 use serde_json::json;
 
+use super::roots::{dirs_home, is_rollout_filename};
 use super::*;
 use crate::{
     preview::jsonl::Bounds,
     preview::snapshot,
-    session::{ActivityStatus, RiskStatus, SupportStatus, WorkspaceEvidence},
+    session::{
+        ActivityStatus, IntegrationError, RiskStatus, Session, SupportStatus, WorkspaceEvidence,
+    },
 };
+
+#[test]
+fn public_extract_user_messages_api_is_preserved() {
+    let extract: fn(&[serde_json::Value]) -> Vec<crate::preview::message::UserMessage> =
+        super::extract_user_messages;
+    assert!(extract(&[]).is_empty());
+}
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
