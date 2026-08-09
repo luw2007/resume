@@ -124,7 +124,7 @@ Imported Sessions receive a new OMP ID and a `foreign_session_import` custom ent
 
 Default: `omp --resume <id>`. Named profile: `omp --profile <name> --resume <id>`. Add `--session-dir <root>` when discovery used it, and run from header `cwd`.
 
-Terminal breadcrumbs map TTY names to cwd/session path but can be stale and do not contain PID. Report Active only after correlating a live OMP process, its TTY, and matching breadcrumb Session path.
+OMP 17.2.12 repository/runtime evidence pins terminal breadcrumbs to the profile's agent **state** root at `<agent-root>/terminal-sessions/<terminal-id>` (default installation observed at `~/.omp/agent/terminal-sessions/ttysNNN`). The terminal ID is the device basename (`ttys004`, without `/dev/`). Each breadcrumb is bare text: line 1 is the absolute cwd, line 2 is the absolute Session JSONL path, and optional line 3 is `fresh` for a lazily materialized `/new` boundary. The installed implementation (`writeTerminalBreadcrumb`/`readTerminalBreadcrumbEntry` in `@oh-my-pi/pi-coding-agent` 17.2.12) leaves breadcrumbs in place and validates the target file when reading; it stores no PID. Named profiles resolve `terminal-sessions` through their profile-specific agent root rather than a global index. Report Active only after correlating a live OMP process, its resolved TTY basename, and a breadcrumb whose Session path exists and exactly matches the discovered transcript. A stale breadcrumb without a live process remains Unknown.
 
 ### Required fixtures
 

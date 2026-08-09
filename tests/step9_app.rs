@@ -49,6 +49,7 @@ fn run_with_env(
         // host `lsof`, which could correlate fixtures with unrelated processes.
         .env("PATH", &bin)
         .env("TERM", "dumb")
+        .env("RESUME_DISABLE_PROC_PROBE", "1")
         .env("XDG_CONFIG_HOME", xdg.join("config"))
         .env("XDG_DATA_HOME", xdg.join("data"))
         .env("XDG_STATE_HOME", xdg.join("state"))
