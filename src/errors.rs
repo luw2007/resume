@@ -8,7 +8,7 @@
 //! Two channels consume the catalog differently:
 //!
 //! * **Fatal, one per run.** [`ErrorSpec::report`] builds a [`Report`] whose
-//!   [`Display`] is the four-line `ERROR [E1001] INVALID_SINCE: <what>` /
+//!   its `Display` implementation is the four-line `ERROR [E1001] INVALID_SINCE: <what>` /
 //!   `Trigger:` / `Fix:` / `Example:` block, and [`Report::emit`] writes it
 //!   to stderr and returns the process exit code.
 //! * **Aggregated discovery diagnostics.** These keep their existing
@@ -80,6 +80,9 @@ pub mod category {
     pub const GIT_SCOPE_DISCOVERY_FAILED: &str = "git_scope_discovery_failed";
     pub const UNKNOWN_AGENT: &str = "unknown_agent";
     pub const IO_ERROR: &str = "io_error";
+    pub const PROC_PROBE_FAILED: &str = "proc_probe_failed";
+    pub const PROC_PROBE_TIMEOUT: &str = "proc_probe_timeout";
+    pub const OMP_BREADCRUMB_START_TIME_UNAVAILABLE: &str = "omp_breadcrumb_start_time_unavailable";
 }
 
 /// The catalog. Single source of truth; nothing else defines these strings.
@@ -397,6 +400,13 @@ mod tests {
             for_category(category::CLAUDE_MISSING_WORKSPACE).map(|s| s.code),
             Some("E3003")
         );
+        for informational in [
+            category::PROC_PROBE_FAILED,
+            category::PROC_PROBE_TIMEOUT,
+            category::OMP_BREADCRUMB_START_TIME_UNAVAILABLE,
+        ] {
+            assert!(for_category(informational).is_none());
+        }
     }
 
     /// Most categories deliberately have no code; `None` is the normal

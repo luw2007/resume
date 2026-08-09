@@ -15,7 +15,7 @@ const KNOWN_WRAPPERS: &[&str] = &["skill"];
 /// Collapse complete known injected wrappers, keeping inner text.
 ///
 /// Rules:
-/// - Only matched `<tag>...</tag>` pairs for tags in [`KNOWN_WRAPPERS`] are
+/// - Only matched `<tag>...</tag>` pairs for known wrapper tags are
 ///   collapsed.
 /// - The wrapper must be complete (open + close). An orphan `<skill>` without
 ///   a close is left untouched (it is not confirmed as a complete injection).

@@ -79,7 +79,16 @@ fn collect_candidates(projects: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec
     let mut candidates = Vec::new();
     let workspace_dirs = match fs::read_dir(projects) {
         Ok(entries) => entries,
-        Err(_) => return candidates,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return candidates,
+        Err(error) => {
+            diagnostics.push(Diagnostic {
+                category: "claude_root_unavailable",
+                count: 1,
+                verbose_path: Some(projects.to_path_buf()),
+                verbose_chain: Some(error.to_string()),
+            });
+            return candidates;
+        }
     };
 
     for entry in workspace_dirs.flatten() {

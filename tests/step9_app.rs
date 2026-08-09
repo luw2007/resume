@@ -201,10 +201,14 @@ fn meaningless_option_combinations_are_usage_errors() {
 #[test]
 fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
     let (tmp, ws) = fixtures();
-    let corrupt = tmp
-        .path()
-        .join(".codex/sessions/2026/01/01/rollout-corrupt.jsonl");
-    fs::write(corrupt, "not-json").unwrap();
+    let corrupt_dir = tmp.path().join(".codex/sessions/2026/01/01");
+    for name in [
+        "rollout-corrupt.jsonl",
+        "rollout-corrupt-2.jsonl",
+        "rollout-corrupt-3.jsonl",
+    ] {
+        fs::write(corrupt_dir.join(name), "not-json").unwrap();
+    }
 
     let output = run(tmp.path(), &ws, &["--json", "--agent", "codex"]);
     assert!(output.status.success());
@@ -223,7 +227,102 @@ fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
             .iter()
             .any(|error| { error["category"] == "codex_invalid_session" })
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("codex_invalid_session"));
+    let matching: Vec<_> = value["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|error| error["category"] == "codex_invalid_session")
+        .collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0]["count"], 3);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("codex_invalid_session: 3"));
+
+    let list = run(tmp.path(), &ws, &["--list", "--agent", "codex"]);
+    assert!(String::from_utf8_lossy(&list.stderr).contains("codex_invalid_session: 3"));
+}
+
+#[test]
+fn disabled_process_probe_never_invokes_lsof_and_leaves_codex_unknown() {
+    let (tmp, ws) = fixtures();
+    let marker = tmp.path().join("lsof-invoked");
+    fs::create_dir_all(tmp.path().join("bin")).unwrap();
+    executable(
+        &tmp.path().join("bin/lsof"),
+        &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    );
+
+    let output = run(tmp.path(), &ws, &["--json", "--agent", "codex"]);
+    assert!(output.status.success());
+    assert!(!marker.exists(), "disabled probe invoked fake lsof");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["sessions"][0]["activity"], "Unknown");
+}
+
+#[test]
+fn unreadable_sole_integration_store_is_a_failed_integration() {
+    for (agent, store, category) in [
+        ("codex", ".codex/sessions", "codex_root_unavailable"),
+        ("claude", ".claude/projects", "claude_root_unavailable"),
+    ] {
+        let (tmp, ws) = fixtures();
+        let store = tmp.path().join(store);
+        let original = fs::metadata(&store).unwrap().permissions();
+        let mut unreadable = original.clone();
+        unreadable.set_mode(0o000);
+        fs::set_permissions(&store, unreadable).unwrap();
+
+        // Root/administrator test runners may retain read access despite mode 000.
+        if fs::read_dir(&store).is_ok() {
+            fs::set_permissions(&store, original).unwrap();
+            continue;
+        }
+        let output = run(tmp.path(), &ws, &["--json", "--agent", agent]);
+        fs::set_permissions(&store, original).unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{agent}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let matching: Vec<_> = value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|error| error["category"] == category)
+            .collect();
+        assert_eq!(matching.len(), 1, "{agent}: {value}");
+        assert_eq!(matching[0]["count"], 1, "{agent}: {value}");
+    }
+}
+
+#[test]
+fn unreadable_one_of_multiple_integration_stores_preserves_partial_success() {
+    let (tmp, ws) = fixtures();
+    let store = tmp.path().join(".codex/sessions");
+    let original = fs::metadata(&store).unwrap().permissions();
+    let mut unreadable = original.clone();
+    unreadable.set_mode(0o000);
+    fs::set_permissions(&store, unreadable).unwrap();
+    if fs::read_dir(&store).is_ok() {
+        fs::set_permissions(&store, original).unwrap();
+        return;
+    }
+
+    let output = run(tmp.path(), &ws, &["--json"]);
+    fs::set_permissions(&store, original).unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["agent"] == "pi")
+    );
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| { e["category"] == "codex_root_unavailable" && e["count"] == 1 })
+    );
 }
 
 #[cfg(unix)]

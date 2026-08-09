@@ -8,15 +8,16 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    io::{self, Read},
     path::Path,
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
-/// Maximum wall-clock duration allowed for the process probe.
-pub const PROC_PROBE_BUDGET: Duration = Duration::from_millis(300);
+use crate::session::Diagnostic;
+
+pub use crate::runtime::PROC_PROBE_BUDGET;
 
 pub const DISABLE_PROC_PROBE_ENV: &str = "RESUME_DISABLE_PROC_PROBE";
 
@@ -31,7 +32,7 @@ pub struct ProcEntry {
     pub pid: u32,
     pub command: OsString,
     pub tty: Option<OsString>,
-    pub elapsed: Option<Duration>,
+    pub started_at: Option<SystemTime>,
 }
 
 /// Process rows observed at one instant.
@@ -39,6 +40,7 @@ pub struct ProcEntry {
 pub struct ProcessTable {
     entries: Vec<ProcEntry>,
     observed_at: Option<SystemTime>,
+    live_by_command_tty: HashMap<(String, OsString), Option<usize>>,
 }
 
 impl ProcessTable {
@@ -68,11 +70,34 @@ impl ProcessTable {
             .collect()
     }
 
+    pub fn live_on_tty(&self, command: &str, tty: &OsStr) -> Option<&ProcEntry> {
+        self.live_by_command_tty
+            .get(&(command.to_owned(), tty.to_owned()))
+            .and_then(|index| index.and_then(|index| self.entries.get(index)))
+    }
+
     #[cfg(test)]
     pub(crate) fn from_entries(entries: Vec<ProcEntry>, observed_at: SystemTime) -> Self {
+        Self::new(entries, observed_at)
+    }
+
+    fn new(entries: Vec<ProcEntry>, observed_at: SystemTime) -> Self {
+        let mut live_by_command_tty = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(tty) = entry.tty.as_ref() else {
+                continue;
+            };
+            for command in command_names(&entry.command) {
+                live_by_command_tty
+                    .entry((command, tty.clone()))
+                    .and_modify(|existing| *existing = None)
+                    .or_insert(Some(index));
+            }
+        }
         Self {
             entries,
             observed_at: Some(observed_at),
+            live_by_command_tty,
         }
     }
 }
@@ -135,18 +160,21 @@ fn device_numbers(device: u64) -> (u32, u32) {
     (major as u32, minor as u32)
 }
 
-fn command_matches(command: &std::ffi::OsStr, name: &str) -> bool {
+fn command_names(command: &std::ffi::OsStr) -> std::vec::IntoIter<String> {
     command
         .to_string_lossy()
         .split_whitespace()
         // Executable, interpreter script, or `/usr/bin/env <runtime> <script>`.
         // Do not scan arbitrary argv, where a prompt could merely mention OMP.
         .take(3)
-        .any(|token| {
-            Path::new(token)
-                .file_name()
-                .is_some_and(|base| base == name)
-        })
+        .filter_map(|token| Path::new(token).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn command_matches(command: &std::ffi::OsStr, name: &str) -> bool {
+    command_names(command).any(|candidate| candidate == name)
 }
 
 /// Parse captured macOS `ps` output containing numeric `tdev` values.
@@ -157,7 +185,10 @@ pub fn parse_ps_output(raw: &str, devices: &DeviceMap, observed_at: SystemTime) 
             let mut fields = line.split_whitespace();
             let pid = fields.next()?.parse().ok()?;
             let tdev = fields.next()?;
-            let elapsed = fields.next().and_then(parse_elapsed);
+            let started_at = fields
+                .next()
+                .and_then(parse_elapsed)
+                .and_then(|elapsed| observed_at.checked_sub(elapsed));
             let command = fields.collect::<Vec<_>>().join(" ");
             if command.is_empty() {
                 return None;
@@ -169,14 +200,11 @@ pub fn parse_ps_output(raw: &str, devices: &DeviceMap, observed_at: SystemTime) 
                 pid,
                 command: command.into(),
                 tty,
-                elapsed,
+                started_at,
             })
         })
         .collect();
-    ProcessTable {
-        entries,
-        observed_at: Some(observed_at),
-    }
+    ProcessTable::new(entries, observed_at)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -187,20 +215,20 @@ fn parse_linux_ps_output(raw: &str, observed_at: SystemTime) -> ProcessTable {
             let mut fields = line.split_whitespace();
             let pid = fields.next()?.parse().ok()?;
             let tty = normalize_tty(OsStr::new(fields.next()?));
-            let elapsed = fields.next().and_then(parse_elapsed);
+            let started_at = fields
+                .next()
+                .and_then(parse_elapsed)
+                .and_then(|elapsed| observed_at.checked_sub(elapsed));
             let command = fields.collect::<Vec<_>>().join(" ");
             (!command.is_empty()).then_some(ProcEntry {
                 pid,
                 command: command.into(),
                 tty,
-                elapsed,
+                started_at,
             })
         })
         .collect();
-    ProcessTable {
-        entries,
-        observed_at: Some(observed_at),
-    }
+    ProcessTable::new(entries, observed_at)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -212,7 +240,7 @@ fn normalize_tty(raw: &OsStr) -> Option<OsString> {
     Some(tty.strip_prefix("/dev/").unwrap_or(&tty).into())
 }
 
-fn proc_probe_disabled(value: Option<&OsStr>) -> bool {
+pub(crate) fn proc_probe_disabled(value: Option<&OsStr>) -> bool {
     value.is_some()
 }
 
@@ -245,60 +273,66 @@ fn parse_elapsed(value: &str) -> Option<Duration> {
     Duration::from_secs(days.checked_mul(86_400)?.checked_add(seconds)?).into()
 }
 
-/// Acquire a bounded process snapshot. Failure is represented by an empty table.
-pub fn snapshot() -> io::Result<ProcessTable> {
+/// Acquire a bounded process snapshot and agent-neutral diagnostics.
+pub fn snapshot() -> (ProcessTable, Vec<Diagnostic>) {
     if proc_probe_disabled(std::env::var_os(DISABLE_PROC_PROBE_ENV).as_deref()) {
-        return Ok(ProcessTable::empty());
+        return (ProcessTable::empty(), Vec::new());
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        return Ok(ProcessTable::empty());
+        return (ProcessTable::empty(), Vec::new());
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let observed_at = SystemTime::now();
-        let mut child = match Command::new("ps")
-            .args(PS_ARGS)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => return Ok(ProcessTable::empty()),
-        };
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let output = Command::new("ps")
+                .args(PS_ARGS)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output();
+            let _ = tx.send(output);
         });
-        let deadline = Instant::now() + PROC_PROBE_BUDGET;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
+        let output = match rx.recv_timeout(PROC_PROBE_BUDGET) {
+            Ok(Ok(output)) if output.status.success() => output,
+            Ok(Ok(_)) => return failed_probe("ps exited unsuccessfully"),
+            Ok(Err(error)) => return failed_probe(&error.to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return diagnostic_probe(
+                    crate::errors::category::PROC_PROBE_TIMEOUT,
+                    "process probe exceeded its wall-clock budget",
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return failed_probe("process probe worker disconnected");
             }
         };
-        let Some(_status) = status.filter(|status| status.success()) else {
-            let _ = reader.join();
-            return Ok(ProcessTable::empty());
-        };
-        let Ok(Ok(bytes)) = reader.join() else {
-            return Ok(ProcessTable::empty());
-        };
-        let Ok(raw) = String::from_utf8(bytes) else {
-            return Ok(ProcessTable::empty());
+        let Ok(raw) = String::from_utf8(output.stdout) else {
+            return failed_probe("process probe returned non-UTF-8 output");
         };
         #[cfg(target_os = "macos")]
         let table = parse_ps_output(&raw, &DeviceMap::scan(Path::new("/dev")), observed_at);
         #[cfg(target_os = "linux")]
         let table = parse_linux_ps_output(&raw, observed_at);
-        Ok(table)
+        (table, Vec::new())
     }
+}
+
+fn failed_probe(detail: &str) -> (ProcessTable, Vec<Diagnostic>) {
+    diagnostic_probe(crate::errors::category::PROC_PROBE_FAILED, detail)
+}
+
+fn diagnostic_probe(category: &'static str, detail: &str) -> (ProcessTable, Vec<Diagnostic>) {
+    (
+        ProcessTable::empty(),
+        vec![Diagnostic {
+            category,
+            count: 1,
+            verbose_path: None,
+            verbose_chain: Some(detail.into()),
+        }],
+    )
 }
 
 #[cfg(test)]
@@ -321,9 +355,15 @@ mod tests {
             entries[0].tty.as_deref(),
             Some(std::ffi::OsStr::new("ttys004"))
         );
-        assert_eq!(entries[0].elapsed, Some(Duration::from_secs(62)));
+        assert_eq!(
+            entries[0].started_at,
+            observed.checked_sub(Duration::from_secs(62))
+        );
         assert_eq!(entries[1].tty, None);
-        assert_eq!(entries[1].elapsed, Some(Duration::from_secs(183_845)));
+        assert_eq!(
+            entries[1].started_at,
+            observed.checked_sub(Duration::from_secs(183_845))
+        );
         assert_eq!(table.observed_at(), Some(observed));
     }
 
@@ -360,6 +400,36 @@ mod tests {
     }
 
     #[test]
+    fn live_tty_lookup_preserves_process_start_time() {
+        let observed = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let table = parse_linux_ps_output("42 pts/3 00:10 omp\n", observed);
+        let entry = table.live_on_tty("omp", OsStr::new("pts/3")).unwrap();
+        assert_eq!(entry.started_at, Some(observed - Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn duplicate_command_tty_rows_are_conservatively_ambiguous() {
+        let table = ProcessTable::from_entries(
+            vec![
+                ProcEntry {
+                    pid: 1,
+                    command: "omp".into(),
+                    tty: Some("pts/3".into()),
+                    started_at: Some(SystemTime::UNIX_EPOCH),
+                },
+                ProcEntry {
+                    pid: 2,
+                    command: "omp".into(),
+                    tty: Some("pts/3".into()),
+                    started_at: Some(SystemTime::UNIX_EPOCH),
+                },
+            ],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(table.live_on_tty("omp", OsStr::new("pts/3")).is_none());
+    }
+
+    #[test]
     fn ttys_are_distinct_and_command_specific() {
         let table = ProcessTable {
             entries: vec![
@@ -367,22 +437,23 @@ mod tests {
                     pid: 1,
                     command: "omp".into(),
                     tty: Some("t1".into()),
-                    elapsed: None,
+                    started_at: None,
                 },
                 ProcEntry {
                     pid: 2,
                     command: "omp".into(),
                     tty: Some("t1".into()),
-                    elapsed: None,
+                    started_at: None,
                 },
                 ProcEntry {
                     pid: 3,
                     command: "other".into(),
                     tty: Some("t2".into()),
-                    elapsed: None,
+                    started_at: None,
                 },
             ],
             observed_at: Some(SystemTime::now()),
+            live_by_command_tty: HashMap::new(),
         };
         assert_eq!(table.ttys_for_command("omp"), vec![OsString::from("t1")]);
     }
