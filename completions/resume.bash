@@ -56,7 +56,7 @@ _resume() {
 
     case "${cmd}" in
         resume)
-            opts="-U -D -a -h -V --up --down --agent --since --list --json --verbose --config --confirm-always --no-confirm --help --version config completions help"
+            opts="-U -D -a -h -V --up --down --agent --since --list --json --verbose --config --confirm-always --no-confirm --man --help --version config completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

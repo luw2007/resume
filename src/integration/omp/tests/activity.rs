@@ -8,11 +8,16 @@ use std::{
 struct StubBreadcrumbs {
     tty: OsString,
     session: PathBuf,
+    recorded_at: Option<SystemTime>,
 }
 
 impl omp::BreadcrumbSource for StubBreadcrumbs {
-    fn session_for_tty(&self, tty: &OsStr) -> Option<PathBuf> {
-        (tty == self.tty).then(|| self.session.clone())
+    fn breadcrumbs(&self) -> Vec<omp::Breadcrumb> {
+        vec![omp::Breadcrumb {
+            tty: self.tty.clone(),
+            session_path: self.session.clone(),
+            recorded_at: self.recorded_at,
+        }]
     }
 }
 
@@ -22,7 +27,7 @@ fn process_table(tty: Option<&str>) -> crate::proc::ProcessTable {
             pid: 42,
             command: "omp".into(),
             tty: tty.map(OsString::from),
-            elapsed: Some(Duration::from_secs(1)),
+            started_at: Some(SystemTime::UNIX_EPOCH),
         }],
         SystemTime::UNIX_EPOCH,
     )
@@ -39,13 +44,15 @@ fn correlate_live_requires_process_tty_breadcrumb_and_existing_transcript() {
     let breadcrumbs = StubBreadcrumbs {
         tty: "ttys004".into(),
         session: transcript.clone(),
+        recorded_at: Some(SystemTime::UNIX_EPOCH),
     };
 
     assert!(
         omp::correlate_live_with(&process_table(None), &breadcrumbs, SystemTime::UNIX_EPOCH)
+            .0
             .is_empty()
     );
-    let live = omp::correlate_live_with(
+    let (live, _) = omp::correlate_live_with(
         &process_table(Some("ttys004")),
         &breadcrumbs,
         SystemTime::UNIX_EPOCH + Duration::from_secs(5),
@@ -55,11 +62,87 @@ fn correlate_live_requires_process_tty_breadcrumb_and_existing_transcript() {
     let missing = StubBreadcrumbs {
         tty: "ttys004".into(),
         session: fixture.base_root.join("missing.jsonl"),
+        recorded_at: Some(SystemTime::now()),
     };
     assert!(
         omp::correlate_live_with(&process_table(Some("ttys004")), &missing, SystemTime::now())
+            .0
             .is_empty()
     );
+}
+
+#[test]
+fn correlate_live_rejects_breadcrumb_older_than_recycled_tty_process() {
+    let fixture = Fixture::new();
+    let transcript = fixture.write_flat(
+        &fixture.default_agent_root,
+        "stale.jsonl",
+        &[header_v3("stale", &fixture.workspace, 1)],
+    );
+    let breadcrumbs = StubBreadcrumbs {
+        tty: "ttys004".into(),
+        session: transcript,
+        recorded_at: Some(SystemTime::UNIX_EPOCH),
+    };
+    let table = crate::proc::ProcessTable::from_entries(
+        vec![crate::proc::ProcEntry {
+            pid: 42,
+            command: "omp".into(),
+            tty: Some("ttys004".into()),
+            started_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        }],
+        SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+    );
+    assert!(
+        omp::correlate_live_with(
+            &table,
+            &breadcrumbs,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2)
+        )
+        .0
+        .is_empty()
+    );
+}
+
+#[test]
+fn missing_process_start_time_uses_twelve_hour_freshness_fallback() {
+    let fixture = Fixture::new();
+    let transcript = fixture.write_flat(
+        &fixture.default_agent_root,
+        "fallback.jsonl",
+        &[header_v3("fallback", &fixture.workspace, 1)],
+    );
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(24 * 60 * 60);
+    let table = crate::proc::ProcessTable::from_entries(
+        vec![crate::proc::ProcEntry {
+            pid: 42,
+            command: "omp".into(),
+            tty: Some("ttys004".into()),
+            started_at: None,
+        }],
+        now,
+    );
+
+    let fresh = StubBreadcrumbs {
+        tty: "ttys004".into(),
+        session: transcript.clone(),
+        recorded_at: Some(now - omp::activity::BREADCRUMB_FRESHNESS),
+    };
+    let (live, diagnostics) = omp::correlate_live_with(&table, &fresh, now);
+    assert!(live.for_transcript(&transcript).is_some());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].category,
+        "omp_breadcrumb_start_time_unavailable"
+    );
+
+    let stale = StubBreadcrumbs {
+        recorded_at: Some(now - omp::activity::BREADCRUMB_FRESHNESS - Duration::from_secs(1)),
+        ..fresh
+    };
+    let (live, diagnostics) = omp::correlate_live_with(&table, &stale, now);
+    assert!(live.is_empty());
+    assert_eq!(diagnostics.len(), 1);
 }
 
 #[test]
@@ -110,14 +193,11 @@ fn real_breadcrumb_reader_parses_bare_text_and_rejects_path_tty() {
     )
     .unwrap();
     let source = omp::OmpBreadcrumbs::from_directory(temp.path().to_path_buf());
-    assert_eq!(
-        omp::BreadcrumbSource::session_for_tty(&source, OsStr::new("ttys004")),
-        Some(transcript)
-    );
-    assert_eq!(
-        omp::BreadcrumbSource::session_for_tty(&source, OsStr::new("../ttys004")),
-        None
-    );
+    let records = omp::BreadcrumbSource::breadcrumbs(&source);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].tty, OsStr::new("ttys004"));
+    assert_eq!(records[0].session_path, transcript);
+    assert!(records[0].recorded_at.is_some());
 }
 
 // ===========================================================================

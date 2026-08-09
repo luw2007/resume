@@ -23,8 +23,8 @@
 //! This module never invokes Pi during discovery/preview. It reads JSONL
 //! read-only through the shared [`crate::preview::jsonl`] reader, interprets records
 //! using the shared [`crate::preview::message`], [`crate::preview::injection`], and
-//! [`crate::preview::summary`] helpers, and produces [`Session`] entries and
-//! [`ResumeSpec`]s.
+//! [`crate::preview::summary`] helpers, and produces [`crate::session::Session`] entries and
+//! [`crate::session::ResumeSpec`]s.
 
 mod discover;
 mod format;

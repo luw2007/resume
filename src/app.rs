@@ -61,23 +61,23 @@ struct EffectiveOptions {
 struct DiscoveryContext {
     procs: crate::proc::ProcessTable,
     codex_activity: codex::activity::ActivitySnapshot,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl DiscoveryContext {
     /// Probes read-only process/TTY state for OMP/Pi and Codex's rollout-fd
     /// activity evidence in one pass, each gated per agent so a run that
-    /// excludes an agent never pays its probe cost. Diagnostics from the
-    /// Codex probe are returned separately: this runs before either code
-    /// path's `DiscoveryState` exists, so callers fold them in afterward.
-    fn probe(options: &EffectiveOptions) -> (Self, Vec<Diagnostic>) {
+    /// excludes an agent never pays its probe cost. The context owns every
+    /// probe diagnostic so evidence and diagnostics cannot desynchronize.
+    fn probe(options: &EffectiveOptions) -> Self {
         let needed = options
             .agents
             .iter()
             .any(|agent| agent == "omp" || agent == "pi");
-        let procs = if needed {
-            crate::proc::snapshot().unwrap_or_else(|_| crate::proc::ProcessTable::empty())
+        let (procs, mut diagnostics) = if needed {
+            crate::proc::snapshot()
         } else {
-            crate::proc::ProcessTable::empty()
+            (crate::proc::ProcessTable::empty(), Vec::new())
         };
         let (codex_activity, codex_diagnostics) =
             if options.agents.iter().any(|agent| agent == codex::AGENT) {
@@ -85,13 +85,12 @@ impl DiscoveryContext {
             } else {
                 (codex::activity::ActivitySnapshot::empty(), Vec::new())
             };
-        (
-            Self {
-                procs,
-                codex_activity,
-            },
-            codex_diagnostics,
-        )
+        diagnostics.extend(codex_diagnostics);
+        Self {
+            procs,
+            codex_activity,
+            diagnostics,
+        }
     }
 }
 
@@ -116,24 +115,21 @@ pub fn run(cli: Cli) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let (discovery_ctx, ctx_diagnostics) = DiscoveryContext::probe(&options);
-    let discovery_ctx = Arc::new(discovery_ctx);
+    let discovery_ctx = Arc::new(DiscoveryContext::probe(&options));
 
     if cli.list || cli.json {
-        let (records, state) = discover_all(&options, scope, discovery_ctx, ctx_diagnostics);
+        let (records, state) = discover_all(&options, scope, discovery_ctx);
         if cli.json {
             print_diagnostics(&state, options.verbose);
             print_json(&records, &state);
         } else {
             print_list(&records);
-            if options.verbose {
-                print_diagnostics(&state, true);
-            }
+            print_diagnostics(&state, options.verbose);
         }
         return discovery_exit(&records, &state);
     }
 
-    run_interactive(&options, scope, discovery_ctx, ctx_diagnostics)
+    run_interactive(&options, scope, discovery_ctx)
 }
 
 fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, String> {
@@ -198,13 +194,12 @@ fn discover_all(
     options: &EffectiveOptions,
     scope: Arc<Scope>,
     ctx: Arc<DiscoveryContext>,
-    ctx_diagnostics: Vec<Diagnostic>,
 ) -> (Vec<CandidateRecord>, Arc<DiscoveryState>) {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
-    state.errors.lock().unwrap().extend(ctx_diagnostics);
+    state.errors.lock().unwrap().extend(ctx.diagnostics.clone());
     let records = Arc::new(Mutex::new(Vec::new()));
     let cancel = CancelToken::new();
     let mut handles = Vec::new();
@@ -240,13 +235,12 @@ fn run_interactive(
     options: &EffectiveOptions,
     scope: Arc<Scope>,
     ctx: Arc<DiscoveryContext>,
-    ctx_diagnostics: Vec<Diagnostic>,
 ) -> i32 {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
-    state.errors.lock().unwrap().extend(ctx_diagnostics);
+    state.errors.lock().unwrap().extend(ctx.diagnostics.clone());
     let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let next_key = Arc::new(AtomicU64::new(1));
@@ -365,14 +359,18 @@ impl AgentDiscovery {
         }
     }
     fn failed(category: &'static str) -> Self {
+        Self::failed_with_errors(vec![Diagnostic {
+            category,
+            count: 1,
+            verbose_path: None,
+            verbose_chain: None,
+        }])
+    }
+
+    fn failed_with_errors(errors: Vec<Diagnostic>) -> Self {
         Self {
             records: vec![],
-            errors: vec![Diagnostic {
-                category,
-                count: 1,
-                verbose_path: None,
-                verbose_chain: None,
-            }],
+            errors,
             integration_ok: false,
         }
     }
@@ -494,7 +492,15 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
                     record_optional(session, spec)
                 })
                 .collect();
-            AgentDiscovery::ok(records, discovery.diagnostics)
+            if discovery
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.category == "claude_root_unavailable")
+            {
+                AgentDiscovery::failed_with_errors(discovery.diagnostics)
+            } else {
+                AgentDiscovery::ok(records, discovery.diagnostics)
+            }
         }
         Err(_) => AgentDiscovery::failed("claude_discovery_failed"),
     }
@@ -551,7 +557,14 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
             }
         })
         .collect();
-    AgentDiscovery::ok(records, errors)
+    if errors
+        .iter()
+        .any(|diagnostic| diagnostic.category == "codex_root_unavailable")
+    {
+        AgentDiscovery::failed_with_errors(errors)
+    } else {
+        AgentDiscovery::ok(records, errors)
+    }
 }
 
 fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
@@ -577,9 +590,8 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
             }
         }
     }
-    let live = omp::correlate_live(&ctx.procs, &roots);
+    let (live, mut errors) = omp::correlate_live(&ctx.procs, &roots);
     let mut records = Vec::new();
-    let mut errors = Vec::new();
     for root in roots {
         match omp::discover(&omp::DiscoverConfig::new(root.clone(), scope)) {
             Ok(outcome) => {
@@ -823,7 +835,8 @@ fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
         })
         .collect();
     let errors_guard = state.errors.lock().unwrap();
-    let errors = errors_guard
+    let aggregated = aggregate_diagnostics(&errors_guard, false);
+    let errors = aggregated
         .iter()
         .map(|e| JsonError {
             category: e.category,

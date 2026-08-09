@@ -29,7 +29,7 @@
 //!
 //! ## Activity
 //!
-//! No authoritative active marker was found. Activity is [`ActivityStatus::Unknown`]
+//! No authoritative active marker was found. Activity is [`crate::session::ActivityStatus::Unknown`]
 //! absent a future validated positive process/session association.
 
 mod discover;

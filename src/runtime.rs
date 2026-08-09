@@ -24,6 +24,9 @@ pub const MAX_PREVIEW_WORKERS: usize = 4;
 /// cancellation.
 pub const JOIN_BUDGET: Duration = Duration::from_millis(250);
 
+/// Maximum wall-clock time for the shared OS process-table probe.
+pub const PROC_PROBE_BUDGET: Duration = Duration::from_millis(300);
+
 /// Channel capacity for the discovery → preview pipeline.
 pub const CHANNEL_CAPACITY: usize = 64;
 
