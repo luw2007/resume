@@ -195,14 +195,14 @@ fn handle_escape(bytes: &[u8], start: usize, _out: &mut Vec<u8>) -> usize {
             i = consume_string_terminator(bytes, i);
         }
         // ESC ( , ESC ) , ESC * , ESC + : charset designation (2-byte).
-        b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => {
-            // Consume one more byte.
-            if i < bytes.len() {
-                i += 1;
-            }
+        // Consume one more byte when present; at EOF, falls through to the
+        // catch-all below and leaves `i` unchanged.
+        b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' if i < bytes.len() => {
+            i += 1;
         }
         // ESC = , ESC > , ESC 7, ESC 8, ESC M, ESC D, ESC E, ESC c, etc.
-        // Single-character escape sequences.
+        // Single-character escape sequences (and the EOF case for the
+        // charset-designation arm above).
         _ => {
             // Already consumed the intermediate/final byte.
         }
