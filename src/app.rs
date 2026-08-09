@@ -57,6 +57,44 @@ struct EffectiveOptions {
     verbose: bool,
 }
 
+/// Read-only process evidence shared by all discovery workers.
+struct DiscoveryContext {
+    procs: crate::proc::ProcessTable,
+    codex_activity: codex::activity::ActivitySnapshot,
+}
+
+impl DiscoveryContext {
+    /// Probes read-only process/TTY state for OMP/Pi and Codex's rollout-fd
+    /// activity evidence in one pass, each gated per agent so a run that
+    /// excludes an agent never pays its probe cost. Diagnostics from the
+    /// Codex probe are returned separately: this runs before either code
+    /// path's `DiscoveryState` exists, so callers fold them in afterward.
+    fn probe(options: &EffectiveOptions) -> (Self, Vec<Diagnostic>) {
+        let needed = options
+            .agents
+            .iter()
+            .any(|agent| agent == "omp" || agent == "pi");
+        let procs = if needed {
+            crate::proc::snapshot().unwrap_or_else(|_| crate::proc::ProcessTable::empty())
+        } else {
+            crate::proc::ProcessTable::empty()
+        };
+        let (codex_activity, codex_diagnostics) =
+            if options.agents.iter().any(|agent| agent == codex::AGENT) {
+                codex::activity::probe()
+            } else {
+                (codex::activity::ActivitySnapshot::empty(), Vec::new())
+            };
+        (
+            Self {
+                procs,
+                codex_activity,
+            },
+            codex_diagnostics,
+        )
+    }
+}
+
 pub fn run(cli: Cli) -> i32 {
     let (config, _) = match crate::config::load(cli.config.clone()) {
         Ok(value) => value,
@@ -78,9 +116,11 @@ pub fn run(cli: Cli) -> i32 {
             return EXIT_USAGE;
         }
     };
+    let (discovery_ctx, ctx_diagnostics) = DiscoveryContext::probe(&options);
+    let discovery_ctx = Arc::new(discovery_ctx);
 
     if cli.list || cli.json {
-        let (records, state) = discover_all(&options, scope);
+        let (records, state) = discover_all(&options, scope, discovery_ctx, ctx_diagnostics);
         if cli.json {
             print_diagnostics(&state, options.verbose);
             print_json(&records, &state);
@@ -93,7 +133,7 @@ pub fn run(cli: Cli) -> i32 {
         return discovery_exit(&records, &state);
     }
 
-    run_interactive(&options, scope)
+    run_interactive(&options, scope, discovery_ctx, ctx_diagnostics)
 }
 
 fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, String> {
@@ -157,32 +197,27 @@ fn build_scope(cli: &Cli) -> io::Result<Scope> {
 fn discover_all(
     options: &EffectiveOptions,
     scope: Arc<Scope>,
+    ctx: Arc<DiscoveryContext>,
+    ctx_diagnostics: Vec<Diagnostic>,
 ) -> (Vec<CandidateRecord>, Arc<DiscoveryState>) {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
-    let (activity, activity_diagnostics) =
-        if options.agents.iter().any(|agent| agent == codex::AGENT) {
-            codex::activity::probe()
-        } else {
-            (codex::activity::ActivitySnapshot::empty(), Vec::new())
-        };
-    state.errors.lock().unwrap().extend(activity_diagnostics);
-    let activity = Arc::new(activity);
+    state.errors.lock().unwrap().extend(ctx_diagnostics);
     let records = Arc::new(Mutex::new(Vec::new()));
     let cancel = CancelToken::new();
     let mut handles = Vec::new();
     for agent in &options.agents {
         let agent = agent.clone();
         let scope = scope.clone();
+        let ctx = ctx.clone();
         let state = state.clone();
-        let activity = activity.clone();
         let records = records.clone();
         let cancel = cancel.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, &activity, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -201,19 +236,17 @@ fn discover_all(
     (result, state)
 }
 
-fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
+fn run_interactive(
+    options: &EffectiveOptions,
+    scope: Arc<Scope>,
+    ctx: Arc<DiscoveryContext>,
+    ctx_diagnostics: Vec<Diagnostic>,
+) -> i32 {
     let state = Arc::new(DiscoveryState::default());
     if let Some(diagnostic) = scope_warning_diagnostic(scope.git_warning().map(str::to_owned)) {
         state.errors.lock().unwrap().push(diagnostic);
     }
-    let (activity, activity_diagnostics) =
-        if options.agents.iter().any(|agent| agent == codex::AGENT) {
-            codex::activity::probe()
-        } else {
-            (codex::activity::ActivitySnapshot::empty(), Vec::new())
-        };
-    state.errors.lock().unwrap().extend(activity_diagnostics);
-    let activity = Arc::new(activity);
+    state.errors.lock().unwrap().extend(ctx_diagnostics);
     let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let next_key = Arc::new(AtomicU64::new(1));
@@ -223,15 +256,15 @@ fn run_interactive(options: &EffectiveOptions, scope: Arc<Scope>) -> i32 {
     for agent in &options.agents {
         let agent = agent.clone();
         let scope = scope.clone();
+        let ctx = ctx.clone();
         let state = state.clone();
-        let activity = activity.clone();
         let map = map.clone();
         let next_key = next_key.clone();
         let cancel = cancel.clone();
         let tx = tx.clone();
         let since_cutoff = options.since_cutoff;
         handles.push(thread::spawn(move || {
-            let result = discover_agent(&agent, &scope, &activity, since_cutoff, &cancel);
+            let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
@@ -348,7 +381,7 @@ impl AgentDiscovery {
 fn discover_agent(
     agent: &str,
     scope: &Scope,
-    activity: &codex::activity::ActivitySnapshot,
+    ctx: &DiscoveryContext,
     since_cutoff: Option<std::time::SystemTime>,
     cancel: &CancelToken,
 ) -> AgentDiscovery {
@@ -356,10 +389,10 @@ fn discover_agent(
         return AgentDiscovery::ok(vec![], vec![]);
     }
     let mut discovery = match agent {
-        "pi" => discover_pi(scope),
+        "pi" => discover_pi(scope, ctx),
         "claude" => discover_claude(scope),
-        "codex" => discover_codex(scope, activity),
-        "omp" => discover_omp(scope),
+        "codex" => discover_codex(scope, &ctx.codex_activity),
+        "omp" => discover_omp(scope, ctx),
         _ => AgentDiscovery::failed("unknown_agent"),
     };
     if let Some(cutoff) = since_cutoff {
@@ -403,7 +436,8 @@ fn session_at_or_after(record: &CandidateRecord, cutoff: std::time::SystemTime) 
     }
 }
 
-fn discover_pi(scope: &Scope) -> AgentDiscovery {
+fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
+    let _ = ctx;
     let mut inputs = pi::ResolutionInputs::from_env();
     if let Some(root) = inputs.agent_dir_env.clone().or_else(|| {
         inputs
@@ -520,7 +554,7 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
     AgentDiscovery::ok(records, errors)
 }
 
-fn discover_omp(scope: &Scope) -> AgentDiscovery {
+fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
     let base_inputs = omp::ResolutionInputs::from_env();
     let Some(base_roots) = omp::resolve(&base_inputs) else {
         return AgentDiscovery::failed("omp_root_unavailable");
@@ -543,6 +577,7 @@ fn discover_omp(scope: &Scope) -> AgentDiscovery {
             }
         }
     }
+    let live = omp::correlate_live(&ctx.procs, &roots);
     let mut records = Vec::new();
     let mut errors = Vec::new();
     for root in roots {
@@ -554,7 +589,7 @@ fn discover_omp(scope: &Scope) -> AgentDiscovery {
                     let mut session = parsed.clone().into_session(
                         &root,
                         omp::risk_status(&parsed, home().as_deref()),
-                        omp::activity_status(&parsed, None),
+                        omp::activity_status(&parsed, live.for_transcript(&parsed.transcript_path)),
                     );
                     normalize_availability(&mut session);
                     record(session, spec)
