@@ -118,10 +118,10 @@ pub fn probe() -> (ActivitySnapshot, Vec<Diagnostic>) {
     {
         let (entries, skipped) = probe_proc(observed_at);
         let snapshot = ActivitySnapshot::from_entries(entries, observed_at);
-        return (
+        (
             snapshot.clone(),
             partial_diagnostics(&snapshot, skipped, false),
-        );
+        )
     }
     #[cfg(not(target_os = "linux"))]
     (
