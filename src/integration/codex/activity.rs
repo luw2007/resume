@@ -423,6 +423,15 @@ mod tests {
         assert_eq!(matched.path, real.join("rollout-second.jsonl"));
     }
 
+    /// The fake `lsof` replacement writes its NUL-delimited `-F0` output as
+    /// raw bytes to a data file via Rust (`fs::write`), then the launched
+    /// script `cat`s that file verbatim. This sidesteps shell `printf`
+    /// backslash-escape interpretation entirely: `printf`'s `\0`/octal
+    /// escape handling is not identical across `/bin/sh` implementations
+    /// (dash vs bash-as-sh, BSD vs GNU), so embedding NUL bytes in a shell
+    /// script's `printf` argument is not a portable way to build test
+    /// fixtures. `cat` has no such ambiguity: it copies the exact bytes
+    /// Rust wrote, on any POSIX platform.
     #[cfg(unix)]
     #[test]
     fn one_probe_serves_many_session_lookups() {
@@ -431,15 +440,23 @@ mod tests {
         let rollout = temp.path().join("rollout-live.jsonl");
         fs::write(&rollout, "{}").unwrap();
         let metadata = fs::metadata(&rollout).unwrap();
+
+        let data = temp.path().join("fake-lsof-output");
+        let payload = format!(
+            "p44\0ccodex\0\nf3\0D0x{:x}\0i{}\0n{}\0\n",
+            metadata.dev(),
+            metadata.ino(),
+            rollout.display()
+        );
+        fs::write(&data, payload.as_bytes()).unwrap();
+
         let script = temp.path().join("fake-lsof");
         let mut file = fs::File::create(&script).unwrap();
         writeln!(
             file,
-            "#!/bin/sh\necho x >> '{}'\nprintf 'p44\\0ccodex\\0\\nf3\\0D0x{:x}\\0i{}\\0n{}\\0\\n'",
+            "#!/bin/sh\necho x >> '{}'\ncat '{}'",
             count.display(),
-            metadata.dev(),
-            metadata.ino(),
-            rollout.display()
+            data.display()
         )
         .unwrap();
         let mut permissions = fs::metadata(&script).unwrap().permissions();
