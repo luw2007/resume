@@ -57,6 +57,10 @@ where
         .unwrap_or_else(|_| effective_root.to_path_buf());
     let mut out = Vec::new();
     for root in rollout_roots(effective_root) {
+        if let Some((path, error)) = unreadable_root(&root.path) {
+            out.push(DiscoveredSession::Error { path, error });
+            continue;
+        }
         for path in list_rollout_files(&root.path) {
             match parse_rollout_file(&path, &canonical_root, bounds) {
                 Ok(parsed_opt) => match parsed_opt {
@@ -123,6 +127,10 @@ where
     }
     let mut pending: Vec<Pending> = Vec::new();
     for root in rollout_roots(effective_root) {
+        if let Some((path, error)) = unreadable_root(&root.path) {
+            pending.push(Pending::Error { path, error });
+            continue;
+        }
         for path in list_rollout_files(&root.path) {
             match parse_rollout_file(&path, &canonical_root, bounds) {
                 Ok(None) => {}
@@ -208,6 +216,28 @@ impl DiscoveredSession {
 /// deterministic order. Non-`.jsonl` files (the SQLite DB, indexes, config)
 /// are ignored. Symlinks to directories are not followed; symlinks to files
 /// are included and confined by the reader's root guard.
+fn unreadable_root(root: &Path) -> Option<(PathBuf, IntegrationError)> {
+    match fs::read_dir(root) {
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            let path = root.to_path_buf();
+            Some((
+                path.clone(),
+                IntegrationError::Io {
+                    diagnostic: crate::session::Diagnostic {
+                        category: "codex_root_unavailable",
+                        count: 1,
+                        verbose_path: Some(path),
+                        verbose_chain: Some(source.to_string()),
+                    },
+                    source,
+                },
+            ))
+        }
+    }
+}
+
 fn list_rollout_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     list_rollout_files_into(root, &mut files);

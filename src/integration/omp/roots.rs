@@ -39,7 +39,7 @@ pub enum ProfileSelection {
 }
 
 impl ProfileSelection {
-    /// The profile name to embed in [`SessionKey::profile`], or `None` for the
+    /// The profile name to embed in [`crate::session::SessionKey::profile`], or `None` for the
     /// default profile.
     pub fn as_profile_field(&self) -> Option<OsString> {
         match self {

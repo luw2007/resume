@@ -38,9 +38,9 @@ impl<'a> DiscoverConfig<'a> {
 }
 
 /// A discovered Pi session with its parsed metadata, ready to become a
-/// [`Session`] via [`ParsedSession::into_session`]. Holding this separately
+/// [`crate::session::Session`] via [`ParsedSession::into_session`]. Holding this separately
 /// lets tests inspect extracted fields and the caller dedupe before building
-/// final [`Session`] values.
+/// final [`crate::session::Session`] values.
 #[derive(Clone, Debug)]
 pub struct ParsedSession {
     /// Stable header `id`.

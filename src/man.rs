@@ -537,7 +537,9 @@ ERRORS
             pi_discovery_failed, pi_skipped, claude_discovery_failed,
             claude_no_session_id, claude_skipped, codex_io,
             codex_invalid_session, codex_sqlite_id_mismatch,
-            omp_discovery_failed, omp_skipped, unknown_agent, io_error
+            omp_discovery_failed, omp_skipped, proc_probe_failed,
+            proc_probe_timeout, omp_breadcrumb_start_time_unavailable,
+            unknown_agent, io_error
 
         Codex SQLite degradation adds sub-tokens: locked, corrupt,
         unreadable, schema_unreadable, unsupported_schema, query_failed.
@@ -626,9 +628,28 @@ mod tests {
     #[test]
     fn errors_section_matches_the_catalog() {
         let page = super::page();
+        let normalized_page = page.split_whitespace().collect::<Vec<_>>().join(" ");
         for spec in crate::errors::catalog() {
             assert!(page.contains(spec.code), "man page missing {}", spec.code);
             assert!(page.contains(spec.slug), "man page missing {}", spec.slug);
+            for (field, value) in [
+                ("trigger", spec.trigger),
+                ("fix", spec.fix),
+                ("example", spec.example),
+            ] {
+                let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    normalized_page.contains(&normalized),
+                    "man page missing {field} for {}",
+                    spec.code
+                );
+            }
+            for category in spec.categories {
+                assert!(
+                    page.contains(category),
+                    "man page missing category {category}"
+                );
+            }
         }
     }
 }
