@@ -27,11 +27,16 @@ pub enum DefaultScope {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Not `Clone`/`PartialEq`/`Eq`: `git_common_dir_cache` holds process-local
+/// memoized subprocess results (see `contains_workspace`) and is shared via
+/// `Arc<Scope>` across per-agent discovery threads rather than duplicated by
+/// value or compared for equality anywhere in the codebase.
+#[derive(Debug)]
 pub struct Scope {
     base: PathBuf,
     mode: ScopeMode,
     git_warning: Option<String>,
+    git_common_dir_cache: std::sync::Mutex<std::collections::HashMap<PathBuf, Option<PathBuf>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +82,7 @@ impl Scope {
             base,
             mode,
             git_warning,
+            git_common_dir_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -112,18 +118,56 @@ impl Scope {
 
     /// Match a recorded Workspace using its canonical path when it still
     /// exists, or its last-known absolute path when it has disappeared.
+    ///
+    /// Per `docs/product-design.md` section 4 ("Git metadata performance"):
+    /// "Query each normalized Workspace at most once" and cache only for the
+    /// current process. `git_common_dir` is a `git rev-parse` subprocess
+    /// spawn, so two optimizations apply:
+    ///
+    /// 1. It is computed only in `ScopeMode::Git`, the only mode that reads
+    ///    it (`contains` ignores `git_common_dir` in every other mode) --
+    ///    skipping the spawn entirely for `--up`/`--down`/non-Git Scopes.
+    /// 2. In `ScopeMode::Git`, results are cached per canonical path for the
+    ///    lifetime of this `Scope`, so a workspace shared by many Sessions
+    ///    (a common case: hundreds of transcripts under the same repo) pays
+    ///    the subprocess cost once, not once per Session. `Scope` is shared
+    ///    via `Arc` across per-agent discovery threads, so the cache is a
+    ///    `Mutex`, not a `RefCell`.
     pub fn contains_workspace(&self, workspace: &Path) -> bool {
         let canonical = canonical_workspace(workspace);
         let last_known_real = canonical
             .clone()
             .or_else(|| resolve_missing_workspace_path(workspace));
         let real_path = last_known_real.as_deref().unwrap_or(workspace);
-        let git_common_dir = canonical.as_deref().and_then(workspace_git_common_dir);
+        let git_common_dir = if matches!(self.mode, ScopeMode::Git { .. }) {
+            canonical
+                .as_deref()
+                .and_then(|path| self.cached_git_common_dir(path))
+        } else {
+            None
+        };
         self.contains(WorkspaceCandidate {
             real_path,
             git_common_dir: git_common_dir.as_deref(),
             exists: canonical.is_some(),
         })
+    }
+
+    /// Look up (and memoize) `git_common_dir` for a canonical path. Only
+    /// called from `ScopeMode::Git`, where `contains` actually consults the
+    /// result. Poison-tolerant: a panicked holder cannot silently disable
+    /// the entire Scope, so a poisoned lock falls back to an uncached call.
+    fn cached_git_common_dir(&self, canonical_path: &Path) -> Option<PathBuf> {
+        if let Ok(cache) = self.git_common_dir_cache.lock()
+            && let Some(hit) = cache.get(canonical_path)
+        {
+            return hit.clone();
+        }
+        let resolved = workspace_git_common_dir(canonical_path);
+        if let Ok(mut cache) = self.git_common_dir_cache.lock() {
+            cache.insert(canonical_path.to_path_buf(), resolved.clone());
+        }
+        resolved
     }
 
     pub fn base(&self) -> &Path {
@@ -449,6 +493,56 @@ mod tests {
 
         assert!(scope.contains_workspace(&repo.join("vendor")));
         assert!(!scope.contains_workspace(&nested));
+    }
+
+    /// `docs/product-design.md` section 4 ("Git metadata performance"):
+    /// "Query each normalized Workspace at most once." `contains_workspace`
+    /// spawns `git rev-parse` per call in `ScopeMode::Git`; without
+    /// memoization, looking up the same canonical path many times costs one
+    /// subprocess spawn each time (multiple ms each). This asserts the
+    /// *second* batch of identical-path calls is not asymptotically as
+    /// expensive as the first -- a regression to "spawn every time" would
+    /// make both batches equally slow, while a correctly memoized cache
+    /// makes the second batch orders of magnitude faster. Uses a generous 5x
+    /// threshold (not raw ms) to stay robust across slow/loaded CI runners
+    /// while still catching a reintroduced per-call spawn.
+    #[test]
+    fn contains_workspace_memoizes_git_common_dir_per_canonical_path() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = root.path().canonicalize().unwrap();
+        let scope = Scope::new(
+            repo.clone(),
+            None,
+            DefaultScope::Git {
+                common_dir: repo.join(".git"),
+                worktrees: vec![repo.clone()],
+            },
+        );
+
+        let first_batch = std::time::Instant::now();
+        for _ in 0..20 {
+            scope.contains_workspace(&repo);
+        }
+        let first_elapsed = first_batch.elapsed();
+
+        let second_batch = std::time::Instant::now();
+        for _ in 0..20 {
+            scope.contains_workspace(&repo);
+        }
+        let second_elapsed = second_batch.elapsed();
+
+        assert!(
+            second_elapsed * 5 < first_elapsed.max(std::time::Duration::from_micros(1)),
+            "expected cached lookups to be much faster: first={first_elapsed:?} second={second_elapsed:?}"
+        );
     }
 
     #[test]
