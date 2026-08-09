@@ -4,7 +4,7 @@
 //! base config directory can host a default profile plus arbitrarily many named
 //! profiles, each with its own agent root and optional XDG split roots, and
 //! duplicate native IDs across those isolation boundaries must never collide.
-//! Profile and effective root are therefore part of [`SessionKey`] identity.
+//! Profile and effective root are therefore part of [`crate::session::SessionKey`] identity.
 //!
 //! Evidence: OMP 17.2.10.
 //!
@@ -68,8 +68,8 @@ mod roots;
 
 pub use self::{
     activity::{
-        ActivityEvidence, ActivityEvidenceMap, BreadcrumbSource, OmpBreadcrumbs, activity_status,
-        correlate_live, correlate_live_with,
+        ActivityEvidence, ActivityEvidenceMap, Breadcrumb, BreadcrumbSource, OmpBreadcrumbs,
+        activity_status, correlate_live, correlate_live_with,
     },
     discover::{DiscoverConfig, DiscoverOutcome, discover},
     format::{ImportBadge, ParsedSession, extract_session_pub, parse_import_pub, risk_status},

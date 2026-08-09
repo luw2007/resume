@@ -105,6 +105,11 @@ pub fn activity_status(rollout_path: &Path, snapshot: Option<&ActivitySnapshot>)
 }
 
 pub fn probe() -> (ActivitySnapshot, Vec<Diagnostic>) {
+    if crate::proc::proc_probe_disabled(
+        std::env::var_os(crate::proc::DISABLE_PROC_PROBE_ENV).as_deref(),
+    ) {
+        return (ActivitySnapshot::empty(), Vec::new());
+    }
     let observed_at = SystemTime::now();
     if crate::launch::command_available(OsStr::new(PROBE_PROGRAM)) {
         return probe_with(OsStr::new(PROBE_PROGRAM), observed_at);

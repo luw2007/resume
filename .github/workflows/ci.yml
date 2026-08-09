@@ -64,6 +64,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-features --locked
+      - name: Rustdoc warnings are errors
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
 
   msrv:
     name: Rust 1.91 MSRV
@@ -81,39 +83,3 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses bans advisories sources
-
-  # Periodic and release artifact-build scaffolding. Pull requests avoid the
-  # expensive cross matrix; workflow_dispatch can exercise it before release.
-  target-builds:
-    name: Target ${{ matrix.target }}
-    if: github.event_name == 'schedule' || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-            command: cargo build --release --locked --all-features --target aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
-            command: cargo build --release --locked --all-features --target x86_64-apple-darwin
-          # `rusqlite` uses bundled libsqlite3-sys, which invokes a C compiler.
-          # cargo-zigbuild supplies the audited cross C toolchain and musl libc;
-          # keeping `bundled` means no host SQLite or OpenSSL is linked.
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            command: cargo zigbuild --release --locked --all-features --target aarch64-unknown-linux-musl
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            command: cargo zigbuild --release --locked --all-features --target x86_64-unknown-linux-musl
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - if: runner.os == 'Linux'
-        uses: goto-bus-stop/setup-zig@v2
-      - if: runner.os == 'Linux'
-        run: cargo install cargo-zigbuild --locked
-      - run: ${{ matrix.command }}
