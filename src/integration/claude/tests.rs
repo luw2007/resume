@@ -18,9 +18,9 @@ use std::{
 
 use crate::{
     integration::claude,
-    jsonl,
+    preview::jsonl,
+    preview::snapshot,
     session::{ActivityStatus, SupportStatus, WorkspaceEvidence},
-    snapshot,
 };
 
 // --- helpers ---
@@ -1352,7 +1352,7 @@ fn uuid_agrees_normalizes_case_and_braces() {
 
 #[test]
 fn integration_uses_shared_bounded_jsonl_reader() {
-    // The integration must delegate parsing to crate::jsonl, not implement
+    // The integration must delegate parsing to crate::preview::jsonl, not implement
     // its own reader. A quick check that the module re-exports nothing and
     // the public discover path tolerates a file the reader would classify.
     let home = tempfile::tempdir().unwrap();
@@ -1367,6 +1367,6 @@ fn integration_uses_shared_bounded_jsonl_reader() {
     );
     let discovery = claude::discover(&root).unwrap();
     assert_eq!(discovery.sessions.len(), 1);
-    // Sanity: crate::jsonl symbol is reachable (compile-time guarantee).
+    // Sanity: crate::preview::jsonl symbol is reachable (compile-time guarantee).
     let _bounds = jsonl::Bounds::default();
 }

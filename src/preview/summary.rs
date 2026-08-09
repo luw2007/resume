@@ -11,7 +11,7 @@
 
 use std::io::Read;
 
-use crate::{injection::collapse_known_injections, text};
+use super::{injection::collapse_known_injections, text};
 
 /// Maximum bytes to read from the source for summary generation.
 const SUMMARY_READ_LIMIT: u64 = 1024 * 1024; // 1 MiB

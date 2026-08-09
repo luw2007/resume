@@ -49,13 +49,13 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    jsonl::{self, Bounds, FileOutcome, ReadResult},
-    message::{self, Attachment, UserMessage},
+    preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
+    preview::message::{self, Attachment, UserMessage},
+    preview::summary,
     session::{
         ActivityStatus, IntegrationError, ResumeSpec, RiskStatus, Session, SessionKey,
         SupportStatus, WorkspaceEvidence,
     },
-    summary,
 };
 
 /// The Codex agent name, used as the `SessionKey.agent` field.
