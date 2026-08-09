@@ -18,7 +18,7 @@ impl FromStr for Distance {
             value
                 .parse()
                 .map(Self::Finite)
-                .map_err(|_| "expected a non-negative integer or 'all'".into())
+                .map_err(|_| crate::errors::E1003.parser_message().to_string())
         }
     }
 }
@@ -46,7 +46,7 @@ impl FromStr for Since {
         if let Some(date) = parse_since_date(value) {
             return Ok(Self::Date(date));
         }
-        Err("expected a duration (e.g. 7d, 2h, 30m, 1w), a YYYY-MM-DD date, or 'all'".into())
+        Err(crate::errors::E1001.parser_message().to_string())
     }
 }
 
@@ -82,14 +82,52 @@ fn parse_since_date(value: &str) -> Option<SystemTime> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Shell {
+    /// Bash completion script for bash-completion
+    #[value(help = "Bash completion script for bash-completion")]
     Bash,
+    /// Zsh completion script for the zsh compsys autoloader
+    #[value(help = "Zsh completion script for the zsh compsys autoloader")]
     Zsh,
+    /// Fish completion script for fish shell
+    #[value(help = "Fish completion script for fish shell")]
     Fish,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum Command {
+    #[command(
+        about = "Inspect resume configuration",
+        long_about = "\
+Inspect resume configuration.
+
+`resume` reads exactly one configuration file and never merges several.
+The file is $XDG_CONFIG_HOME/resume/config.toml when XDG_CONFIG_HOME is
+set, otherwise $HOME/.config/resume/config.toml, unless --config named a
+different path.
+
+This subcommand does not scan Sessions, so it rejects every
+Session-query option and the bare DIRECTORY positional.\
+"
+    )]
     Config(ConfigArgs),
+
+    #[command(
+        about = "Print a shell completion script to stdout",
+        long_about = "\
+Print a shell completion script to stdout.
+
+The script is generated from the live command definition, so it always
+matches the flags this binary actually accepts. Redirect it to the
+location your shell expects:
+
+    resume completions bash > /etc/bash_completion.d/resume
+    resume completions zsh  > ~/.zfunc/_resume
+    resume completions fish > ~/.config/fish/completions/resume.fish
+
+This subcommand does not scan Sessions, so it rejects every
+Session-query option and the bare DIRECTORY positional.\
+"
+    )]
     Completions { shell: Shell },
 }
 
@@ -101,6 +139,21 @@ pub struct ConfigArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ConfigCommand {
+    #[command(
+        about = "Print a commented example configuration file",
+        long_about = "\
+Print a commented example configuration file.
+
+Writes a complete, valid TOML document to stdout with every supported
+key set to its default. Redirect it into place to start from a known
+good file:
+
+    resume config example > ~/.config/resume/config.toml
+
+The output round-trips through the same deserializer the runtime uses,
+so a file produced this way always parses.\
+"
+    )]
     Example,
 }
 
@@ -108,9 +161,96 @@ pub enum ConfigCommand {
 #[command(
     name = "resume",
     version,
-    about = "Find and resume coding-agent Sessions"
+    about = "Find and resume coding-agent Sessions",
+    long_about = "\
+Find and resume coding-agent Sessions.
+
+`resume` scans the local on-disk stores of the coding agents you use --
+Codex, Claude Code, Pi, and OMP -- collects the Sessions that belong to
+the directory you are standing in, and hands the one you pick back to
+its own agent using that agent's native resume invocation.
+
+Nothing is copied, rewritten, indexed, or uploaded. Discovery is
+read-only. Resume is an exec into the agent's own CLI with the recorded
+working directory, argv, and environment restored.
+
+By default the scope is the Git repository containing the current
+directory, including its linked worktrees. Use -U/--up and -D/--down to
+walk the directory tree instead, and --since to hide stale Sessions.
+
+Without --list or --json, `resume` opens an interactive picker. With
+either flag it prints once and exits, so it is safe in scripts and CI.\
+",
+    after_help = "\
+SYNTAX
+  resume [DIRECTORY] [OPTIONS]
+  resume config example
+  resume completions <bash|zsh|fish>
+
+EXAMPLES
+  resume                     Pick a Session in the current project
+  resume --up all            Search every ancestor directory too
+  resume -a codex --since 7d Recent Codex Sessions only
+  resume --json              Machine-readable JSON v1 on stdout
+
+`resume --help` has full descriptions; `resume --man` has the manual.\
+",
+    after_long_help = "\
+COMMON EXAMPLES
+  resume
+      Pick a Session from the current Git repository and its worktrees.
+
+  resume ~/src/api
+      Pick a Session scoped to another directory without leaving here.
+
+  resume --up all
+      Widen the scope to every ancestor directory, unbounded.
+
+  resume --down 2
+      Widen the scope to descendants at most two path edges away.
+
+  resume -a codex -a claude --since 7d
+      Only Codex and Claude Code Sessions active in the last week.
+
+  resume --list
+      Print the adaptive human table and exit; never opens the picker.
+
+  resume --json | jq '.sessions[] | .agent, .title'
+      Print JSON v1 and post-process it. --json implies --list.
+
+  resume config example > ~/.config/resume/config.toml
+      Write a commented starter configuration file.
+
+  resume completions zsh > ~/.zfunc/_resume
+      Install shell completions for zsh.
+
+COMMON ERRORS
+  E1001 INVALID_SINCE           --since value is not a duration, a
+                                YYYY-MM-DD date, or `all`.
+  E1002 CONFLICTING_DIRECTION   --up and --down were both supplied.
+  E1003 INVALID_DISTANCE        --up/--down value is not a non-negative
+                                integer or `all`.
+  E1004 INVALID_CONFIG          The configuration file could not be read
+                                or parsed.
+  E3001 ROOT_UNAVAILABLE        An agent's on-disk store is missing or
+                                unreadable.
+  E3002 GIT_SCOPE_DISCOVERY_FAILED
+                                Git scope could not be determined; the
+                                scope fell back to the exact directory.
+  E3003 WORKSPACE_UNAVAILABLE   The selected Session's workspace no
+                                longer exists or is not resumable.
+
+  Run `resume --man` for each code's trigger, fix, and worked example.
+
+SEE ALSO
+  resume --man            The full manual: options, enums, JSON schema,
+                          exit codes, errors, caveats, compatibility.
+  resume config example   A commented starter configuration file.
+  resume completions      Shell completion scripts for bash, zsh, fish.\
+"
 )]
 pub struct Cli {
+    #[arg(help = "Directory whose Sessions to search (default: current dir)")]
     pub directory: Option<PathBuf>,
 
     #[arg(
@@ -118,7 +258,8 @@ pub struct Cli {
         long,
         value_name = "N|all",
         conflicts_with = "down",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Include ancestor directories up to N edges, or all"
     )]
     pub up: Option<Distance>,
 
@@ -127,34 +268,54 @@ pub struct Cli {
         long,
         value_name = "N|all",
         conflicts_with = "up",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Include descendant directories down to N edges, or all"
     )]
     pub down: Option<Distance>,
 
-    #[arg(short = 'a', long, action = clap::ArgAction::Append)]
+    #[arg(
+        short = 'a',
+        long,
+        action = clap::ArgAction::Append,
+        help = "Only this agent; repeatable; replaces configured agents"
+    )]
     pub agent: Vec<OsString>,
 
-    #[arg(long, value_name = "duration|date|all")]
+    #[arg(
+        long,
+        value_name = "duration|date|all",
+        help = "Only Sessions active at or after this cutoff"
+    )]
     pub since: Option<Since>,
 
-    #[arg(long)]
+    #[arg(long, help = "Print the plain table instead of opening the picker")]
     pub list: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print JSON v1 to stdout; implies --list")]
     pub json: bool,
-    #[arg(long)]
+    #[arg(long, help = "Include redacted paths and error chains in diagnostics")]
     pub verbose: bool,
-    #[arg(long)]
+    #[arg(long, help = "Read this config file instead of the discovered one")]
     pub config: Option<PathBuf>,
 
-    #[arg(long, conflicts_with = "no_confirm")]
+    #[arg(
+        long,
+        conflicts_with = "no_confirm",
+        help = "Ask for confirmation before every Resume"
+    )]
     pub confirm_always: bool,
-    #[arg(long, conflicts_with = "confirm_always")]
+    #[arg(
+        long,
+        conflicts_with = "confirm_always",
+        help = "Skip ordinary confirmation; risk prompts still apply"
+    )]
     pub no_confirm: bool,
+
+    #[arg(long, exclusive = true, help = "Print the full manual page and exit")]
+    pub man: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
 }
-
 impl Cli {
     /// Whether any Session-query option or bare positional `DIRECTORY` was
     /// supplied. `config example` and `completions` must reject these: they
@@ -225,6 +386,39 @@ verbose = false
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn help_describes_every_option() {
+        let help = Cli::command().render_long_help().to_string();
+        for description in [
+            "Directory whose Sessions to search (default: current dir)",
+            "Include ancestor directories up to N edges, or all",
+            "Include descendant directories down to N edges, or all",
+            "Only this agent; repeatable; replaces configured agents",
+            "Only Sessions active at or after this cutoff",
+            "Print the plain table instead of opening the picker",
+            "Print JSON v1 to stdout; implies --list",
+            "Include redacted paths and error chains in diagnostics",
+            "Read this config file instead of the discovered one",
+            "Ask for confirmation before every Resume",
+            "Skip ordinary confirmation; risk prompts still apply",
+            "Print the full manual page and exit",
+        ] {
+            assert!(help.contains(description), "help missing {description:?}");
+        }
+    }
+
+    #[test]
+    fn man_is_exclusive_with_query_options() {
+        for argv in [
+            vec!["resume", "--man", "--json"],
+            vec!["resume", "--man", "--list"],
+            vec!["resume", "--man", "-a", "codex"],
+            vec!["resume", "--man", "--up", "1"],
+        ] {
+            assert_eq!(Cli::try_parse_from(argv).unwrap_err().exit_code(), 2);
+        }
+    }
 
     #[test]
     fn direction_conflict_is_usage_error() {
