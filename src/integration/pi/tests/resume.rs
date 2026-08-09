@@ -5,8 +5,8 @@ use crate::{
         self, DiscoverConfig, EffectiveRoots, ParsedSession, ResolutionInputs,
         SessionControlEvidence,
     },
+    preview::snapshot,
     scope::{Direction, Scope},
-    snapshot,
 };
 use serde_json::json;
 use std::{

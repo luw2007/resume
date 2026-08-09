@@ -14,7 +14,7 @@ impl ParsedSession {
             }
         }
         let texts: Vec<&str> = self.messages.iter().map(|m| m.text.as_str()).collect();
-        crate::summary::summarize_texts(texts, crate::summary::default_width())
+        crate::preview::summary::summarize_texts(texts, crate::preview::summary::default_width())
     }
 
     /// Build a [`Session`] from this parsed data.

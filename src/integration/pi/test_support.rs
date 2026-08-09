@@ -35,8 +35,8 @@ use crate::{
         self, DiscoverConfig, EffectiveRoots, ParsedSession, ResolutionInputs,
         SessionControlEvidence,
     },
+    preview::snapshot,
     scope::{Direction, Scope},
-    snapshot,
 };
 
 // ---------------------------------------------------------------------------

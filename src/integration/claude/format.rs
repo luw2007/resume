@@ -5,10 +5,10 @@ use super::{
     roots::ClaudeRoot,
 };
 use crate::{
-    jsonl::{self, Bounds, FileOutcome, ReadResult},
-    message,
+    preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
+    preview::message,
+    preview::summary,
     session::{ActivityStatus, Diagnostic, Session, SessionKey, SupportStatus, WorkspaceEvidence},
-    summary,
 };
 use serde_json::Value;
 use std::{

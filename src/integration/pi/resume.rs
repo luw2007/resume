@@ -4,7 +4,7 @@ use super::{
     roots::{EffectiveRoots, settings_dir},
 };
 use crate::{
-    jsonl::{FileOutcome, ReadResult},
+    preview::jsonl::{FileOutcome, ReadResult},
     session::{ActivityStatus, ResumeSpec, RiskStatus, WorkspaceEvidence},
 };
 use serde_json::Value;

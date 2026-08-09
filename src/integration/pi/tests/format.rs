@@ -5,8 +5,8 @@ use crate::{
         self, DiscoverConfig, EffectiveRoots, ParsedSession, ResolutionInputs,
         SessionControlEvidence,
     },
+    preview::snapshot,
     scope::{Direction, Scope},
-    snapshot,
 };
 use serde_json::json;
 use std::{
@@ -192,7 +192,7 @@ fn extracts_image_only_message() {
     assert!(msg.text.is_empty());
     assert_eq!(msg.attachments.len(), 1);
     match &msg.attachments[0] {
-        crate::message::Attachment::Image { media_type, .. } => {
+        crate::preview::message::Attachment::Image { media_type, .. } => {
             assert_eq!(media_type.as_deref(), Some("image/jpeg"));
         }
         _ => panic!("expected image attachment"),
