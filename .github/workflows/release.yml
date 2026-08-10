@@ -143,17 +143,12 @@ jobs:
             sha=$(awk '{print $1}' "resume-v${{ needs.preflight.outputs.version }}-${target}.tar.gz.sha256")
             echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
           done
-      - uses: actions/create-github-app-token@v1
-        id: app-token
-        with:
-          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
-          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
-          owner: luw2007
-          repositories: homebrew-tap
+      # HOMEBREW_TAP_PAT: fine-grained PAT scoped only to luw2007/homebrew-tap
+      # with Contents: Read and write. Rotate before its expiration.
       - uses: actions/checkout@v4
         with:
           repository: luw2007/homebrew-tap
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
           path: homebrew-tap
       - name: Render Formula
         env:
