@@ -1336,3 +1336,97 @@ fn rollout_roots_returns_only_existing_dirs() {
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].kind, RolloutKind::Active);
 }
+
+// ---------------------------------------------------------------------------
+// Discovery-time bounded early read (large rollouts)
+// ---------------------------------------------------------------------------
+
+/// A large outlier rollout (tens of MB, common after long-lived real usage)
+/// previously had its *entire* content read and every line JSON-parsed
+/// during discovery purely to find `session_meta` and derive a title from
+/// the first user message. `parse_rollout_file`'s bounded early read must
+/// still discover the Session and its correct title, from a fast path that
+/// reads only the first ~1 MiB, not the whole file.
+#[test]
+fn large_rollout_title_is_derived_from_bounded_early_read() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let ws_canon = workspace.canonicalize().unwrap();
+
+    let mut records = vec![session_meta("large-early-id", ws_canon.to_str().unwrap())];
+    records.push(event_msg_user("Fix the login bug"));
+    // Pad well past the 1 MiB early-read budget with filler assistant
+    // records the early read must never need to reach. One 4 KiB record
+    // serializes to a known, fixed length, so the target count is computed
+    // once up front instead of re-serializing the growing Vec every
+    // iteration (which was O(n^2) and made this test take ~10s).
+    let filler = "x".repeat(4096);
+    let filler_record = json!({
+        "timestamp": "2026-08-07T10:00:02.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": filler }]
+        }
+    });
+    let filler_len = filler_record.to_string().len() + 1;
+    let filler_count = (2usize * 1024 * 1024).div_ceil(filler_len);
+    records.extend(std::iter::repeat_n(filler_record, filler_count));
+
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-large.jsonl",
+        &records,
+    );
+
+    let sessions = discover_sessions(home.path());
+    assert_eq!(sessions.len(), 1, "exactly one session discovered");
+    assert_eq!(sessions[0].resumable_id.to_str().unwrap(), "large-early-id");
+    assert_eq!(sessions[0].title.as_deref(), Some("Fix the login bug"));
+}
+
+/// Anomalous shape: `session_meta` appears *after* the 1 MiB early-read
+/// budget (unlike every real Codex rollout, where it is the first record).
+/// `parse_rollout_file` must still discover the Session correctly via its
+/// full-read fallback path, proving the bounded fast path never silently
+/// drops a Session it cannot fully parse from the first ~1 MiB alone.
+#[test]
+fn session_meta_beyond_early_read_budget_falls_back_to_full_read() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let ws_canon = workspace.canonicalize().unwrap();
+
+    // One 4 KiB record serializes to a known, fixed length, so the target
+    // count is computed once up front instead of re-serializing the
+    // growing Vec every iteration (which was O(n^2) and made this test
+    // take several seconds).
+    let filler = "y".repeat(4096);
+    let filler_record = json!({
+        "timestamp": "2026-08-07T10:00:00.000Z",
+        "type": "turn_context",
+        "payload": { "note": filler }
+    });
+    let filler_len = filler_record.to_string().len() + 1;
+    let filler_count = (2usize * 1024 * 1024).div_ceil(filler_len);
+    let mut records: Vec<serde_json::Value> =
+        std::iter::repeat_n(filler_record, filler_count).collect();
+    records.push(session_meta("late-header-id", ws_canon.to_str().unwrap()));
+    records.push(event_msg_user("late header still discovered"));
+
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-late-header.jsonl",
+        &records,
+    );
+
+    let sessions = discover_sessions(home.path());
+    assert_eq!(sessions.len(), 1, "exactly one session discovered");
+    assert_eq!(sessions[0].resumable_id.to_str().unwrap(), "late-header-id");
+    assert_eq!(
+        sessions[0].title.as_deref(),
+        Some("late header still discovered")
+    );
+}

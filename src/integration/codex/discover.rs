@@ -330,6 +330,19 @@ pub struct ImportMeta {
     pub source_kind: Option<String>,
 }
 
+/// Discovery-time early-read budget, per `docs/product-design.md` section 3:
+/// "at most a 1 MiB bounded early read" for title derivation. Real
+/// `session_meta` headers are near the start of the file (see
+/// `docs/research/session-formats.md`: "The normal first record is
+/// `session_meta`"), and title derivation only needs the *first* non-empty
+/// user message (`summary::summarize_texts` returns on the first match), so
+/// a 1 MiB first pass is normally enough for both, regardless of total file
+/// size. Large outlier rollouts (tens of MB, common after long-lived real
+/// usage) previously had their *entire* content read and every line
+/// JSON-parsed during discovery purely to find this header and one message;
+/// this bound turns that into O(1 MiB) instead of O(file size).
+const DISCOVERY_EARLY_READ_BYTES: u64 = 1024 * 1024;
+
 /// Parse a single rollout JSONL file into an optional [`ParsedSession`].
 ///
 /// Returns `Ok(None)` when the file contains no recognizable `session_meta`
@@ -340,18 +353,38 @@ pub fn parse_rollout_file(
     effective_root: &Path,
     bounds: &Bounds,
 ) -> Result<Option<ParsedSession>, IntegrationError> {
-    let read = jsonl::read_file_confined(path, effective_root, bounds).map_err(|source| {
-        IntegrationError::Io {
-            diagnostic: crate::session::Diagnostic {
-                category: "codex_io",
-                count: 1,
-                verbose_path: Some(path.to_path_buf()),
-                verbose_chain: Some(source.to_string()),
-            },
-            source,
-        }
-    })?;
-    parse_rollout_records(path, &read)
+    // Fast path: a small bounded read covers the overwhelming majority of
+    // real rollouts (session_meta near the start, one early user message).
+    // Only fall back to the full caller-supplied `bounds` (still capped at
+    // its own safety ceiling, never unbounded) when session_meta was not
+    // found within the fast-path budget -- an anomalous shape, not the
+    // common case, so paying the full read cost there is acceptable.
+    let early_bounds = Bounds {
+        max_file_bytes: bounds.max_file_bytes.min(DISCOVERY_EARLY_READ_BYTES),
+        ..bounds.clone()
+    };
+    let early_read = read_confined(path, effective_root, &early_bounds)?;
+    if find_session_meta(&early_read.records).is_some() {
+        return parse_rollout_records(path, &early_read);
+    }
+    let full_read = read_confined(path, effective_root, bounds)?;
+    parse_rollout_records(path, &full_read)
+}
+
+fn read_confined(
+    path: &Path,
+    effective_root: &Path,
+    bounds: &Bounds,
+) -> Result<ReadResult, IntegrationError> {
+    jsonl::read_file_confined(path, effective_root, bounds).map_err(|source| IntegrationError::Io {
+        diagnostic: crate::session::Diagnostic {
+            category: "codex_io",
+            count: 1,
+            verbose_path: Some(path.to_path_buf()),
+            verbose_chain: Some(source.to_string()),
+        },
+        source,
+    })
 }
 
 /// Parse rollout records already read via the shared JSONL reader. Separated
