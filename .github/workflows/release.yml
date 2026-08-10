@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  preflight:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag must be an ancestor of origin/main
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} is not reachable from origin/main; refusing to release" >&2
+            exit 1
+          fi
+      - name: Derive and cross-check version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::tag version $version does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+          if ! grep -qF "## $version -" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no dated '## $version -' section" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            command: cargo build --release --locked --all-features --target aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+            command: cargo build --release --locked --all-features --target x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            command: cargo zigbuild --release --locked --all-features --target aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            command: cargo zigbuild --release --locked --all-features --target x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        uses: goto-bus-stop/setup-zig@v2
+      - if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --locked
+      - run: ${{ matrix.command }}
+      - name: Package artifact
+        run: |
+          name="resume-v${{ needs.preflight.outputs.version }}-${{ matrix.target }}"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/resume" "$stage/"
+          cp completions/resume.bash completions/_resume completions/resume.fish "$stage/"
+          tar -czf "$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resume-v${{ needs.preflight.outputs.version }}-${{ matrix.target }}
+          path: |
+            resume-v${{ needs.preflight.outputs.version }}-${{ matrix.target }}.tar.gz
+            resume-v${{ needs.preflight.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "resume-v*"
+          merge-multiple: true
+      - name: Assemble checksum manifest
+        run: |
+          cd dist
+          cat resume-*.tar.gz.sha256 > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/resume-*.tar.gz"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "See CHANGELOG.md for details." \
+            dist/resume-*.tar.gz dist/SHA256SUMS
+
+  update-tap:
+    name: Update Homebrew tap
+    needs: [preflight, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "resume-v*"
+          merge-multiple: true
+      - name: Read checksums
+        id: sha
+        run: |
+          cd dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            key=$(echo "$target" | tr '-' '_')
+            sha=$(awk '{print $1}' "resume-v${{ needs.preflight.outputs.version }}-${target}.tar.gz.sha256")
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: luw2007
+          repositories: homebrew-tap
+      - uses: actions/checkout@v4
+        with:
+          repository: luw2007/homebrew-tap
+          token: ${{ steps.app-token.outputs.token }}
+          path: homebrew-tap
+      - name: Render Formula
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHA_AARCH64_APPLE_DARWIN: ${{ steps.sha.outputs.aarch64_apple_darwin }}
+          SHA_X86_64_APPLE_DARWIN: ${{ steps.sha.outputs.x86_64_apple_darwin }}
+          SHA_AARCH64_UNKNOWN_LINUX_MUSL: ${{ steps.sha.outputs.aarch64_unknown_linux_musl }}
+          SHA_X86_64_UNKNOWN_LINUX_MUSL: ${{ steps.sha.outputs.x86_64_unknown_linux_musl }}
+        run: |
+          cat > homebrew-tap/Formula/resume.rb <<EOF
+          class Resume < Formula
+            desc "Find and resume the right coding-agent session from your current project"
+            homepage "https://github.com/luw2007/resume"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/luw2007/resume/releases/download/v${VERSION}/resume-v${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_AARCH64_APPLE_DARWIN}"
+              else
+                url "https://github.com/luw2007/resume/releases/download/v${VERSION}/resume-v${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86_64_APPLE_DARWIN}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/luw2007/resume/releases/download/v${VERSION}/resume-v${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_AARCH64_UNKNOWN_LINUX_MUSL}"
+              else
+                url "https://github.com/luw2007/resume/releases/download/v${VERSION}/resume-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_X86_64_UNKNOWN_LINUX_MUSL}"
+              end
+            end
+
+            def install
+              bin.install "resume"
+              bash_completion.install "resume.bash" => "resume"
+              zsh_completion.install "_resume"
+              fish_completion.install "resume.fish"
+            end
+
+            test do
+              assert_match "resume #{version}", shell_output("#{bin}/resume --version")
+              assert_match "Find and resume coding-agent Sessions", shell_output("#{bin}/resume --help")
+            end
+          end
+          EOF
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          if git diff --quiet Formula/resume.rb; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "resume-release-bot"
+          git config user.email "actions@github.com"
+          git add Formula/resume.rb
+          git commit -m "resume ${{ needs.preflight.outputs.version }}"
+          git push
