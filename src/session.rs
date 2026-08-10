@@ -39,11 +39,23 @@ pub enum SupportStatus {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivityStatus {
     Active { observed_at: SystemTime },
     Inactive { observed_at: SystemTime },
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateTimeSource {
+    Native,
+    FileMtime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UpdateTime {
+    pub at: SystemTime,
+    pub source: UpdateTimeSource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +72,9 @@ pub struct Session {
     /// The integration-owned resumable ID, deliberately distinct from `key`.
     pub resumable_id: OsString,
     pub title: Option<String>,
+    /// Most recent agent-recorded Session update, with the transcript mtime as
+    /// a fallback when the native format carries no usable timestamp.
+    pub updated_at: Option<UpdateTime>,
     pub workspace: WorkspaceEvidence,
     pub support: SupportStatus,
     pub activity: ActivityStatus,
@@ -157,6 +172,7 @@ mod tests {
                 key: key("pi", "/root", None, key_name),
                 resumable_id: key_name.into(),
                 title: None,
+                updated_at: None,
                 workspace: WorkspaceEvidence::Unknown,
                 support: SupportStatus::Supported,
                 activity,

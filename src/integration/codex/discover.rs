@@ -12,7 +12,7 @@ use crate::{
     preview::summary,
     session::{
         ActivityStatus, IntegrationError, RiskStatus, Session, SessionKey, SupportStatus,
-        WorkspaceEvidence,
+        UpdateTime, UpdateTimeSource, WorkspaceEvidence,
     },
 };
 
@@ -518,6 +518,29 @@ pub fn build_session(parsed: ParsedSession) -> Session {
         resumable_id: OsString::from(parsed.id.clone()),
         title,
         workspace,
+        updated_at: parsed
+            .sqlite_activity_time
+            .as_deref()
+            .and_then(crate::time::parse_iso8601)
+            .or_else(|| {
+                parsed
+                    .timestamp
+                    .as_deref()
+                    .and_then(crate::time::parse_iso8601)
+            })
+            .map(|at| UpdateTime {
+                at,
+                source: UpdateTimeSource::Native,
+            })
+            .or_else(|| {
+                fs::metadata(&parsed.rollout_path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .map(|at| UpdateTime {
+                        at,
+                        source: UpdateTimeSource::FileMtime,
+                    })
+            }),
         support: SupportStatus::Supported,
         activity: ActivityStatus::Unknown,
         risk: RiskStatus::Normal,

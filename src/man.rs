@@ -254,8 +254,8 @@ ENUMS
 
         Note that the debug form embeds the observed timestamp inside the
         string. Consumers must not assume this field is a lower-case enum.
-        In --list the same information is rendered in the UPDATED column as
-        seconds since the Unix epoch, or the literal `unknown`.
+        `--list` renders the separate Session update timestamp using a
+        human-relative date; it never uses ACTIVITY as its update time.
 
     RISK -- the --json `risk` field, Rust debug form
 
@@ -271,16 +271,19 @@ ENUMS
 LIST OUTPUT
     `resume --list` prints one row per Session:
 
-        STATUS    AGENT[PROFILE]     UPDATED    TITLE BRANCH WORKSPACE
+        UPDATED    AGENT[PROFILE]     TITLE + BRANCH
 
-    STATUS is left-aligned in 9 columns, AGENT[PROFILE] in 18, UPDATED in
-    10. TITLE and WORKSPACE each receive half of the remaining terminal
-    width, clamped to at least 16 and at most 60 columns. When no controlling
-    terminal can be queried -- redirected stdout, a pipe, CI -- both fall
-    back to a fixed 48 columns so scripted output stays stable.
+    UPDATED is the latest native Session timestamp, falling back to the
+    transcript file modification time. It renders minutes under one hour,
+    hours under one day, days under seven days, local month/day later in the
+    current year, and ISO date in another year. AGENT[PROFILE] receives 18
+    columns; TITLE receives the remaining terminal budget, clamped to at
+    least 16 and at most 60 columns. When no controlling terminal can be
+    queried -- redirected stdout, a pipe, CI -- TITLE falls back to 48
+    columns.
 
-    BRANCH is always the literal `-` in v0.1.0. The column exists so the
-    layout does not shift when branch reporting lands.
+    The picker Preview shows a full local UPDATED timestamp and whether it
+    came from an agent-native timestamp or file modification time.
 
     This table is NOT a stable machine format. Use --json for anything a
     program will read.
@@ -522,9 +525,8 @@ ERRORS
         Trigger: The Session you selected is not Supported, has no launch
                  specification, or its recorded workspace no longer
                  validates at resume time.
-        Fix:     Pick a Session whose STATUS column reads READY or ACTIVE.
-                 `resume` never recreates a missing worktree; restore it
-                 yourself first.
+        Fix:     Pick a resumable Session; `resume` never recreates a missing
+                 worktree. Restore it yourself first.
         Example: resume --list
         Exit:    2
         Categories: claude_missing_workspace,
