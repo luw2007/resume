@@ -85,7 +85,7 @@ resume --json
 resume /path/to/repo --json -a claude -a codex
 ```
 
-`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session. Rows use `STATUS AGENT[PROFILE] UPDATED TITLE BRANCH WORKSPACE`; in v0.1.0, `BRANCH` is always the literal `-`, a placeholder for a future feature rather than live Git-branch data. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
+`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session: `UPDATED AGENT[PROFILE] TITLE + BRANCH`. `UPDATED` uses the agent-native Session timestamp with a session-file modification-time fallback and renders as a human-relative date. `+ BRANCH` identifies the recorded Workspace worktree; detached and non-Git workspaces render `+ detached` and `+ no-branch`. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
 
 ```sh
 resume --json 2>resume.errors | jq '.sessions[] | {agent, id, workspace}'
