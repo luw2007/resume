@@ -784,4 +784,13 @@ mod tests {
         let k = CandidateKey(42);
         assert_eq!(format!("{k:?}"), "CandidateKey(42)");
     }
+
+    #[test]
+    fn production_picker_uses_session_column_header() {
+        let options = build_production_options(PreviewMode::Hidden, PreviewPosition::Auto);
+        assert_eq!(
+            options.header.as_deref(),
+            Some("STATUS  AGENT[PROFILE]  UPDATED  TITLE  BRANCH  WORKSPACE")
+        );
+    }
 }
