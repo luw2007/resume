@@ -368,7 +368,7 @@ pub fn run_production_picker(
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(crate::runtime::CHANNEL_CAPACITY);
     let producer_store = store.clone();
-    let producer = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         while let Ok(candidate) = candidates.recv() {
             producer_store.insert(candidate.key.clone(), candidate.preview);
             let item = Arc::new(SpikeItem {
@@ -387,7 +387,14 @@ pub fn run_production_picker(
         .ok()
         .flatten();
     drop(store);
-    let _ = producer.join();
+    // Deliberately not joined: the producer thread blocks on
+    // `candidates.recv()`, which only unblocks once every discovery-worker
+    // sender upstream (in `app::run_interactive`) drops — independent of
+    // whether Skim already returned a selection. Joining here would make
+    // Resume wait for the slowest discovery worker instead of the user's
+    // keystroke. The caller already cancels discovery and reaps its workers
+    // on a budget after this function returns, which drops the remaining
+    // senders and lets this thread finish on its own.
     classify(result)
 }
 
@@ -412,7 +419,7 @@ fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> Ski
         .height(String::from("100%"))
         .multi(false)
         .header(Some(String::from(
-            "STATUS  AGENT[PROFILE]  UPDATED  TITLE  BRANCH  WORKSPACE",
+            "UPDATED  AGENT[PROFILE]  TITLE  BRANCH",
         )))
         .preview(Some(String::new()))
         .preview_window(format!("{position}:60%{visibility}"))
@@ -793,7 +800,7 @@ mod tests {
         let options = build_production_options(PreviewMode::Hidden, PreviewPosition::Auto);
         assert_eq!(
             options.header.as_deref(),
-            Some("STATUS  AGENT[PROFILE]  UPDATED  TITLE  BRANCH  WORKSPACE")
+            Some("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")
         );
     }
 }

@@ -149,7 +149,11 @@ fn list_output_shows_update_time_and_branch_instead_of_status_and_workspace() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.starts_with("READY"));
     assert!(text.contains("pi title"));
-    assert!(text.contains("+ no-branch"));
+    assert!(text.contains("no-branch"));
+    assert!(
+        !text.contains('+'),
+        "title and branch must render as separate columns without a '+' glue character"
+    );
     assert!(!text.contains(&ws.display().to_string()));
 }
 
