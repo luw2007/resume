@@ -32,6 +32,12 @@ struct ParsedTranscript {
     ai_title: Option<String>,
     /// Real (human) user messages, in order of appearance.
     user_messages: Vec<message::UserMessage>,
+    /// Whether any record carried a recognized Claude structural field
+    /// (`type`, `sessionId`, `cwd`, or `uuid`). A transcript with none of
+    /// these across every record is not a Claude session at all — e.g. a
+    /// third party writing unrelated JSONL directly into a workspace-key
+    /// directory — and must be ignored rather than diagnosed.
+    looks_like_claude: bool,
 }
 
 /// Parse a candidate transcript file into extracted state and the raw read
@@ -55,6 +61,7 @@ fn parse_transcript(
         agent_name: None,
         ai_title: None,
         user_messages: Vec::new(),
+        looks_like_claude: false,
     };
 
     for record in &read.records {
@@ -68,7 +75,17 @@ fn parse_transcript(
 /// ignored (adapter dispatch only). This never assumes a fixed schema version
 /// or a header position.
 fn interpret_record(record: &Value, parsed: &mut ParsedTranscript) {
-    // Session ID: the canonical spelling in observed transcripts is
+    // A record carrying any of these keys is recognizable Claude transcript
+    // structure, regardless of whether the value is well-formed. A file
+    // where no record ever matches is not a Claude session file at all.
+    if !parsed.looks_like_claude
+        && ["type", "sessionId", "cwd", "uuid"]
+            .iter()
+            .any(|key| record.get(*key).is_some())
+    {
+        parsed.looks_like_claude = true;
+    }
+
     // `sessionId`. Per-record `uuid` is explicitly NOT the resumable ID.
     if parsed.session_id.is_none()
         && let Some(id) = record
@@ -209,6 +226,13 @@ pub(super) fn parse_candidate(
             // from non-UUID filenames (weak identity). In both cases the
             // result is Discover Only when a cwd exists, never Supported.
             if parsed.cwd.is_none() {
+                if !parsed.looks_like_claude {
+                    // No Claude structural field anywhere in the file: this
+                    // is not a Claude session transcript (e.g. another tool
+                    // writing unrelated JSONL into the workspace-key
+                    // directory). Ignore silently rather than diagnosing.
+                    return Ok((None, Vec::new()));
+                }
                 return Err(diagnostic_chain(
                     "claude_no_session_id",
                     &candidate.path,

@@ -216,6 +216,7 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: None,
+            updated_at: None,
             workspace: WorkspaceEvidence::Recorded {
                 workspace: "/tmp".into(),
                 historical_git_identity: None,
