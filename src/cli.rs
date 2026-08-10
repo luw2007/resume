@@ -409,6 +409,69 @@ mod tests {
     }
 
     #[test]
+    fn short_help_is_a_strict_subset_of_long_help() {
+        // cli-help-three-layers: -h (render_help, `about`/`after_help`) must
+        // stay strictly shorter than --help (render_long_help,
+        // `long_about`/`after_long_help`) and must never leak long-only
+        // content (the COMMON ERRORS catalog, or long_about's prose).
+        let short = Cli::command().render_help().to_string();
+        let long = Cli::command().render_long_help().to_string();
+        assert!(
+            short.len() < long.len(),
+            "short help must be strictly shorter"
+        );
+        assert!(short.contains("Find and resume coding-agent Sessions"));
+        assert!(short.contains("SYNTAX"), "short help keeps after_help");
+        assert!(
+            !short.contains("Nothing is copied, rewritten, indexed, or uploaded"),
+            "short help must not leak long_about prose"
+        );
+        assert!(
+            !short.contains("COMMON ERRORS"),
+            "short help must not leak the after_long_help error catalog"
+        );
+    }
+
+    #[test]
+    fn common_errors_block_lists_exactly_the_catalog_codes_in_order() {
+        // cli-help-three-layers: the --help COMMON ERRORS block is rendered
+        // by hand in after_long_help (src/cli.rs:227-242), separately from
+        // crate::errors::CATALOG; this asserts it never drifts out of sync
+        // (missing, extra, reordered, or misspelled codes).
+        let help = Cli::command().render_long_help().to_string();
+        let start = help.find("COMMON ERRORS").expect("COMMON ERRORS heading");
+        let end = help[start..]
+            .find("SEE ALSO")
+            .map(|offset| start + offset)
+            .expect("SEE ALSO heading");
+        let block = &help[start..end];
+
+        let mut cursor = 0;
+        for spec in crate::errors::catalog() {
+            let marker = format!("{} {}", spec.code, spec.slug);
+            let found = block[cursor..]
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{marker:?} missing or out of order in: {block}"));
+            cursor += found + marker.len();
+        }
+
+        let code_lines = block
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                trimmed.len() >= 5
+                    && trimmed.starts_with('E')
+                    && trimmed[1..5].bytes().all(|b| b.is_ascii_digit())
+            })
+            .count();
+        assert_eq!(
+            code_lines,
+            crate::errors::catalog().len(),
+            "COMMON ERRORS must list exactly the catalog codes, no more"
+        );
+    }
+
+    #[test]
     fn man_is_exclusive_with_query_options() {
         for argv in [
             vec!["resume", "--man", "--json"],

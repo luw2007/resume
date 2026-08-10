@@ -480,6 +480,7 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
     };
     match claude::discover(&root) {
         Ok(discovery) => {
+            let mut diagnostics = discovery.diagnostics;
             let records = discovery
                 .sessions
                 .into_iter()
@@ -488,18 +489,25 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
                     session.risk =
                         crate::scope::broad_workspace_risk(&session.workspace, home().as_deref());
                     normalize_availability(&mut session);
-                    let spec = claude::resume_spec(&session, &root).ok();
+                    let spec = match claude::resume_spec(&session, &root) {
+                        Ok(spec) => Some(spec),
+                        Err(crate::session::IntegrationError::InvalidSession { diagnostic })
+                        | Err(crate::session::IntegrationError::Io { diagnostic, .. }) => {
+                            diagnostics.push(diagnostic);
+                            None
+                        }
+                        Err(crate::session::IntegrationError::Unavailable) => None,
+                    };
                     record_optional(session, spec)
                 })
                 .collect();
-            if discovery
-                .diagnostics
+            if diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.category == "claude_root_unavailable")
             {
-                AgentDiscovery::failed_with_errors(discovery.diagnostics)
+                AgentDiscovery::failed_with_errors(diagnostics)
             } else {
-                AgentDiscovery::ok(records, discovery.diagnostics)
+                AgentDiscovery::ok(records, diagnostics)
             }
         }
         Err(_) => AgentDiscovery::failed("claude_discovery_failed"),
@@ -992,6 +1000,63 @@ mod tests {
         assert!(item.search_text.contains("/workspace"));
     }
 
+    #[test]
+    fn resume_selected_reports_e3003_for_every_non_supported_status() {
+        // errors-unified-catalog-e3003-unsupported-resume: no test previously
+        // drove `resume_selected` itself (only `Report`'s own Display/exit
+        // code were tested, at src/errors.rs). This proves each of the three
+        // non-Supported statuses -- and a Supported session missing its
+        // ResumeSpec/LaunchEvidence -- actually reaches the E3003 branch
+        // instead of silently falling through to `launch::exec`.
+        fn session_with(support: SupportStatus) -> Session {
+            Session {
+                key: crate::session::SessionKey {
+                    agent: "codex".into(),
+                    effective_root: "/r".into(),
+                    profile: None,
+                    native_locator: "/t".into(),
+                },
+                resumable_id: "id".into(),
+                title: Some("title".into()),
+                workspace: WorkspaceEvidence::Recorded {
+                    workspace: "/workspace".into(),
+                    historical_git_identity: None,
+                },
+                support,
+                activity: ActivityStatus::Unknown,
+                risk: RiskStatus::Normal,
+            }
+        }
+        let options = effective_options(&default_cli(), Config::default()).unwrap();
+        for support in [
+            SupportStatus::Unsupported,
+            SupportStatus::DiscoverOnly,
+            SupportStatus::Unavailable,
+        ] {
+            let record = CandidateRecord {
+                session: session_with(support),
+                spec: None,
+                evidence: None,
+            };
+            assert_eq!(
+                resume_selected(record, &options),
+                crate::errors::E3003.exit_code,
+                "{support:?} must exit with E3003's code"
+            );
+        }
+        // Supported but missing spec/evidence: the second E3003 branch.
+        let record = CandidateRecord {
+            session: session_with(SupportStatus::Supported),
+            spec: None,
+            evidence: None,
+        };
+        assert_eq!(
+            resume_selected(record, &options),
+            crate::errors::E3003.exit_code,
+            "Supported without spec/evidence must also exit with E3003's code"
+        );
+    }
+
     /// `docs/product-design.md` Â§3: "Title allocation is at most 60
     /// columns on a wide terminal and at least 16 columns in the compact
     /// layout". `title_column_width` must stay within `[16, 60]` for every
@@ -1155,5 +1220,63 @@ mod tests {
             command: None,
         };
         assert!(effective_options(&cli, Config::default()).is_err());
+    }
+
+    fn default_cli() -> Cli {
+        Cli {
+            directory: None,
+            up: None,
+            down: None,
+            agent: Vec::new(),
+            since: None,
+            list: false,
+            json: false,
+            verbose: false,
+            config: None,
+            confirm_always: false,
+            no_confirm: false,
+            man: false,
+            command: None,
+        }
+    }
+
+    /// config-confirm-always-field / config-verbose-field: `effective_options`
+    /// must OR the CLI flag with the configured value, not just read the CLI
+    /// flag. Neither field previously had an isolated unit test (E2E gap
+    /// flagged by the feature-inventory audit); both were only verified
+    /// manually against a real PTY session.
+    #[test]
+    fn config_confirm_always_and_verbose_flow_into_effective_options() {
+        let cli = default_cli();
+        let config = Config {
+            confirm_always: Some(true),
+            verbose: Some(true),
+            ..Config::default()
+        };
+        let options = effective_options(&cli, config).unwrap();
+        assert!(
+            options.confirm_always,
+            "config.confirm_always=true must set EffectiveOptions.confirm_always even with no CLI flag"
+        );
+        assert!(
+            options.verbose,
+            "config.verbose=true must set EffectiveOptions.verbose even with no CLI flag"
+        );
+
+        // Absent from config and CLI, both default to false.
+        let options = effective_options(&cli, Config::default()).unwrap();
+        assert!(!options.confirm_always);
+        assert!(!options.verbose);
+    }
+
+    /// cli-agent-case-insensitive: `-a PI`/`-a Codex` must behave identically
+    /// to lowercase. Previously only verified by reading the
+    /// `.to_ascii_lowercase()` call site, with no automated assertion.
+    #[test]
+    fn agent_flag_is_case_insensitive() {
+        let mut cli = default_cli();
+        cli.agent = vec![OsString::from("PI"), OsString::from("Codex")];
+        let options = effective_options(&cli, Config::default()).unwrap();
+        assert_eq!(options.agents, vec!["pi".to_string(), "codex".to_string()]);
     }
 }
