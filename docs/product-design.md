@@ -449,10 +449,10 @@ resume --json
 `--list` is an adaptive human table with:
 
 ```text
-UPDATED AGENT[PROFILE] TITLE + BRANCH
+UPDATED AGENT[PROFILE] TITLE BRANCH
 ```
 
-`UPDATED` is the latest native Session timestamp, falling back to the transcript file's modification time. `+ BRANCH` identifies the Workspace worktree; detached and non-Git workspaces render `+ detached` and `+ no-branch`.
+`UPDATED` is the latest native Session timestamp, falling back to the transcript file's modification time. `BRANCH` identifies the Workspace worktree; detached and non-Git workspaces render `detached` and `no-branch`.
 
 It is not a stable machine format and does not switch automatically when stdout is redirected.
 

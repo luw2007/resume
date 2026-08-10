@@ -723,7 +723,7 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         "{:<10} {:<18} {} {}",
         updated,
         agent,
-        text::truncate_to_width(title, column_width),
+        text::pad_to_width(&text::truncate_to_width(title, column_width), column_width),
         branch,
     );
     let search_text = text::normalize(
@@ -827,7 +827,7 @@ fn branch_label(workspace: Option<&std::path::Path>) -> String {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
         std::sync::OnceLock::new();
     let Some(workspace) = workspace else {
-        return "+ no-branch".into();
+        return "no-branch".into();
     };
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(cache) = cache.lock()
@@ -854,12 +854,12 @@ fn resolve_branch_label(workspace: &std::path::Path) -> String {
         ])
         .output()
     else {
-        return "+ no-branch".into();
+        return "no-branch".into();
     };
     if output.status.success() {
         let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !branch.is_empty() {
-            return format!("+ {branch}");
+            return branch;
         }
     }
     if std::process::Command::new("git")
@@ -872,9 +872,9 @@ fn resolve_branch_label(workspace: &std::path::Path) -> String {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        "+ detached".into()
+        "detached".into()
     } else {
-        "+ no-branch".into()
+        "no-branch".into()
     }
 }
 
@@ -1084,7 +1084,11 @@ mod tests {
         let item = picker_candidate(CandidateKey(1), &session);
         assert!(item.display.starts_with("0m         omp[work]"));
         assert!(item.preview.contains("native timestamp"));
-        assert!(item.display.contains("+ no-branch"));
+        assert!(item.display.contains("no-branch"));
+        assert!(
+            !item.display.contains('+'),
+            "title and branch are separate columns, not glued with '+'"
+        );
         assert!(!item.search_text.contains("/workspace"));
     }
 

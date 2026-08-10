@@ -282,7 +282,7 @@ ENUMS
 LIST OUTPUT
     `resume --list` prints one row per Session:
 
-        UPDATED    AGENT[PROFILE]     TITLE + BRANCH
+        UPDATED    AGENT[PROFILE]     TITLE  BRANCH
 
     UPDATED is the latest native Session timestamp, falling back to the
     transcript file modification time. It renders minutes under one hour,

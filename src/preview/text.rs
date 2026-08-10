@@ -304,6 +304,21 @@ pub fn truncate_to_width(input: &str, max_width: usize) -> String {
     result
 }
 
+/// Right-pad a string with spaces to a minimum Unicode display width, so a
+/// fixed-width column of variable-width (e.g. CJK) text still lines up with
+/// whatever follows it. No-op when the string already meets or exceeds the
+/// width. Uses `unicode-width`, matching `truncate_to_width`'s measurement.
+pub fn pad_to_width(input: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let current = input.width();
+    if current >= width {
+        return input.to_string();
+    }
+    let mut padded = input.to_string();
+    padded.push_str(&" ".repeat(width - current));
+    padded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +424,23 @@ mod tests {
     fn truncate_no_op_when_within_width() {
         let input = "short";
         assert_eq!(truncate_to_width(input, 100), "short");
+    }
+
+    #[test]
+    fn pad_to_width_aligns_by_display_width_not_byte_or_char_count() {
+        // CJK characters are width 2: "一二" is width 4, five columns short
+        // of a width-9 column despite being only two `char`s.
+        let input = "一二";
+        let padded = pad_to_width(input, 9);
+        assert_eq!(padded, "一二     ");
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(padded.width(), 9);
+    }
+
+    #[test]
+    fn pad_to_width_no_op_when_at_or_past_width() {
+        assert_eq!(pad_to_width("exact", 5), "exact");
+        assert_eq!(pad_to_width("longer than column", 5), "longer than column");
     }
 
     #[test]
