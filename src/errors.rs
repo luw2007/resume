@@ -165,7 +165,7 @@ pub const CATALOG: [ErrorSpec; 7] = [
         slug: "WORKSPACE_UNAVAILABLE",
         title: "Selected Session cannot be resumed",
         trigger: "The Session you selected is not Supported, has no launch specification, or its recorded workspace no longer validates at resume time.",
-        fix: "Pick a Session whose STATUS column reads READY or ACTIVE. `resume` never recreates a missing worktree; restore it yourself first.",
+        fix: "Pick a resumable Session; `resume` never recreates a missing worktree. Restore it yourself first.",
         example: "resume --list",
         exit_code: 2,
         parser_hint: None,

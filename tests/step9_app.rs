@@ -142,15 +142,15 @@ fn json_discovers_all_four_and_stdout_is_only_schema() {
 }
 
 #[test]
-fn list_output_uses_status_agent_updated_title_branch_workspace_priority() {
+fn list_output_shows_update_time_and_branch_instead_of_status_and_workspace() {
     let (tmp, ws) = fixtures();
     let output = run(tmp.path(), &ws, &["--list", "--agent", "pi"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.starts_with("READY     pi"));
-    assert!(text.contains("unknown"));
+    assert!(!text.starts_with("READY"));
     assert!(text.contains("pi title"));
-    assert!(text.contains(" - "));
+    assert!(text.contains("+ no-branch"));
+    assert!(!text.contains(&ws.display().to_string()));
 }
 
 #[test]

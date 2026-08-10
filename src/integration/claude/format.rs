@@ -8,7 +8,10 @@ use crate::{
     preview::jsonl::{self, Bounds, FileOutcome, ReadResult},
     preview::message,
     preview::summary,
-    session::{ActivityStatus, Diagnostic, Session, SessionKey, SupportStatus, WorkspaceEvidence},
+    session::{
+        ActivityStatus, Diagnostic, Session, SessionKey, SupportStatus, UpdateTime,
+        UpdateTimeSource, WorkspaceEvidence,
+    },
 };
 use serde_json::Value;
 use std::{
@@ -293,6 +296,13 @@ pub(super) fn parse_candidate(
         key,
         resumable_id: stable_id,
         title,
+        updated_at: std::fs::metadata(&candidate.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(|at| UpdateTime {
+                at,
+                source: UpdateTimeSource::FileMtime,
+            }),
         workspace,
         support,
         activity: ActivityStatus::Unknown,

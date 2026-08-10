@@ -24,7 +24,7 @@ use crate::{
     preview::text,
     runtime::{CancelToken, JOIN_BUDGET, join_with_budget},
     scope::{DefaultScope, Direction, Scope},
-    session::{ActivityStatus, Diagnostic, ResumeSpec, Session, SupportStatus},
+    session::{Diagnostic, ResumeSpec, Session, SupportStatus},
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -697,25 +697,16 @@ fn count_errors(category: &'static str, count: usize) -> Vec<Diagnostic> {
     }
 }
 
-/// Title/Workspace column budget, per `docs/product-design.md` Â§3: "at
-/// most 60 columns on a wide terminal and at least 16 columns in the compact
-/// layout". Derived from the controlling terminal width when one is
-/// available (interactive picker, or `--list` run at a real TTY); falls back
-/// to a fixed mid-range default when no TTY can be queried (redirected
-/// stdout, pipes, CI), so scripted `--list` output stays stable.
+/// Title column budget for the compact human list.
 const TITLE_WIDTH_MIN: usize = 16;
 const TITLE_WIDTH_MAX: usize = 60;
 const TITLE_WIDTH_DEFAULT: usize = 48;
 
 fn title_column_width() -> usize {
-    // Fixed-width columns before TITLE: `STATUS(9) AGENT(18) UPDATED(10)` plus
-    // three separating spaces, then TITLE, then " - " and WORKSPACE sharing
-    // the remaining budget evenly with TITLE.
-    const LEADING_COLUMNS: usize = 9 + 1 + 18 + 1 + 10 + 1;
+    const LEADING_COLUMNS: usize = 10 + 1 + 18 + 1;
     match crate::picker::tty_size() {
         Some((width, _)) if width > LEADING_COLUMNS => {
-            let remaining = width - LEADING_COLUMNS;
-            (remaining / 2).clamp(TITLE_WIDTH_MIN, TITLE_WIDTH_MAX)
+            (width - LEADING_COLUMNS).clamp(TITLE_WIDTH_MIN, TITLE_WIDTH_MAX)
         }
         _ => TITLE_WIDTH_DEFAULT,
     }
@@ -723,34 +714,28 @@ fn title_column_width() -> usize {
 
 fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
     let agent = agent_label(session);
-    let status = status_label(session);
-    let updated = activity_label(&session.activity);
+    let updated = updated_label(session.updated_at);
+    let updated_detail = updated_detail(session.updated_at);
     let title = session.title.as_deref().unwrap_or("<untitled>");
-    let workspace = session
-        .workspace
-        .workspace()
-        .map_or_else(|| "<missing>".into(), |p| p.display().to_string());
-    let branch = "-";
+    let branch = branch_label(session.workspace.workspace());
     let column_width = title_column_width();
     let display = format!(
-        "{:<9} {:<18} {:<10} {} {} {}",
-        status,
-        agent,
+        "{:<10} {:<18} {} {}",
         updated,
+        agent,
         text::truncate_to_width(title, column_width),
         branch,
-        text::truncate_to_width(&workspace, column_width)
     );
     let search_text = text::normalize(
         &format!(
-            "{status} {agent} {updated} {title} {branch} {workspace} {:?}",
+            "{updated} {agent} {title} {branch} {:?}",
             session.resumable_id
         ),
         text::Mode::Normalized,
     );
     let preview = text::normalize(
         &format!(
-            "STATUS {status}\nAGENT {agent}\nUPDATED {updated}\nTITLE {title}\nBRANCH {branch}\nWORKSPACE {workspace}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}"
+            "UPDATED {updated_detail}\nAGENT {agent}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}"
         ),
         text::Mode::Raw,
     );
@@ -761,6 +746,7 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         preview,
     }
 }
+
 fn agent_label(session: &Session) -> String {
     match &session.key.profile {
         Some(profile) => format!(
@@ -771,28 +757,124 @@ fn agent_label(session: &Session) -> String {
         None => session.key.agent.to_string_lossy().into_owned(),
     }
 }
-fn status_label(session: &Session) -> &'static str {
-    match session.support {
-        SupportStatus::Supported => {
-            if matches!(session.activity, ActivityStatus::Active { .. }) {
-                "ACTIVE"
-            } else {
-                "READY"
-            }
+
+fn updated_label(updated_at: Option<crate::session::UpdateTime>) -> String {
+    let Some(updated_at) = updated_at else {
+        return "unknown".into();
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(updated_at.at)
+        .unwrap_or_default();
+    if age < std::time::Duration::from_secs(60 * 60) {
+        return format!("{}m", age.as_secs() / 60);
+    }
+    if age < std::time::Duration::from_secs(24 * 60 * 60) {
+        return format!("{}h", age.as_secs() / (60 * 60));
+    }
+    if age < std::time::Duration::from_secs(7 * 24 * 60 * 60) {
+        return format!("{}d", age.as_secs() / (24 * 60 * 60));
+    }
+    local_date_label(updated_at.at)
+}
+
+fn updated_detail(updated_at: Option<crate::session::UpdateTime>) -> String {
+    let Some(updated_at) = updated_at else {
+        return "unknown (unavailable)".into();
+    };
+    format!(
+        "{} ({})",
+        local_timestamp(updated_at.at),
+        match updated_at.source {
+            crate::session::UpdateTimeSource::Native => "native timestamp",
+            crate::session::UpdateTimeSource::FileMtime => "file modification time",
         }
-        SupportStatus::DiscoverOnly => "DISCOVER",
-        SupportStatus::Unsupported => "UNSUPPORTED",
-        SupportStatus::Unavailable => "UNAVAILABLE",
+    )
+}
+
+fn local_date_label(at: std::time::SystemTime) -> String {
+    let timestamp = local_timestamp(at);
+    let current_timestamp = local_timestamp(std::time::SystemTime::now());
+    let current_year = current_timestamp.get(..4).unwrap_or_default();
+    if timestamp.starts_with(current_year) {
+        timestamp.get(5..10).unwrap_or("unknown").into()
+    } else {
+        timestamp.get(..10).unwrap_or("unknown").into()
     }
 }
-fn activity_label(activity: &ActivityStatus) -> String {
-    match activity {
-        ActivityStatus::Active { observed_at } | ActivityStatus::Inactive { observed_at } => {
-            observed_at
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or_else(|_| "?".into(), |d| d.as_secs().to_string())
+
+fn local_timestamp(at: std::time::SystemTime) -> String {
+    let seconds = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let output = if cfg!(target_os = "macos") {
+        std::process::Command::new("date")
+            .args(["-r", &seconds.to_string(), "+%Y-%m-%d %H:%M:%S %z"])
+            .output()
+    } else {
+        std::process::Command::new("date")
+            .args(["-d", &format!("@{seconds}"), "+%Y-%m-%d %H:%M:%S %z"])
+            .output()
+    };
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|timestamp| !timestamp.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn branch_label(workspace: Option<&std::path::Path>) -> String {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+        std::sync::OnceLock::new();
+    let Some(workspace) = workspace else {
+        return "+ no-branch".into();
+    };
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock()
+        && let Some(branch) = cache.get(workspace)
+    {
+        return branch.clone();
+    }
+    let branch = resolve_branch_label(workspace);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(workspace.to_path_buf(), branch.clone());
+    }
+    branch
+}
+
+fn resolve_branch_label(workspace: &std::path::Path) -> String {
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            std::ffi::OsStr::new("-C"),
+            workspace.as_os_str(),
+            std::ffi::OsStr::new("symbolic-ref"),
+            std::ffi::OsStr::new("--quiet"),
+            std::ffi::OsStr::new("--short"),
+            std::ffi::OsStr::new("HEAD"),
+        ])
+        .output()
+    else {
+        return "+ no-branch".into();
+    };
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !branch.is_empty() {
+            return format!("+ {branch}");
         }
-        ActivityStatus::Unknown => "unknown".into(),
+    }
+    if std::process::Command::new("git")
+        .args([
+            std::ffi::OsStr::new("-C"),
+            workspace.as_os_str(),
+            std::ffi::OsStr::new("rev-parse"),
+            std::ffi::OsStr::new("--is-inside-work-tree"),
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        "+ detached".into()
+    } else {
+        "+ no-branch".into()
     }
 }
 
@@ -969,7 +1051,7 @@ fn discovery_exit(records: &[CandidateRecord], state: &DiscoveryState) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{RiskStatus, WorkspaceEvidence};
+    use crate::session::{ActivityStatus, RiskStatus, WorkspaceEvidence};
     use std::ffi::OsString;
     #[test]
     fn empty_list_has_human_readable_fallback() {
@@ -987,6 +1069,10 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: Some("title".into()),
+            updated_at: Some(crate::session::UpdateTime {
+                at: std::time::SystemTime::now(),
+                source: crate::session::UpdateTimeSource::Native,
+            }),
             workspace: WorkspaceEvidence::Recorded {
                 workspace: "/workspace".into(),
                 historical_git_identity: None,
@@ -996,8 +1082,10 @@ mod tests {
             risk: RiskStatus::Normal,
         };
         let item = picker_candidate(CandidateKey(1), &session);
-        assert!(item.display.starts_with("READY     omp[work]"));
-        assert!(item.search_text.contains("/workspace"));
+        assert!(item.display.starts_with("0m         omp[work]"));
+        assert!(item.preview.contains("native timestamp"));
+        assert!(item.display.contains("+ no-branch"));
+        assert!(!item.search_text.contains("/workspace"));
     }
 
     #[test]
@@ -1018,6 +1106,7 @@ mod tests {
                 },
                 resumable_id: "id".into(),
                 title: Some("title".into()),
+                updated_at: None,
                 workspace: WorkspaceEvidence::Recorded {
                     workspace: "/workspace".into(),
                     historical_git_identity: None,

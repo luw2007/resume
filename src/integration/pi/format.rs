@@ -1,6 +1,7 @@
 use super::{AGENT, discover::ParsedSession, roots::EffectiveRoots};
 use crate::session::{
-    ActivityStatus, RiskStatus, Session, SessionKey, SupportStatus, WorkspaceEvidence,
+    ActivityStatus, RiskStatus, Session, SessionKey, SupportStatus, UpdateTime, UpdateTimeSource,
+    WorkspaceEvidence,
 };
 use std::ffi::OsString;
 impl ParsedSession {
@@ -41,6 +42,14 @@ impl ParsedSession {
             },
             resumable_id: OsString::from(self.id),
             title,
+            updated_at: self.activity_time.map(|at| UpdateTime {
+                at,
+                source: if self.file_mtime == Some(at) {
+                    UpdateTimeSource::FileMtime
+                } else {
+                    UpdateTimeSource::Native
+                },
+            }),
             workspace: workspace_evidence,
             support: SupportStatus::Supported,
             activity,
