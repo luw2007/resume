@@ -64,6 +64,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-features --locked
+      - name: Benchmark suite compiles and runs (smoke, not full statistical sampling)
+        run: cargo test --all-features --locked --benches
       - name: Rustdoc warnings are errors
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
 
