@@ -445,8 +445,10 @@ resume --json
 `--list` is an adaptive human table with:
 
 ```text
-STATUS AGENT[PROFILE] UPDATED TITLE BRANCH WORKSPACE
+UPDATED AGENT[PROFILE] TITLE + BRANCH
 ```
+
+`UPDATED` is the latest native Session timestamp, falling back to the transcript file's modification time. `+ BRANCH` identifies the Workspace worktree; detached and non-Git workspaces render `+ detached` and `+ no-branch`.
 
 It is not a stable machine format and does not switch automatically when stdout is redirected.
 
@@ -634,7 +636,7 @@ brew install luw2007/tap/resume
 
 Formal artifacts are built only in GitHub Actions, with SHA-256 and GitHub artifact attestation. Tags matching `v*` trigger Release from protected main. No local formal release and no GPG/minisign key in v0.1.0.
 
-A least-privilege GitHub App installed only on the tap repository, with `Contents: write`, provides a short-lived installation token to update `Formula/resume.rb`. Do not use a long-lived PAT. Tap failure is independently retryable and never causes rebuilding or retagging the release.
+A fine-grained personal access token, scoped only to the `luw2007/homebrew-tap` repository with `Contents: Read and write` and a 1-year expiration, updates `Formula/resume.rb` (`HOMEBREW_TAP_PAT` secret on `luw2007/resume`). Tap failure is independently retryable and never causes rebuilding or retagging the release. Rotate the token before expiry; a GitHub App was considered for shorter-lived credentials but the fine-grained PAT was chosen for lower setup overhead.
 
 Formula verifies `resume --version` and `resume --help`; a controlled TTY environment separately smokes Picker startup.
 
