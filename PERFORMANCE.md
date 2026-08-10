@@ -50,17 +50,24 @@ before/after): **~28s -> ~7-11s wall-clock**.
 
 ### `codex_discovery`
 
-Codex's `discover_with_filter[_enriched]` reads and fully JSON-parses every line of every
-rollout file (bounded only by the generous 512 MiB/file safety limit) purely to locate the
-`session_meta` record and derive a title from user messages -- even for outlier files tens
-of megabytes large. `docs/product-design.md` section 3 specifies title derivation should
-use "at most a 1 MiB bounded early read," which the current implementation does not honor
-for Codex. The `uniform_*files_*lines` vs `uniform_*_plus_NxMB` benchmark pair makes this
-file-size sensitivity visible: a handful of large outlier files can dominate total
-discovery time disproportionately to their session count. This group is a regression
-guard for the current (unbounded) behavior and a baseline to compare against once a
-bounded-read fix lands; it does not yet assert an upper bound, since the current behavior
-is the thing still being fixed.
+Codex's `discover_with_filter[_enriched]` previously read and fully JSON-parsed every line
+of every rollout file (bounded only by the generous 512 MiB/file safety limit) purely to
+locate the `session_meta` record and derive a title from user messages -- even for outlier
+files tens of megabytes large. `docs/product-design.md` section 3 specifies title
+derivation should use "at most a 1 MiB bounded early read," which the implementation now
+honors: `parse_rollout_file` first attempts a bounded (1 MiB) read; if `session_meta` is
+found within it (the normal case -- it is the first record in every real Codex rollout),
+discovery proceeds from that fast-path read alone. Only if `session_meta` is not found
+within the bound (an anomalous shape) does it fall back to a full read at the
+caller-supplied safety ceiling, so correctness is preserved for every input shape.
+
+The `uniform_*files_*lines` vs `uniform_*_plus_NxMB` benchmark pair makes the fix's effect
+visible: the large-outlier-file variant dropped from ~226ms to ~19ms (91.7% improvement,
+criterion-confirmed significant), while the small-file baseline is unchanged. On real
+`~/.codex/sessions` data (`-a codex` only, same machine/data, before/after this fix):
+**~11s -> ~5-10s wall-clock** (on top of the `git_scope` fix's own ~28s -> ~11s). Output
+was verified byte-identical (same sessions, titles, workspaces, support/activity/risk,
+zero errors) between the unfixed and fixed binaries against the same real data.
 
 ## Fixtures
 
@@ -83,11 +90,18 @@ A regression in either group's reported time is the primary signal to investigat
 merging a change that touches `Scope::contains_workspace` or Codex/Pi/Claude/OMP rollout
 parsing.
 
-## Known remaining gap (not yet fixed)
+## Known remaining gaps (not yet fixed)
 
-The `codex_discovery` large-file variant demonstrates that Codex discovery time still
-scales with total bytes read across all rollout files, not with the number of Sessions or
-the amount of Preview-relevant content. A future fix should bound the read used for title
-derivation to the documented 1 MiB early-read budget (falling back to full parsing only
-inside Preview, on demand for the selected Session) rather than fully parsing every
-rollout up front during discovery.
+- **Claude Code and Pi/OMP discovery are not yet covered by this benchmark suite.** Only
+  Codex has a dedicated `codex_discovery` group; the other three integrations parse
+  JSONL similarly (Pi/OMP already cap `max_records`, but not `max_file_bytes`, so a single
+  pathologically large Pi/OMP/Claude transcript could show the same file-size sensitivity
+  the pre-fix Codex benchmark demonstrated). Extending `benches/fixtures.rs` with
+  Pi/OMP/Claude-shaped synthetic trees and adding matching benchmark groups is the natural
+  next step before assuming this class of regression is fully guarded.
+- **The Codex bounded early read is a fixed 1 MiB, not adaptive.** If a future rollout
+  format regularly needs more than 1 MiB before the first user message (unlikely given
+  current evidence, but not proven impossible), the fallback path pays the full-read cost
+  every time rather than a slightly larger bounded read. No evidence currently motivates
+  tuning this, but it is the parameter to revisit if a future fixture shows the fallback
+  path triggering unexpectedly often on real data.
