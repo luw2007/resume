@@ -25,7 +25,8 @@ jobs:
       - name: Tag must be an ancestor of origin/main
         run: |
           git fetch origin main --quiet
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
             echo "::error::${GITHUB_REF_NAME} is not reachable from origin/main; refusing to release" >&2
             exit 1
           fi
