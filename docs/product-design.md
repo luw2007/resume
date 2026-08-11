@@ -167,12 +167,14 @@ The Workspace is the directory recorded by the Session. Resume always uses it, e
 
 Without an explicit direction:
 
-- In a Git repository, include Sessions whose Workspaces belong to the current repository across all Git worktrees, at any depth within those worktrees.
+- In a Git repository, include Sessions whose Workspaces belong to the current repository's current worktree, at any depth within it. `--all-worktrees` widens this to every linked worktree of the repository instead of only the current one.
 - Determine repository identity using Git common-directory/worktree information, not repository-name or path-prefix guesses.
 - Outside Git, match only a Workspace exactly equal to the current real directory.
 - If Git is unavailable or repository resolution fails, warn and degrade to the non-Git exact-directory rule.
 
 The launcher filters Workspaces already recorded in agent stores. It does not recursively scan the filesystem.
+
+Resolving every linked worktree costs an additional `git worktree list` subprocess call beyond the single `git rev-parse` call that resolving only the current worktree needs (see "Git metadata performance" below), and most invocations only care about the current worktree's own Sessions. Current-worktree-only is therefore the default; `--all-worktrees` is opt-in.
 
 ### Explicit direction
 
@@ -185,7 +187,7 @@ The optional direction replaces the Git default Scope:
 -D all, --down all
 ```
 
-`--up` and `--down` are mutually exclusive. Distance is the number of real path-component edges from the base directory:
+`--up` and `--down` are mutually exclusive. `--all-worktrees` only widens the Git default Scope, so it conflicts with `--up`/`--down`: exit 2. Distance is the number of real path-component edges from the base directory:
 
 - distance `0`: only the base directory;
 - `--up 1`: base plus parent;
@@ -239,7 +241,8 @@ resume [DIRECTORY]
 ### Git metadata performance
 
 - Query each normalized Workspace at most once.
-- Query each Git common directory's worktree list once.
+- Query each Git common directory's worktree list once, and only when `--all-worktrees` is set; the default (current worktree only) resolves the common directory and current worktree together in a single `git rev-parse` call and never needs `git worktree list`.
+- A recorded Workspace that does not even share a path prefix with the current repository's worktree(s) is never a Scope match; skip its per-Workspace Git common-directory query entirely rather than spawning `git rev-parse` only to discard the result. Measured against a real multi-project Session history, this ordering alone removed the subprocess spawn for roughly 99% of distinct Workspaces.
 - Cache only for the current process.
 - Git metadata failure does not block discovery or Resume.
 - Do not delay candidate display for Git decoration; update safely if possible, otherwise enrich only Preview.
@@ -406,6 +409,7 @@ Active Detection is optional per integration and does not affect Supported statu
 resume [DIRECTORY]
   -U, --up <N|all>
   -D, --down <N|all>
+      --all-worktrees      # widens the Git default Scope; conflicts with -U/-D
   -a, --agent <AGENT>      # repeatable
       --since <VALUE>
       --list

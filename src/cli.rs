@@ -175,8 +175,9 @@ read-only. Resume is an exec into the agent's own CLI with the recorded
 working directory, argv, and environment restored.
 
 By default the scope is the Git repository containing the current
-directory, including its linked worktrees. Use -U/--up and -D/--down to
-walk the directory tree instead, and --since to hide stale Sessions.
+directory, limited to the current worktree. Use --all-worktrees to widen
+it to every linked worktree, -U/--up and -D/--down to walk the directory
+tree instead, and --since to hide stale Sessions.
 
 Without --list or --json, `resume` opens an interactive picker. With
 either flag it prints once and exits, so it is safe in scripts and CI.\
@@ -198,10 +199,14 @@ EXAMPLES
     after_long_help = "\
 COMMON EXAMPLES
   resume
-      Pick a Session from the current Git repository and its worktrees.
+      Pick a Session from the current Git repository, limited to the
+      current worktree.
 
   resume ~/src/api
       Pick a Session scoped to another directory without leaving here.
+
+  resume --all-worktrees
+      Widen the scope to every linked worktree of the current repository.
 
   resume --up all
       Widen the scope to every ancestor directory, unbounded.
@@ -274,6 +279,13 @@ pub struct Cli {
     pub down: Option<Distance>,
 
     #[arg(
+        long,
+        conflicts_with_all = ["up", "down"],
+        help = "Default Scope: include every linked Git worktree, not only the current one"
+    )]
+    pub all_worktrees: bool,
+
+    #[arg(
         short = 'a',
         long,
         action = clap::ArgAction::Append,
@@ -326,6 +338,7 @@ impl Cli {
         self.directory.is_some()
             || self.up.is_some()
             || self.down.is_some()
+            || self.all_worktrees
             || !self.agent.is_empty()
             || self.since.is_some()
             || self.list
