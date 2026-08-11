@@ -333,6 +333,42 @@ fn skim_streamed_path_still_selects() {
     assert!(out.contains("key:"), "out={out:?}");
 }
 
+/// `run_production_picker` (the path `app::run_interactive` uses) must
+/// return as soon as the user selects, even while a discovery worker is
+/// still feeding it candidates on the upstream channel. Before the fix, the
+/// picker unconditionally joined its internal producer thread, which itself
+/// blocks on `candidates.recv()` — so selection wait time was bounded by the
+/// *slowest* discovery worker, not by Skim. `prod-slow` holds its sender
+/// open for `SLOW_DISCOVERY_HOLD` (5s) after emitting one candidate; a
+/// bounded return here proves the picker didn't wait for it.
+#[test]
+fn production_picker_returns_immediately_despite_slow_discovery() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("prod-slow", 100, 30);
+    let rendered = sess.read_for(Duration::from_millis(1500));
+    let text = strip(&rendered);
+    assert!(
+        text.contains("slow-candidate"),
+        "candidate missing: {text:?}"
+    );
+    let t0 = Instant::now();
+    sess.write(b"\r");
+    let exit = wait_child(&mut sess);
+    let elapsed = t0.elapsed();
+    assert_eq!(exit, 0, "exit={exit}");
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "picker blocked on slow discovery: selection took {elapsed:?}"
+    );
+    // Non-vacuity: a regression that returns promptly but loses the
+    // selection (e.g. classifies it as Cancelled) must not pass on timing
+    // alone.
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(out.contains("key:1"), "selection not confirmed: {out:?}");
+}
+
 /// Esc restores the terminal and the process exits cleanly.
 #[test]
 fn esc_cancels_and_restores_terminal() {
