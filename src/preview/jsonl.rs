@@ -138,7 +138,11 @@ fn read_line_capped(
             Err(e) => return Err(e),
         };
         if buf.is_empty() {
-            return Ok(if read_any { Some((line, payload_len, false)) } else { None });
+            return Ok(if read_any {
+                Some((line, payload_len, false))
+            } else {
+                None
+            });
         }
         read_any = true;
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
@@ -169,14 +173,11 @@ pub fn read_buffered<R: BufRead>(
     let mut outcome = FileOutcome::Complete;
     let mut bytes_read = 0u64;
 
-    loop {
+    while let Some((line, payload_len, had_newline)) =
         // Cap at max_line_bytes + 1 so a line of exactly the bound doesn't
         // get truncated before the oversized check below can see it's fine.
-        let Some((line, payload_len, had_newline)) =
-            read_line_capped(reader, bounds.max_line_bytes.saturating_add(1))?
-        else {
-            break; // EOF
-        };
+        read_line_capped(reader, bounds.max_line_bytes.saturating_add(1))?
+    {
         bytes_read += payload_len as u64 + u64::from(had_newline);
 
         // File size bound.
@@ -522,8 +523,7 @@ mod tests {
 
         // The reader must be correctly positioned past the oversized line's
         // newline, ready to read the next line normally.
-        let (next, next_len, next_newline) =
-            read_line_capped(&mut reader, cap).unwrap().unwrap();
+        let (next, next_len, next_newline) = read_line_capped(&mut reader, cap).unwrap().unwrap();
         assert_eq!(next, b"{\"type\":\"after\"}");
         assert_eq!(next_len, next.len());
         assert!(next_newline);

@@ -891,10 +891,7 @@ fn since_duration_filters_by_native_activity_time_not_transcript_mtime() {
     fs::create_dir_all(&pi_dir).unwrap();
 
     let now = std::time::SystemTime::now();
-    let now_epoch = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let old_epoch = now_epoch - 3600; // 1 hour ago: outside a 10-minute window.
 
     // Fresh native timestamp, but a file mtime backdated an hour — native

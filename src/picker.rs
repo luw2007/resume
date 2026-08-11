@@ -418,9 +418,7 @@ fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> Ski
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
-        .header(Some(String::from(
-            "UPDATED  AGENT[PROFILE]  TITLE  BRANCH",
-        )))
+        .header(Some(String::from("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")))
         .preview(Some(String::new()))
         .preview_window(format!("{position}:60%{visibility}"))
         .bind(vec![
