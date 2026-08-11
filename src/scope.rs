@@ -668,6 +668,15 @@ mod tests {
             Command::new("git")
                 .args(["commit", "--allow-empty", "-q", "-m", "init"])
                 .current_dir(&repo)
+                // A bare CI runner has no global `user.name`/`user.email`
+                // configured (unlike `git init`, `git commit` requires an
+                // author identity), so set it via env vars scoped to this
+                // one invocation rather than depending on ambient global
+                // config.
+                .env("GIT_AUTHOR_NAME", "resume-tests")
+                .env("GIT_AUTHOR_EMAIL", "resume-tests@example.invalid")
+                .env("GIT_COMMITTER_NAME", "resume-tests")
+                .env("GIT_COMMITTER_EMAIL", "resume-tests@example.invalid")
                 .status()
                 .unwrap()
                 .success()
