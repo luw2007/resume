@@ -294,7 +294,14 @@ fn run_interactive(
             }
         }
         PickerOutcome::Interrupted => EXIT_INTERRUPT,
-        PickerOutcome::PreflightFailed(reason) | PickerOutcome::InternalError(reason) => {
+        PickerOutcome::PreflightFailed(reason) => {
+            eprintln!("resume: {reason}");
+            if reason.contains("no controlling terminal") {
+                eprintln!("resume: use --list or --json in this environment");
+            }
+            EXIT_USAGE
+        }
+        PickerOutcome::InternalError(reason) => {
             eprintln!("resume: {reason}");
             EXIT_ERROR
         }
@@ -401,37 +408,19 @@ fn discover_agent(
     discovery
 }
 
-/// Resolve the on-disk transcript path backing a `Session`'s identity,
-/// regardless of which integration produced it. Pi/OMP/Claude embed the
-/// transcript path directly as `native_locator`; Codex embeds it after a
-/// `native_id::path` separator (see `codex_transcript_path`).
-fn record_transcript_path(session: &Session) -> Option<PathBuf> {
-    if session.key.agent == codex::AGENT {
-        codex_transcript_path(session)
-    } else {
-        Some(PathBuf::from(&session.key.native_locator))
-    }
-}
-
-/// `--since` filter: keep a Session only when its best-available activity
-/// signal is at or after `cutoff`. There is no positive-evidence activity
-/// timestamp uniformly available on the assembled `Session` (only
-/// `ActivityStatus`, which is `Unknown` by default for most integrations),
-/// so this uses the transcript file's own mtime as the universal fallback
-/// signal, consistent with each integration's own `activity_time` fallback
-/// chain (message time, then header time, then file mtime). A Session whose
-/// transcript cannot be stat'd (e.g. Workspace/transcript already gone) is
-/// conservatively kept rather than silently dropped, since discovery/list
-/// output elsewhere already surfaces unavailable Sessions for diagnosis
-/// rather than hiding them.
+/// `--since` filter: keep a Session only when its `updated_at` (native last
+/// activity time, falling back to the transcript file's own mtime only when
+/// no native timestamp is available — the same signal each integration
+/// already computes for the `UPDATED` display column) is at or after
+/// `cutoff`. Per docs/product-design.md §7 ("Use native last activity time,
+/// then documented fallback. When `--since` is active, exclude unknown-time
+/// Sessions."), a Session with no resolvable activity time is excluded, not
+/// conservatively kept.
 fn session_at_or_after(record: &CandidateRecord, cutoff: std::time::SystemTime) -> bool {
-    let Some(path) = record_transcript_path(&record.session) else {
-        return true;
-    };
-    match std::fs::metadata(&path).and_then(|meta| meta.modified()) {
-        Ok(modified) => modified >= cutoff,
-        Err(_) => true,
-    }
+    record
+        .session
+        .updated_at
+        .is_some_and(|update| update.at >= cutoff)
 }
 
 fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
@@ -581,6 +570,20 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
         return AgentDiscovery::failed("omp_root_unavailable");
     };
     let mut roots = vec![base_roots.clone()];
+    // `base_roots` already reflects OMP_PROFILE/PI_PROFILE env selection, so
+    // when one of them points at a named profile, the true unprofiled
+    // default is never otherwise resolved — silently dropping it from "all
+    // profiles" discovery. Force-resolve Default separately and always
+    // include it, independent of which profile the env vars selected.
+    let mut default_inputs = base_inputs.clone();
+    default_inputs.profile_flag = None;
+    default_inputs.omp_profile_env = None;
+    default_inputs.pi_profile_env = None;
+    if let Some(default_roots) = omp::resolve(&default_inputs)
+        && !roots.iter().any(|r| r.profile == default_roots.profile)
+    {
+        roots.push(default_roots);
+    }
     let profiles = base_roots.config_root.join(omp::PROFILES_DIR_NAME);
     if let Ok(entries) = std::fs::read_dir(profiles) {
         for entry in entries
@@ -716,7 +719,15 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
     let agent = agent_label(session);
     let updated = updated_label(session.updated_at);
     let updated_detail = updated_detail(session.updated_at);
-    let title = session.title.as_deref().unwrap_or("<untitled>");
+    // Native titles (e.g. Pi's session_info.name) are untrusted transcript
+    // data and reach --list/JSON directly (unlike search_text/preview below,
+    // which already normalize their own format! output) — sanitize before
+    // any other use so no escape sequence can reach a terminal via `display`.
+    let title = text::normalize(
+        session.title.as_deref().unwrap_or("<untitled>"),
+        text::Mode::Normalized,
+    );
+    let title = title.as_str();
     let branch = branch_label(session.workspace.workspace());
     let column_width = title_column_width();
     let display = format!(
@@ -913,7 +924,11 @@ fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             id: r.session.resumable_id.to_string_lossy().into_owned(),
-            title: r.session.title.clone(),
+            title: r
+                .session
+                .title
+                .as_deref()
+                .map(|t| text::normalize(t, text::Mode::Normalized)),
             workspace: r
                 .session
                 .workspace

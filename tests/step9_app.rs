@@ -397,6 +397,67 @@ fn non_verbose_list_prints_a_discovery_diagnostic_without_verbose_flag() {
 }
 
 #[test]
+fn native_title_terminal_controls_never_reach_list_or_json() {
+    // safety-terminal-control-stripping: `session_info.name` (Pi's native
+    // title) reaches `--list`'s row and `--json`'s `title` field directly
+    // (session.rs -> picker_candidate/print_json), unlike search_text/preview
+    // which already ran their own format! output through `text::normalize`.
+    // A crafted native title carrying OSC title-setting, CSI color, and a
+    // bidi override must never leak an escape byte to either surface.
+    let (tmp, ws) = fixtures();
+    let pi_dir = tmp.path().join(".pi/agent/sessions/ws");
+    let evil = pi_dir.join("evil-title.jsonl");
+    line(
+        &evil,
+        serde_json::json!({"type":"session","version":3,"id":"evil-title-id","timestamp":1700000001,"cwd":ws}),
+    );
+    line(
+        &evil,
+        serde_json::json!({
+            "type":"session_info",
+            "name":"NATIVE\u{1b}]0;PWNED\u{7}TITLE\u{1b}[31mRED\u{1b}[0m\u{202e}BIDI"
+        }),
+    );
+
+    let list = run(tmp.path(), &ws, &["--list", "--agent", "pi"]);
+    assert!(list.status.success());
+    assert!(
+        !list.stdout.contains(&0x1b),
+        "ESC byte leaked into --list stdout: {:?}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    assert!(
+        !list.stdout.contains(&0x07),
+        "BEL byte leaked into --list stdout: {:?}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    let stdout_text = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !stdout_text.contains('\u{202e}'),
+        "bidi override leaked into --list stdout: {stdout_text:?}"
+    );
+
+    let json = run(tmp.path(), &ws, &["--json", "--agent", "pi"]);
+    assert!(json.status.success());
+    assert!(
+        !json.stdout.contains(&0x1b),
+        "ESC byte leaked into --json stdout: {:?}",
+        String::from_utf8_lossy(&json.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let title = value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "evil-title-id")
+        .expect("evil-title-id session missing")["title"]
+        .as_str()
+        .unwrap();
+    assert!(!title.contains('\u{1b}'), "title={title:?}");
+    assert!(!title.contains('\u{202e}'), "title={title:?}");
+}
+
+#[test]
 fn json_errors_aggregate_counts_match_stderr_across_multiple_categories() {
     // M5 fix (docs/review/post-merge-review.md): `--json`'s `errors[]` must
     // be aggregated (one entry per category, summed count), matching the
@@ -470,6 +531,28 @@ fn missing_base_directory_is_a_usage_error() {
 }
 
 #[test]
+fn no_controlling_terminal_is_a_usage_error_with_a_list_json_suggestion() {
+    // docs/product-design.md §5 "Terminal behavior": "If no controlling
+    // terminal can be opened, exit 2 and suggest --list or --json." Invoking
+    // the real binary with no --list/--json (interactive mode) through
+    // `Command::output()` has no TTY attached, so preflight must fail this
+    // way; before the fix, `PreflightFailed` was mapped to exit 1 with no
+    // suggestion, same as `InternalError`.
+    let (tmp, ws) = fixtures();
+    let output = run(tmp.path(), &ws, &[]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no controlling terminal"),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("--list") && stderr.contains("--json"),
+        "missing --list/--json suggestion: {stderr:?}"
+    );
+}
+
+#[test]
 fn git_unavailable_falls_back_to_exact_scope_with_a_visible_diagnostic() {
     // scope-git-failure-diagnostic / doccheck-git-scope-failure-not-surfaced-as-diagnostic:
     // every fixture-based test already runs with a PATH containing no `git`
@@ -527,6 +610,57 @@ fn omp_discovers_default_and_every_named_profile_in_one_run() {
             .iter()
             .any(|s| s["id"] == "omp-id" && s["profile"].is_null()),
         "default profile session missing: {sessions:?}"
+    );
+    for profile in ["work", "personal"] {
+        assert!(
+            sessions
+                .iter()
+                .any(|s| s["id"] == format!("{profile}-id") && s["profile"] == profile),
+            "{profile} profile session missing: {sessions:?}"
+        );
+    }
+}
+
+#[test]
+fn omp_profile_env_selecting_a_named_profile_does_not_suppress_the_default() {
+    // `discover_omp`'s `base_roots` already reflects OMP_PROFILE/PI_PROFILE
+    // env selection, so before the fix, setting OMP_PROFILE to a named
+    // profile silently dropped the default profile's sessions from "all
+    // profiles" discovery (contradicts docs/product-design.md's "OMP
+    // automatically discovers the default and named profiles").
+    let (tmp, ws) = fixtures();
+    for profile in ["work", "personal"] {
+        let dir = tmp.path().join(".omp/profiles").join(profile).join("agent");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{profile}.jsonl"));
+        line(
+            &file,
+            serde_json::json!({"type":"title","v":1,"title":format!("{profile} title")}),
+        );
+        line(
+            &file,
+            serde_json::json!({"type":"session","version":3,"id":format!("{profile}-id"),"timestamp":1700000000,"cwd":ws}),
+        );
+    }
+
+    let omp_agent_dir = tmp.path().join(".omp/agent");
+    let output = run_with_env(
+        tmp.path(),
+        &ws,
+        &["--json", "--agent", "omp"],
+        &[
+            ("PI_CODING_AGENT_DIR", omp_agent_dir.as_path()),
+            ("OMP_PROFILE", Path::new("work")),
+        ],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sessions = value["sessions"].as_array().unwrap();
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s["id"] == "omp-id" && s["profile"].is_null()),
+        "default profile session dropped when OMP_PROFILE selects a named profile: {sessions:?}"
     );
     for profile in ["work", "personal"] {
         assert!(
@@ -720,13 +854,8 @@ fn since_all_matches_since_flag_absent() {
 }
 
 #[test]
-fn since_duration_filters_out_stale_transcripts_across_all_four_agents() {
+fn since_all_bypasses_time_filtering_across_all_four_agents() {
     let (tmp, ws) = fixtures();
-    // The fixture transcripts were just written, so they are within the last
-    // minute; `--since 0m` (an implausibly narrow window achieved by backdating
-    // every transcript file's mtime) should filter them all out, while
-    // `--since all` keeps them. We backdate file mtimes directly rather than
-    // sleeping in the test, since the filter reads mtime from disk.
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for entry in walk_jsonl(tmp.path()) {
         let file = fs::OpenOptions::new().write(true).open(&entry).unwrap();
@@ -734,31 +863,89 @@ fn since_duration_filters_out_stale_transcripts_across_all_four_agents() {
             .unwrap();
     }
 
-    let recent = run(tmp.path(), &ws, &["--json", "--since", "10m"]);
-    assert!(recent.status.success());
-    let recent: serde_json::Value = serde_json::from_slice(&recent.stdout).unwrap();
-    assert_eq!(
-        recent["sessions"].as_array().unwrap().len(),
-        0,
-        "all transcripts are older than 10m, so --since 10m must exclude them all: {recent}"
-    );
-
     let everything = run(tmp.path(), &ws, &["--json", "--since", "all"]);
     assert!(everything.status.success());
     let everything: serde_json::Value = serde_json::from_slice(&everything.stdout).unwrap();
     assert_eq!(
         everything["sessions"].as_array().unwrap().len(),
         4,
-        "--since all must not filter anything: {everything}"
+        "--since all must not filter anything, regardless of activity time: {everything}"
+    );
+}
+
+#[test]
+fn since_duration_filters_by_native_activity_time_not_transcript_mtime() {
+    // docs/product-design.md §7: "Use native last activity time, then
+    // documented fallback." `session_at_or_after` must read the already
+    // integration-resolved `Session.updated_at` (native time first, mtime
+    // fallback only when no native time exists) rather than re-stat the
+    // transcript file directly. A session with a fresh native timestamp but
+    // a stale mtime must still pass a narrow window, and a session with a
+    // stale native timestamp must still be excluded even with a
+    // freshly-touched mtime.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let ws = home.join("workspace");
+    fs::create_dir_all(&ws).unwrap();
+    let pi_dir = home.join(".pi/agent/sessions/ws");
+    fs::create_dir_all(&pi_dir).unwrap();
+
+    let now = std::time::SystemTime::now();
+    let now_epoch = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let old_epoch = now_epoch - 3600; // 1 hour ago: outside a 10-minute window.
+
+    // Fresh native timestamp, but a file mtime backdated an hour — native
+    // time must win and this Session must still be included.
+    let fresh_native = pi_dir.join("fresh-native.jsonl");
+    line(
+        &fresh_native,
+        serde_json::json!({"type":"session","version":3,"id":"fresh-native","timestamp":now_epoch,"cwd":ws}),
+    );
+    line(
+        &fresh_native,
+        serde_json::json!({"type":"message","message":{"role":"user","content":"fresh native title"}}),
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&fresh_native)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(now - std::time::Duration::from_secs(3600)))
+        .unwrap();
+
+    // Stale native timestamp, with a freshly-touched mtime (the default,
+    // from just having been written) — native time must win and this
+    // Session must still be excluded.
+    let stale_native = pi_dir.join("stale-native.jsonl");
+    line(
+        &stale_native,
+        serde_json::json!({"type":"session","version":3,"id":"stale-native","timestamp":old_epoch,"cwd":ws}),
+    );
+    line(
+        &stale_native,
+        serde_json::json!({"type":"message","message":{"role":"user","content":"stale native title"}}),
     );
 
-    let wide = run(tmp.path(), &ws, &["--json", "--since", "2h"]);
-    assert!(wide.status.success());
-    let wide: serde_json::Value = serde_json::from_slice(&wide.stdout).unwrap();
+    let output = run_with_env(
+        home,
+        &ws,
+        &["--json", "--agent", "pi", "--since", "10m"],
+        &[],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ids: Vec<&str> = value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        wide["sessions"].as_array().unwrap().len(),
-        4,
-        "--since 2h must include transcripts backdated by 1h: {wide}"
+        ids,
+        vec!["fresh-native"],
+        "native activity time must take precedence over transcript mtime: {value}"
     );
 }
 
