@@ -113,6 +113,49 @@ pub fn open_for_read(
     Ok((file, resolved))
 }
 
+/// Read one physical line from `reader`, buffering at most `cap` bytes of
+/// its payload regardless of the line's true length — the security property
+/// `read_buffered`'s line-size bound depends on. `read_until` alone cannot
+/// provide this: it grows its buffer to the full line before returning, so
+/// checking the length only afterward still lets an attacker force an
+/// allocation proportional to an arbitrarily large single line. This drains
+/// any bytes past `cap` without appending them, tracking the *true* payload
+/// length (`payload_len`, excluding the trailing `\n`) separately so the
+/// caller can still correctly detect and count an oversized line. Returns
+/// `None` at true EOF (nothing left to read); otherwise
+/// `Some((buffered_prefix, true_payload_len, found_newline))`.
+fn read_line_capped(
+    reader: &mut impl BufRead,
+    cap: usize,
+) -> io::Result<Option<(Vec<u8>, usize, bool)>> {
+    let mut line = Vec::new();
+    let mut payload_len = 0usize;
+    let mut read_any = false;
+    loop {
+        let buf = match reader.fill_buf() {
+            Ok(buf) => buf,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if buf.is_empty() {
+            return Ok(if read_any { Some((line, payload_len, false)) } else { None });
+        }
+        read_any = true;
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let keep = cap.saturating_sub(line.len()).min(pos);
+            line.extend_from_slice(&buf[..keep]);
+            payload_len += pos;
+            reader.consume(pos + 1);
+            return Ok(Some((line, payload_len, true)));
+        }
+        let keep = cap.saturating_sub(line.len()).min(buf.len());
+        line.extend_from_slice(&buf[..keep]);
+        payload_len += buf.len();
+        let n = buf.len();
+        reader.consume(n);
+    }
+}
+
 /// Read a JSONL file using a `BufRead`, which cleanly handles multi-line
 /// chunks. This is the primary entry point for file reads.
 pub fn read_buffered<R: BufRead>(
@@ -127,16 +170,14 @@ pub fn read_buffered<R: BufRead>(
     let mut bytes_read = 0u64;
 
     loop {
-        let mut line = Vec::new();
-        let read = match reader.read_until(b'\n', &mut line) {
-            Ok(n) => n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        if read == 0 {
+        // Cap at max_line_bytes + 1 so a line of exactly the bound doesn't
+        // get truncated before the oversized check below can see it's fine.
+        let Some((line, payload_len, had_newline)) =
+            read_line_capped(reader, bounds.max_line_bytes.saturating_add(1))?
+        else {
             break; // EOF
-        }
-        bytes_read += read as u64;
+        };
+        bytes_read += payload_len as u64 + u64::from(had_newline);
 
         // File size bound.
         if bytes_consumed + bytes_read > bounds.max_file_bytes {
@@ -144,26 +185,23 @@ pub fn read_buffered<R: BufRead>(
             break;
         }
 
-        let had_newline = line.last() == Some(&b'\n');
-        let payload = if had_newline {
+        // Strip a trailing \r for CRLF tolerance (the buffered prefix
+        // already excludes the \n that `read_line_capped` consumed).
+        let payload: &[u8] = if line.last() == Some(&b'\r') {
             &line[..line.len() - 1]
         } else {
             &line[..]
         };
 
-        // Strip a trailing \r for CRLF tolerance.
-        let payload = if payload.last() == Some(&b'\r') {
-            &payload[..payload.len() - 1]
-        } else {
-            payload
-        };
-
-        if payload.is_empty() {
+        if payload.is_empty() && payload_len == 0 {
             continue;
         }
 
-        // Line-size bound: report, skip, and continue.
-        if payload.len() > bounds.max_line_bytes {
+        // Line-size bound: `payload_len` is the *true* length (never
+        // truncated by the cap above), so this correctly flags a
+        // capped-but-still-oversized line without ever having fully
+        // buffered it.
+        if payload_len > bounds.max_line_bytes {
             oversized_lines += 1;
             if records.len() >= bounds.max_records {
                 outcome = FileOutcome::BoundExceeded;
@@ -171,7 +209,6 @@ pub fn read_buffered<R: BufRead>(
             }
             continue;
         }
-
         match parse_bounded(payload, bounds.max_nesting) {
             Ok(value) => {
                 records.push(value);
@@ -455,6 +492,41 @@ mod tests {
             "valid records before and after the oversized line are kept"
         );
         assert!(result.oversized_lines >= 1);
+    }
+
+    #[test]
+    fn read_line_capped_never_buffers_past_the_cap() {
+        // The bug this guards: `read_until` grows its buffer to the full
+        // line before any size check runs, so an attacker-controlled line
+        // far larger than `max_line_bytes` still forces an allocation of
+        // its own full length. `read_line_capped` must never buffer more
+        // than `cap` bytes, regardless of how much larger the true line is,
+        // while still correctly reporting the true length so the caller can
+        // flag it oversized.
+        let cap = 64usize;
+        let true_len = cap * 1000; // far larger than the cap
+        let mut line = "y".repeat(true_len).into_bytes();
+        line.push(b'\n');
+        line.extend_from_slice(b"{\"type\":\"after\"}\n");
+        let mut reader = std::io::Cursor::new(line);
+
+        let (buffered, payload_len, found_newline) =
+            read_line_capped(&mut reader, cap).unwrap().unwrap();
+        assert!(
+            buffered.len() <= cap,
+            "buffered {} bytes for a cap of {cap}",
+            buffered.len()
+        );
+        assert_eq!(payload_len, true_len, "true length must still be reported");
+        assert!(found_newline);
+
+        // The reader must be correctly positioned past the oversized line's
+        // newline, ready to read the next line normally.
+        let (next, next_len, next_newline) =
+            read_line_capped(&mut reader, cap).unwrap().unwrap();
+        assert_eq!(next, b"{\"type\":\"after\"}");
+        assert_eq!(next_len, next.len());
+        assert!(next_newline);
     }
 
     #[test]
