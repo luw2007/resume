@@ -114,13 +114,36 @@ the activity-time finding alone is sufficient to rule out a naive early-exit fix
 groups exist to make Pi/OMP's file-size sensitivity visible and trackable, not to
 demonstrate an applied fix.
 
+**OMP re-checked directly** (not extrapolated from Pi) against a real `~/.omp/agent`
+corpus of 1351 transcripts, ~1.03 GB, 227 files over 1 MiB, max 20.8 MB -- the largest
+real corpus of the three non-Codex integrations checked so far, and large enough that
+OMP discovery is genuinely user-visible slow at this scale (~2.4-3.9s steady-state, not
+the sub-2s seen on the smaller Pi/Claude corpora below). With the correct field
+(`record.message.role == "user"`, not a bare `type` field), **551 of 1351 files (40.8%)
+contain more than one user message** -- an even higher rate than Pi's 23%, further
+confirming "stop at first" is unsafe for OMP on real data. Checked one more angle before
+concluding no safe shortcut exists: for files with a user message, the *last* one's
+position averages 27.8% into the file by line count (median), but the 90th percentile is
+94.5% of the way through -- so even "read only the last N% of the file" is not reliably
+sufficient either; a real fix needs the file's full content available to find the true
+latest match, not a bounded window at either end. Profiled where OMP's ~2.4s steady-state
+actually goes: raw `jsonl::read_file_confined` alone (no OMP-specific extraction) over
+all 1351 files takes the same ~2.4s discover() does, confirming the cost is the shared
+JSON-parsing layer (`serde_json::from_slice::<Value>`, ~65-75% of the total; the shared
+`nesting_depth` bound check is a further ~5-10%), not OMP-specific waste -- there is
+currently no safe, low-risk optimization available for OMP without either widening the
+early-read window well past what any bound would help (average file needs to reach 28%+
+of its own length) or changing the underlying parse strategy for all four integrations at
+once (a materially larger architectural change, out of scope here).
+
 Measured (same synthetic scale as `codex_discovery`, one process on one machine): both
 Pi and OMP go from ~22ms (small files only) to ~78-82ms with two 40 MiB outlier files
-mixed in (~3.6x slower). On real data, this has not yet caused user-visible slowness:
-a real `~/.pi` (581 files, 170 MB, max 7 MB) and `~/.claude` (876 files, 422 MB, max 21
-MB) both discover in ~1-1.5s steady-state on the machine these benchmarks were authored
-on, far below Codex's pre-fix, much-larger corpus (3544 files, 2.9 GB). Revisit if a
-future real-world `~/.pi` or `~/.omp` corpus grows to Codex's pre-fix scale.
+mixed in (~3.6x slower). On real data, Pi and Claude have not yet caused user-visible
+slowness at the corpus sizes checked (`~/.pi`: 581 files, 170 MB, max 7 MB; `~/.claude`:
+876 files, 422 MB, max 21 MB; both ~1-1.5s steady-state) -- but **OMP already has**, at a
+real corpus roughly 6x larger by total bytes than the Pi corpus checked (1351 files,
+~1.03 GB). Revisit if a future real-world `~/.pi` corpus grows to a similar scale, or if
+OMP's real corpus continues growing toward Codex's pre-fix scale (3544 files, 2.9 GB).
 
 ### `claude_discovery`
 
@@ -188,16 +211,25 @@ parsing.
 ## Known remaining gaps (not yet fixed)
 
 - **Pi and OMP discovery still scale with total rollout bytes, not Session count, and a
-  naive Codex-style early-exit fix would be incorrect for real data**, not just
-  theoretically risky: a real `~/.pi` corpus check found 23% of files (135/581) have more
-  than one user message, so `latest_message_time` genuinely requires scanning to the true
-  last occurrence for a meaningful fraction of real Sessions (see `pi_discovery`/
-  `omp_discovery` above for the full research writeup). A correct fix needs a strategy
-  that finds the *latest* match within a bound (e.g. reading the file in reverse, or a
-  two-pass scan bounded by total bytes rather than position) rather than stopping at the
-  first match. Not yet a user-visible problem at real-world corpus sizes observed so far,
-  but worth revisiting if a real `~/.pi` or `~/.omp` grows toward Codex's pre-fix scale
-  (thousands of files, gigabytes).
+  naive Codex-style early-exit fix would be incorrect for real data -- and OMP is already
+  user-visibly slow at this repo owner's actual corpus size, not just theoretically at
+  risk.** A real `~/.pi` corpus check found 23% of files (135/581) have more than one
+  user message; a real `~/.omp` corpus check (using the correct
+  `record.message.role == "user"` field, 1351 files, ~1.03 GB) found an even higher 40.8%
+  (551/1351). `latest_message_time` genuinely requires scanning to the true last
+  occurrence for a large fraction of real Sessions in both integrations (see
+  `pi_discovery`/`omp_discovery` above for the full research writeup, including why
+  "read only the file's tail" is also not reliably sufficient: the last user message's
+  position averages 28% into the file but reaches 94.5% at the 90th percentile). Profiling
+  confirmed OMP's ~2.4-3.9s real-corpus steady-state is spent entirely in the shared JSON
+  parsing layer, not OMP-specific code, so there is no low-risk optimization available
+  without either a correctness-preserving "find latest within a full scan, faster" parse
+  strategy (e.g. avoiding full `serde_json::Value` tree construction in favor of a
+  lighter-weight streaming extraction, a materially larger change touching the shared
+  `jsonl.rs` reader used by all four integrations) or accepting the scan-to-end cost. Not
+  yet a problem for Pi at the corpus size checked, but already real for OMP -- prioritize
+  OMP first if this work resumes, since it has already crossed from theoretical to
+  user-visible on real data, not just a projection about future corpus growth.
 - **Claude discovery has the same scaling problem, is the most file-size-sensitive of the
   three in this benchmark's synthetic scale (~11.4x slower with two 40 MiB outliers vs
   ~3.6x for Pi/OMP), and a naive fix is similarly ruled out by real data**: a real
