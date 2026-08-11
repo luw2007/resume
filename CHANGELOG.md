@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
 
 - Default Git Scope now includes only the current worktree instead of every linked worktree, cutting a `git rev-parse` subprocess spawn per distinct recorded Workspace outside it (measured: ~99% of distinct Workspaces in a real multi-project OMP corpus) and removing the `git worktree list` spawn entirely from the default path. Use `--all-worktrees` to restore the previous default behavior.
 
+### Fixed
+
+- Full-binary QA re-verification pass (docs/qa/feature-inventory.csv, 185 user stories tested against `target/release/resume`) found and fixed six defects: `--since` filtered by raw transcript mtime instead of each integration's native-activity-first `updated_at`, causing false inclusions/exclusions; a too-small terminal or missing controlling terminal exited 1 instead of the documented usage exit 2 (the latter now also suggests `--list`/`--json`); `OMP_PROFILE` selecting a named profile silently dropped the default profile from "all profiles" discovery; Codex import metadata was parsed but never surfaced as a badge; a native Session title (e.g. Pi's `session_info.name`) could carry raw ANSI/OSC/bidi control bytes into `--list` and `--json` output; and the JSONL reader buffered an oversized line's full length before checking the size bound, so the advertised 8 MiB allocation cap didn't actually bound allocation. Corrected man page and product-design documentation that had drifted from a prior column-layout fix.
+
 ## 0.2.0 - 2026-08-10
 
 ### Changed
