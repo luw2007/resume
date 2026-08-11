@@ -254,10 +254,10 @@ The embedded Skim library owns the full-screen picker. `resume` does not wrap Sk
 ### List layout
 
 ```text
-STATUS  AGENT[PROFILE]  UPDATED  TITLE  BRANCH  WORKSPACE
+UPDATED  AGENT[PROFILE]  TITLE  BRANCH
 ```
 
-Status, agent, and time are retained first on narrow terminals. Then Workspace, branch, and title compact as needed; Workspace favors trailing components. There is no horizontal scrolling.
+TITLE receives the remaining terminal budget after the fixed `UPDATED`/`AGENT[PROFILE]` columns, clamped between 16 and 60 columns; BRANCH always starts at a fixed column after TITLE's padded width. There is no horizontal scrolling and no other adaptive compacting.
 
 Each custom Skim item separates:
 

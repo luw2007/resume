@@ -238,18 +238,6 @@ ENUMS
         zsh     Zsh completion script for the zsh compsys autoloader.
         fish    Fish completion script for fish shell.
 
-    STATUS -- first column of --list, derived from support and activity
-
-        READY        Supported, and no running process was observed.
-        ACTIVE       Supported, and a running process was observed. ACTIVE
-                     does not forbid Resume; you are shown the evidence and
-                     asked.
-        DISCOVER     Discover Only: the Session was found and can be listed,
-                     but this build cannot resume it.
-        UNSUPPORTED  The Session's shape is understood but not resumable.
-        UNAVAILABLE  The Session was found but its store or workspace is not
-                     currently usable. Selecting it is E3003.
-
     SUPPORT -- the --json `support` field, Rust debug form
 
         Supported
@@ -585,8 +573,6 @@ CAVEATS
     v0.1.0 specifics.
 
         - macOS and Linux only. There is no Windows build.
-        - The BRANCH column in --list is always the literal `-`. The column
-          is reserved, not populated.
         - Ctrl-R does not reload, refresh, or switch views live. It is bound
           to a no-op on purpose: a channel-fed reload can execute its
           default filesystem command, which would list the filesystem by
