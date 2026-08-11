@@ -3,6 +3,10 @@
 //! Usage:
 //!   resume-spike demo            – open the picker with a few fixed candidates
 //!   resume-spike streamed        – stream candidates from a bounded channel
+//!   resume-spike prod-slow       – production picker fed by a channel whose
+//!                                  sender stays open past selection, to
+//!                                  reproduce/guard against the picker
+//!                                  blocking its return on slow discovery
 //!   resume-spike preflight       – run preflight only, print result, exit
 //!   resume-spike empty           – zero candidates
 //!   resume-spike control-chars   – candidates carrying ANSI/OSC/bidi attacks
@@ -10,11 +14,19 @@
 //! The chosen opaque key is printed to stdout on selection as `key:<N>`.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
+use resume::config::{PreviewMode, PreviewPosition};
 use resume::picker::{
-    self, CandidateKey, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, PickerOutcome, run_picker,
-    run_picker_streamed,
+    self, CandidateKey, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, PickerCandidate, PickerOutcome,
+    run_picker, run_picker_streamed, run_production_picker,
 };
+
+/// How long the `prod-slow` producer keeps its sender open after emitting
+/// the one candidate. Must comfortably exceed the assertion bound the PTY
+/// test uses, so a regression (picker blocking on this sender) is unmissable
+/// even under CI scheduler contention.
+const SLOW_DISCOVERY_HOLD: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -24,6 +36,7 @@ fn main() -> ExitCode {
             let outcome = run_picker_streamed(demo_candidates(), false);
             print_outcome(outcome)
         }
+        "prod-slow" => print_outcome(run_prod_slow()),
         "raw" => run(demo_candidates(), true),
         "empty" => run(Vec::new(), false),
         "control-chars" => run(control_attack_candidates(), false),
@@ -51,6 +64,29 @@ fn main() -> ExitCode {
 
 fn run(candidates: Vec<(CandidateKey, String, String)>, force_raw: bool) -> ExitCode {
     print_outcome(run_picker(candidates, force_raw))
+}
+
+/// Mirrors `app::run_interactive`'s use of `run_production_picker`, but the
+/// producer thread deliberately holds its sender open for
+/// `SLOW_DISCOVERY_HOLD` after emitting the single candidate — modeling a
+/// discovery worker that is still scanning when the user selects. The picker
+/// must return as soon as Skim reports a selection, independent of when this
+/// sender eventually drops.
+fn run_prod_slow() -> PickerOutcome {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PickerCandidate>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(PickerCandidate {
+            key: CandidateKey(1),
+            display: "pi  slow-candidate".into(),
+            search_text: "pi  slow-candidate".into(),
+            preview: "Session 1\nstill discovering other agents".into(),
+        });
+        std::thread::sleep(SLOW_DISCOVERY_HOLD);
+        // `tx` drops here, unblocking the picker's internal producer thread
+        // if it is still waiting on `recv()`. The picker itself must not
+        // have waited for this.
+    });
+    run_production_picker(rx, PreviewMode::Hidden, PreviewPosition::Auto)
 }
 
 fn print_outcome(outcome: PickerOutcome) -> ExitCode {
