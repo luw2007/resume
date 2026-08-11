@@ -20,7 +20,7 @@ fn main() {
             timings.push((elapsed, size, path));
         }
     }
-    timings.sort_by(|a, b| b.0.cmp(&a.0));
+    timings.sort_by_key(|t| std::cmp::Reverse(t.0));
     let total: std::time::Duration = timings.iter().map(|t| t.0).sum();
     println!("total: {:?} across {} files", total, timings.len());
     println!("top 15 slowest:");
