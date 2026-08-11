@@ -330,6 +330,17 @@ pub struct ImportMeta {
     pub source_kind: Option<String>,
 }
 
+impl ImportMeta {
+    /// A safe display string for the badge. Never exposes an origin path or
+    /// remote — only the coarse source kind, when known.
+    pub fn to_display(&self) -> String {
+        match &self.source_kind {
+            Some(kind) => format!("imported from {kind}"),
+            None => "imported".to_string(),
+        }
+    }
+}
+
 /// Discovery-time early-read budget, per `docs/product-design.md` section 3:
 /// "at most a 1 MiB bounded early read" for title derivation -- 64 KiB is
 /// well within that documented ceiling, not a separate mechanism. Real
@@ -522,7 +533,11 @@ pub fn build_session(parsed: ParsedSession) -> Session {
         None => WorkspaceEvidence::Unknown,
     };
 
-    let title = derive_title(&parsed);
+    let title = match (derive_title(&parsed), parsed.import.as_ref()) {
+        (Some(title), Some(import)) => Some(format!("{title} [{}]", import.to_display())),
+        (None, Some(import)) => Some(import.to_display()),
+        (title, None) => title,
+    };
 
     Session {
         key,

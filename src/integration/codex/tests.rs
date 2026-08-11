@@ -1203,6 +1203,16 @@ fn imported_session_uses_new_rollout_id_for_resume() {
             .unwrap_or("")
             .contains("private.git")
     );
+    // The safe coarse badge IS surfaced, though.
+    assert!(
+        session
+            .title
+            .as_deref()
+            .unwrap_or("")
+            .contains("imported from claude"),
+        "title missing import badge: {:?}",
+        session.title
+    );
 }
 
 #[test]
