@@ -60,19 +60,38 @@ of every rollout file (bounded only by the generous 512 MiB/file safety limit) p
 locate the `session_meta` record and derive a title from user messages -- even for outlier
 files tens of megabytes large. `docs/product-design.md` section 3 specifies title
 derivation should use "at most a 1 MiB bounded early read," which the implementation now
-honors: `parse_rollout_file` first attempts a bounded (1 MiB) read; if `session_meta` is
-found within it (the normal case -- it is the first record in every real Codex rollout),
+honors: `parse_rollout_file` first attempts a bounded read; if `session_meta` is found
+within it (the normal case -- it is the first record in every real Codex rollout),
 discovery proceeds from that fast-path read alone. Only if `session_meta` is not found
 within the bound (an anomalous shape) does it fall back to a full read at the
 caller-supplied safety ceiling, so correctness is preserved for every input shape.
 
+The bound started at 1 MiB (documented ceiling) and was later tightened to 64 KiB after
+measuring the *actual* real-corpus distribution: against 3546 real rollouts (~2.9 GB), a
+64 KiB budget finds `session_meta` in exactly the same set of files a 1 MiB budget did
+(zero additional fallbacks), and produces a byte-identical first-user-message title for
+all 3580 discoverable sessions when directly compared against a full read -- the 1 MiB
+ceiling was never actually needed by any real file observed; it was headroom, not a
+requirement. `docs/product-design.md`'s "at most a 1 MiB" is a ceiling, not a floor, so
+64 KiB remains compliant.
+
 The `uniform_*files_*lines` vs `uniform_*_plus_NxMB` benchmark pair makes the fix's effect
-visible: the large-outlier-file variant dropped from ~226ms to ~19ms (91.7% improvement,
-criterion-confirmed significant), while the small-file baseline is unchanged. On real
-`~/.codex/sessions` data (`-a codex` only, same machine/data, before/after this fix):
-**~11s -> ~5-10s wall-clock** (on top of the `git_scope` fix's own ~28s -> ~11s). Output
-was verified byte-identical (same sessions, titles, workspaces, support/activity/risk,
-zero errors) between the unfixed and fixed binaries against the same real data.
+visible: at 1 MiB, the large-outlier-file variant dropped from ~226ms to ~19ms (91.7%
+improvement vs the pre-fix unbounded read); at 64 KiB, it dropped further to ~18ms,
+statistically indistinguishable from the small-file baseline (~17ms) -- the large-file
+penalty is fully eliminated at this bound for the synthetic fixture, not just reduced.
+
+On real `~/.codex/sessions` data (`-a codex` only, same machine/data): the 1 MiB fix
+brought discovery from ~28s (pre-any-fix, dominated by the separately-fixed `git_scope`
+issue) to ~11s wall-clock; the 64 KiB refinement brought it further to **~1.0-1.6s
+steady-state** (measured via a direct same-session A/B: two isolated worktrees built from
+the same commit except this one constant, run back-to-back against identical real data).
+Output was verified byte-identical (same sessions, titles, workspaces,
+support/activity/risk, zero errors) between the 1 MiB and 64 KiB binaries against the
+same real data, both via a full-corpus per-file comparison (3580 discoverable sessions,
+0 title/session_meta-presence mismatches) and via the assembled CLI's complete `--json`
+output (10 sessions, byte-identical across `agent`/`profile`/`id`/`title`/`workspace`/
+`support`/`activity`/`risk` for every session, zero errors both before and after).
 
 ### `pi_discovery` / `omp_discovery`
 
@@ -191,12 +210,15 @@ parsing.
   or adaptive bound is found -- the concrete next step is picking a bound (or a
   two-pass/tail-read strategy) informed by this measured distribution, not ruling out an
   early-exit approach entirely.
-- **The Codex bounded early read is a fixed 1 MiB, not adaptive.** If a future rollout
-  format regularly needs more than 1 MiB before the first user message (unlikely given
-  current evidence, but not proven impossible), the fallback path pays the full-read cost
-  every time rather than a slightly larger bounded read. No evidence currently motivates
-  tuning this, but it is the parameter to revisit if a future fixture shows the fallback
-  path triggering unexpectedly often on real data.
+- **The Codex bounded early read is a fixed 64 KiB (tightened from an initial 1 MiB after
+  real-corpus measurement showed 1 MiB was never actually needed), not adaptive.** If a
+  future rollout format regularly needs more than 64 KiB before both `session_meta` and
+  the first user message (unlikely given current evidence -- 0 of 3546 real files needed
+  more, and even 1 MiB never needed to be used in practice -- but not proven impossible),
+  the fallback path pays the full-read cost every time rather than a slightly larger
+  bounded read. No evidence currently motivates tuning this further, but it is the
+  parameter to revisit if a future fixture shows the fallback path triggering
+  unexpectedly often on real data.
 - **Preview-time full-transcript parsing is not yet benchmarked.** The current picker's
   Preview only renders Session metadata (status/agent/time/title/workspace); it does not
   yet render a full transcript for any integration, so there is no real code path to
