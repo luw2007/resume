@@ -33,11 +33,13 @@ DESCRIPTION
     exec, the agent determines the eventual exit status.
 
     SCOPE. By default the scope is the Git repository containing the
-    starting directory, including its linked worktrees. If Git scope cannot
+    starting directory, limited to its current worktree. If Git scope cannot
     be determined, the scope falls back to the exact directory and a
     `git_scope_discovery_failed` diagnostic is emitted; see E3002. Passing
     -U/--up or -D/--down replaces Git-derived scope with an explicit walk of
-    the directory tree in exactly one direction.
+    the directory tree in exactly one direction. Passing --all-worktrees
+    widens Git-derived scope to every linked worktree of the repository
+    instead of only the current one.
 
     MODES. Without --list and without --json, `resume` opens an interactive
     picker. With either flag it prints once and exits, which makes it safe in
@@ -68,6 +70,15 @@ OPTIONS
         --up. Descending is bounded by whatever the filesystem permits;
         directories that cannot be read are skipped and counted as
         diagnostics rather than aborting the run.
+
+    --all-worktrees
+        Widen Git-derived default scope to every linked worktree of the
+        current repository, not only the current one. Has no effect outside
+        a Git repository or when -U/--up or -D/--down replaces the default
+        scope; combining it with either is a usage error, exit 2. Off by
+        default: resolving every linked worktree costs one additional `git
+        worktree list` subprocess call, and most invocations only care about
+        the current worktree's own Sessions.
 
     -a, --agent <AGENT>
         Restrict discovery to one agent. Repeatable: `-a codex -a claude`
@@ -352,8 +363,8 @@ SCHEMA
 EXAMPLES
     Basic
         resume
-            Pick a Session from the current Git repository and its linked
-            worktrees.
+            Pick a Session from the current Git repository, limited to the
+            current worktree.
 
         resume ~/src/api
             Pick a Session scoped to another directory without leaving the
@@ -368,6 +379,10 @@ EXAMPLES
 
         resume --down 2
             Include descendants at most two path edges away.
+
+        resume --all-worktrees
+            Widen the default Git scope to every linked worktree of the
+            current repository, not only the current one.
 
     Filtering
         resume -a codex

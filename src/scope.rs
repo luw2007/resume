@@ -122,7 +122,7 @@ impl Scope {
     /// Per `docs/product-design.md` section 4 ("Git metadata performance"):
     /// "Query each normalized Workspace at most once" and cache only for the
     /// current process. `git_common_dir` is a `git rev-parse` subprocess
-    /// spawn, so two optimizations apply:
+    /// spawn, so three optimizations apply:
     ///
     /// 1. It is computed only in `ScopeMode::Git`, the only mode that reads
     ///    it (`contains` ignores `git_common_dir` in every other mode) --
@@ -133,12 +133,35 @@ impl Scope {
     ///    the subprocess cost once, not once per Session. `Scope` is shared
     ///    via `Arc` across per-agent discovery threads, so the cache is a
     ///    `Mutex`, not a `RefCell`.
+    /// 3. In `ScopeMode::Git`, `git_common_dir` is only ever consulted to
+    ///    *narrow* a match (exclude a distinct nested repository) --
+    ///    `contains()`'s Git branch never returns `true` unless `real_path`
+    ///    also starts with one of the current repository's worktrees. So a
+    ///    candidate whose Workspace does not even have that (subprocess-free)
+    ///    prefix in common with the repository can never match regardless of
+    ///    `git_common_dir`, and the spawn behind it is skipped entirely for
+    ///    that candidate. Measured against a real Session history spanning
+    ///    many unrelated projects (the common case: an agent's Session
+    ///    history is not scoped to one repository), only ~1% of distinct
+    ///    recorded Workspaces shared a prefix with the current repository's
+    ///    worktrees, so this ordering alone removed the subprocess spawn for
+    ///    roughly 99% of distinct Workspaces without changing which Sessions
+    ///    are in Scope.
     pub fn contains_workspace(&self, workspace: &Path) -> bool {
         let canonical = canonical_workspace(workspace);
         let last_known_real = canonical
             .clone()
             .or_else(|| resolve_missing_workspace_path(workspace));
         let real_path = last_known_real.as_deref().unwrap_or(workspace);
+
+        if let ScopeMode::Git { worktrees, .. } = &self.mode
+            && !worktrees
+                .iter()
+                .any(|worktree| real_path.starts_with(worktree))
+        {
+            return false;
+        }
+
         let git_common_dir = if matches!(self.mode, ScopeMode::Git { .. }) {
             canonical
                 .as_deref()
@@ -248,7 +271,20 @@ pub struct GitScopeEvidence {
     pub worktrees: Vec<PathBuf>,
 }
 
-pub fn discover_git_scope(base: &Path) -> io::Result<GitScopeEvidence> {
+/// Discover Git Scope evidence for `base`.
+///
+/// When `all_worktrees` is `false` (the default -- see
+/// `docs/product-design.md` section 4, "Default Scope"), only the current
+/// worktree is queried and returned as the sole entry in `worktrees`: a
+/// single `git rev-parse --git-common-dir --show-toplevel` call resolves
+/// both the common directory and the current worktree's root together, so
+/// this path costs exactly one subprocess spawn regardless of how many
+/// linked worktrees the repository has.
+///
+/// When `all_worktrees` is `true` (`--all-worktrees`), a second `git
+/// worktree list --porcelain` call additionally enumerates every linked
+/// worktree, matching the pre-existing default-Scope behavior.
+pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitScopeEvidence> {
     let common_output = Command::new("git")
         .args([
             OsStr::new("-C"),
@@ -256,12 +292,23 @@ pub fn discover_git_scope(base: &Path) -> io::Result<GitScopeEvidence> {
             OsStr::new("rev-parse"),
             OsStr::new("--path-format=absolute"),
             OsStr::new("--git-common-dir"),
+            OsStr::new("--show-toplevel"),
         ])
         .output()?;
     if !common_output.status.success() {
         return Err(io::Error::other("git rev-parse failed"));
     }
-    let common_dir = bytes_to_path(trim_newline(&common_output.stdout));
+    let mut lines = common_output.stdout.split(|byte| *byte == b'\n');
+    let common_dir = bytes_to_path(trim_newline(lines.next().unwrap_or_default()));
+    let toplevel = bytes_to_path(trim_newline(lines.next().unwrap_or_default()));
+
+    if !all_worktrees {
+        return Ok(GitScopeEvidence {
+            common_dir,
+            worktrees: vec![toplevel],
+        });
+    }
+
     let output = Command::new("git")
         .args([
             OsStr::new("-C"),
@@ -597,5 +644,65 @@ mod tests {
         raw.push(0);
         let parsed = parse_worktree_porcelain_z(&raw).unwrap();
         assert_eq!(parsed, [dir.path().canonicalize().unwrap()]);
+    }
+
+    /// `docs/product-design.md` section 4 ("Default Scope"): by default,
+    /// `discover_git_scope` must return only the current worktree, not every
+    /// linked worktree of the repository -- a single `git rev-parse` call
+    /// (not the additional `git worktree list` spawn) is enough to prove
+    /// this without depending on `--all-worktrees`.
+    #[test]
+    fn discover_git_scope_default_returns_only_the_current_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "--allow-empty", "-q", "-m", "init"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let linked = root.path().join("linked");
+        assert!(
+            Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-q",
+                    linked.to_str().unwrap(),
+                    "-b",
+                    "feature",
+                ])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let repo = repo.canonicalize().unwrap();
+        let linked = linked.canonicalize().unwrap();
+
+        let narrow = discover_git_scope(&repo, false).unwrap();
+        assert_eq!(narrow.worktrees, vec![repo.clone()]);
+
+        let narrow_from_linked = discover_git_scope(&linked, false).unwrap();
+        assert_eq!(narrow_from_linked.worktrees, vec![linked.clone()]);
+        assert_eq!(narrow_from_linked.common_dir, narrow.common_dir);
+
+        let wide = discover_git_scope(&repo, true).unwrap();
+        assert_eq!(wide.common_dir, narrow.common_dir);
+        assert!(wide.worktrees.contains(&repo));
+        assert!(wide.worktrees.contains(&linked));
+        assert_eq!(wide.worktrees.len(), 2);
     }
 }

@@ -175,7 +175,7 @@ fn build_scope(cli: &Cli) -> io::Result<Scope> {
         .map(Direction::Up)
         .or_else(|| cli.down.clone().map(Direction::Down));
     let default = if direction.is_none() {
-        match crate::scope::discover_git_scope(&base) {
+        match crate::scope::discover_git_scope(&base, cli.all_worktrees) {
             Ok(git) => DefaultScope::Git {
                 common_dir: git.common_dir,
                 worktrees: git.worktrees,
@@ -1297,6 +1297,7 @@ mod tests {
             directory: None,
             up: None,
             down: None,
+            all_worktrees: false,
             agent: vec![OsString::from("bad")],
             since: None,
             list: false,
@@ -1316,6 +1317,7 @@ mod tests {
             directory: None,
             up: None,
             down: None,
+            all_worktrees: false,
             agent: Vec::new(),
             since: None,
             list: false,

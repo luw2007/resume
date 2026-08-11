@@ -7,6 +7,11 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Added a tag-triggered (`v*`) GitHub Actions release pipeline: builds the four target artifacts, publishes a GitHub Release with `SHA256SUMS` and build provenance attestations, and updates `luw2007/homebrew-tap` `Formula/resume.rb` via a scoped fine-grained personal access token (`HOMEBREW_TAP_PAT`).
+- Added `--all-worktrees` to widen the default Git Scope to every linked worktree of the current repository; conflicts with `-U/--up`/`-D/--down`.
+
+### Changed
+
+- Default Git Scope now includes only the current worktree instead of every linked worktree, cutting a `git rev-parse` subprocess spawn per distinct recorded Workspace outside it (measured: ~99% of distinct Workspaces in a real multi-project OMP corpus) and removing the `git worktree list` spawn entirely from the default path. Use `--all-worktrees` to restore the previous default behavior.
 
 ## 0.2.0 - 2026-08-10
 

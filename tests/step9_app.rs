@@ -182,6 +182,9 @@ fn meaningless_option_combinations_are_usage_errors() {
         vec!["--json", "--confirm-always"],
         vec!["--up", "1", "config", "example"],
         vec!["-a", "codex", "completions", "bash"],
+        vec!["--all-worktrees", "--up", "1"],
+        vec!["--all-worktrees", "--down", "1"],
+        vec!["--all-worktrees", "config", "example"],
     ] {
         let output = run(tmp.path(), &ws, &args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");

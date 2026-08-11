@@ -53,6 +53,38 @@ one-time ~5ms subprocess cost per distinct Workspace instead of paying it on eve
 Session). On a real `~/.codex/sessions` (`-a codex` only, same machine/data,
 before/after): **~28s -> ~7-11s wall-clock**.
 
+Two further real-corpus findings on `contains_workspace`, from testing `-a omp` inside
+this repository's own default (Git) Scope against the repo owner's real `~/.omp`
+corpus (1353 files, 1.2 GB, 125 distinct recorded `cwd` values):
+
+1. **`ScopeMode::Git` still spawned one `git rev-parse` per distinct Workspace, even for
+   Workspaces that could never match.** Of the 125 distinct `cwd` values in the real
+   corpus, only 1 shared a path prefix with this repository's worktree. `contains()`'s
+   Git branch never returns `true` unless `real_path` also starts with one of the
+   repository's worktrees -- `git_common_dir` only ever *narrows* a match (excludes a
+   distinct nested repository), it never *widens* one. So checking the (subprocess-free)
+   `starts_with` prefix match first, before spawning `git rev-parse` for
+   `git_common_dir`, is a pure reordering with no correctness change: a Workspace that
+   fails the prefix check can never match regardless of `git_common_dir`, so its
+   subprocess spawn is now skipped entirely. This removed the spawn for ~99% (124/125) of
+   distinct Workspaces in the measured corpus. Fixed in `Scope::contains_workspace`.
+2. **The default Git Scope resolved the current repository's *entire* linked-worktree
+   list (`git worktree list --porcelain`, a second subprocess call) even though almost no
+   real invocation cares about Sessions from a *different* linked worktree of the same
+   repository.** `docs/product-design.md` section 4 now documents the current worktree as
+   the default Scope, with a new `--all-worktrees` flag to opt back into the previous
+   "every linked worktree" behavior. The narrowed default resolves the Git common
+   directory and current worktree together in a single `git rev-parse
+   --git-common-dir --show-toplevel` call and never spawns `git worktree list` at all,
+   removing that second subprocess entirely from the default path.
+
+Combined effect on `-a omp` inside this repository's own default Scope (real corpus
+above, steady state, `git rev-parse`/`git worktree list` subprocess overhead only --
+JSON-parsing cost below is unaffected by either fix): **default-Scope `omp::discover()`
+~3.4-3.6s -> ~2.6-2.9s** (matching the non-Git `Exact`-Scope cost, since the default path
+no longer pays any Git-Scope-specific subprocess overhead beyond the one combined
+`git rev-parse` call already required to resolve the current worktree itself).
+
 ### `codex_discovery`
 
 Codex's `discover_with_filter[_enriched]` previously read and fully JSON-parsed every line
