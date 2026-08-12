@@ -9,7 +9,7 @@ fn resume_spec_default_is_resume_id() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "r.jsonl",
         &[
             header_v3("resume-id", &fx.workspace, 1700000000),
@@ -89,7 +89,7 @@ fn resume_spec_omits_default_config_root_env() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "e.jsonl",
         &[
             header_v3("e", &fx.workspace, 1700000000),
@@ -111,7 +111,7 @@ fn resume_spec_preserves_explicit_config_root_env() {
     .unwrap();
     fx.write(
         &roots.agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "e.jsonl",
         &[
             header_v3("e", &fx.workspace, 1700000000),
@@ -135,7 +135,7 @@ fn resume_spec_cwd_falls_back_when_workspace_missing() {
     let header = json!({ "type": "session", "id": "nws2", "timestamp": 1700000000u64 });
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "nws2.jsonl",
         &[header, user_message_string("z", 1700000010)],
     );
@@ -208,7 +208,7 @@ fn fake_omp_captures_exact_cwd_argv_for_default_profile() {
 
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "exec.jsonl",
         &[
             header_v3("exec", &fx.workspace, 1700000000),

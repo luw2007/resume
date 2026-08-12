@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Pi and OMP discovery now prune whole grouped Workspace directories by their encoded directory name before reading any file: a dash-prefixed directory whose lossy-decoded name cannot correspond to any in-Scope Workspace is skipped entirely (`Scope::may_contain_session_dir`). The header `cwd` stays authoritative for every file that is read, and custom session roots (flat layouts) are never pruned. Measured against real corpora inside this repository's default Scope: OMP `--json` 4.85s -> 0.26s, Pi 1.72s -> 0.06s, with identical discovered session sets.
+
 ## 0.2.1 - 2026-08-11
 
 ### Added

@@ -21,6 +21,13 @@ fn executable(path: &Path, body: &str) {
 fn run(home: &Path, workspace: &Path, args: &[&str]) -> std::process::Output {
     run_with_env(home, workspace, args, &[])
 }
+/// The grouped directory Pi would use for `ws`: `-{path with '/' -> '-'}-`.
+/// Discovery prunes grouped directories whose name cannot encode an
+/// in-Scope workspace, so fixtures must use the real encoding.
+fn pi_grouped_dir(home: &Path, ws: &Path) -> std::path::PathBuf {
+    home.join(".pi/agent/sessions")
+        .join(format!("-{}-", ws.display().to_string().replace('/', "-")))
+}
 
 fn run_with_env(
     home: &Path,
@@ -76,7 +83,7 @@ fn fixtures() -> (TempDir, PathBuf) {
     let home = tmp.path();
     let ws = home.join("workspace");
     fs::create_dir_all(&ws).unwrap();
-    let pi_dir = home.join(".pi/agent/sessions/ws");
+    let pi_dir = pi_grouped_dir(home, &ws);
     fs::create_dir_all(&pi_dir).unwrap();
     let pi = pi_dir.join("pi.jsonl");
     line(
@@ -405,7 +412,7 @@ fn native_title_terminal_controls_never_reach_list_or_json() {
     // A crafted native title carrying OSC title-setting, CSI color, and a
     // bidi override must never leak an escape byte to either surface.
     let (tmp, ws) = fixtures();
-    let pi_dir = tmp.path().join(".pi/agent/sessions/ws");
+    let pi_dir = pi_grouped_dir(tmp.path(), &ws);
     let evil = pi_dir.join("evil-title.jsonl");
     line(
         &evil,
@@ -887,7 +894,7 @@ fn since_duration_filters_by_native_activity_time_not_transcript_mtime() {
     let home = tmp.path();
     let ws = home.join("workspace");
     fs::create_dir_all(&ws).unwrap();
-    let pi_dir = home.join(".pi/agent/sessions/ws");
+    let pi_dir = pi_grouped_dir(home, &ws);
     fs::create_dir_all(&pi_dir).unwrap();
 
     let now = std::time::SystemTime::now();

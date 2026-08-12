@@ -20,7 +20,7 @@ use std::{
 fn resume_spec_uses_absolute_session_path_never_session_id() {
     let fx = Fixture::new();
     let path = fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "resume.jsonl",
         &[
             header_v3("resume-id", &fx.workspace, 1700000000),
@@ -87,7 +87,7 @@ fn resume_spec_cwd_falls_back_when_workspace_missing() {
     let fx = Fixture::new();
     let header = json!({ "type": "session", "id": "nws2", "timestamp": 1700000000u64 });
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "nws2.jsonl",
         &[header, user_message_string("z", 1700000010)],
     );
@@ -104,7 +104,7 @@ fn resume_spec_cwd_falls_back_when_workspace_missing() {
 fn activity_unknown_without_control_evidence() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "act.jsonl",
         &[
             header_v3("act", &fx.workspace, 1700000000),
@@ -120,7 +120,7 @@ fn activity_unknown_without_control_evidence() {
 fn activity_active_only_with_validated_id_and_path() {
     let fx = Fixture::new();
     let path = fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "act2.jsonl",
         &[
             header_v3("act2", &fx.workspace, 1700000000),
@@ -173,7 +173,7 @@ fn activity_active_only_with_validated_id_and_path() {
 fn into_session_builds_supported_session_with_recorded_workspace() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "s.jsonl",
         &[
             header_v3("s", &fx.workspace, 1700000000),
@@ -272,7 +272,7 @@ fn fake_pi_captures_exact_cwd_argv_and_session_path() {
     let fake_bin = fake_pi(&capture_path);
 
     let path = fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "exec.jsonl",
         &[
             header_v3("exec", &fx.workspace, 1700000000),
