@@ -331,7 +331,7 @@ fn discovers_archived_session_under_archived_sessions() {
     // Use discover_with_filter to also inspect the archived flag via parsed.
     let archived_parsed = {
         let found = std::cell::Cell::new(Option::<bool>::None);
-        discover_with_filter(home.path(), &Bounds::default(), |parsed| {
+        discover_with_filter(home.path(), &Bounds::default(), None, |parsed| {
             if parsed.id == "cafebabe-arch" {
                 found.set(Some(parsed.archived));
             }
@@ -1274,15 +1274,122 @@ fn discover_with_filter_excludes_out_of_scope_workspaces() {
     );
 
     let allowed = ws_in.canonicalize().unwrap();
-    let sessions: Vec<Session> = discover_with_filter(home.path(), &Bounds::default(), |parsed| {
-        parsed.cwd.as_ref() == Some(&allowed)
-    })
-    .into_iter()
-    .filter_map(|o| o.session().cloned())
-    .collect();
+    let sessions: Vec<Session> =
+        discover_with_filter(home.path(), &Bounds::default(), None, |parsed| {
+            parsed.cwd.as_ref() == Some(&allowed)
+        })
+        .into_iter()
+        .filter_map(|o| o.session().cloned())
+        .collect();
 
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].resumable_id.to_str().unwrap(), "in-id");
+}
+#[test]
+fn workspace_gate_skips_out_of_scope_rollouts_and_never_alters_kept_output() {
+    let home = codex_home();
+    let ws_in = home.path().join("in-scope");
+    let ws_out = home.path().join("out-scope");
+    fs::create_dir_all(&ws_in).unwrap();
+    fs::create_dir_all(&ws_out).unwrap();
+    let in_cwd = ws_in.canonicalize().unwrap();
+    let out_cwd = ws_out.canonicalize().unwrap();
+
+    // In-scope rollout whose first user message sits well past the 4 KiB
+    // gate-read budget: proves the gate read is never used as a parse
+    // source (the title must still come from the 64 KiB ladder).
+    let filler = "x".repeat(200);
+    let mut records = vec![session_meta("in-id", in_cwd.to_str().unwrap())];
+    for _ in 0..40 {
+        records.push(json!({"type": "event_msg", "payload": {"type": "other", "filler": filler}}));
+    }
+    records.push(event_msg_user("late title"));
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-in.jsonl",
+        &records,
+    );
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-out.jsonl",
+        &[
+            session_meta("out-id", out_cwd.to_str().unwrap()),
+            event_msg_user("never needed"),
+        ],
+    );
+    // A rollout with no cwd is never offered to the gate; the post-parse
+    // filter decides its fate.
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-nocwd.jsonl",
+        &[json!({"type": "session_meta", "payload": {"id": "nocwd-id"}})],
+    );
+
+    let gate = |cwd: &std::path::Path| cwd == in_cwd;
+    let outcomes = discover_with_filter(home.path(), &Bounds::default(), Some(&gate), |_| true);
+    let mut ids: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| {
+            o.session()
+                .map(|s| s.resumable_id.to_string_lossy().into_owned())
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        ["in-id", "nocwd-id"],
+        "gate skips only out-of-scope cwd"
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|o| matches!(o, DiscoveredSession::Error { .. })),
+        "gate rejection is silent, never an error"
+    );
+
+    // Byte-identical kept output vs the ungated path.
+    let kept = outcomes
+        .iter()
+        .filter_map(|o| o.session())
+        .find(|s| s.resumable_id.to_str() == Some("in-id"))
+        .cloned()
+        .unwrap();
+    assert_eq!(kept.title.as_deref(), Some("late title"));
+    let ungated = discover_with_filter(home.path(), &Bounds::default(), None, |parsed| {
+        parsed.id == "in-id"
+    })
+    .into_iter()
+    .filter_map(|o| o.session().cloned())
+    .next()
+    .unwrap();
+    assert_eq!(kept, ungated, "gated output must match ungated output");
+}
+#[test]
+fn workspace_gate_never_rejects_relative_or_unresolvable_cwd() {
+    let home = codex_home();
+    // A relative cwd fails `canonicalize_workspace` and becomes
+    // `parsed.cwd == None` in the full parse, which the post-parse filter
+    // keeps unconditionally -- the gate must not silently drop it.
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-rel.jsonl",
+        &[session_meta("rel-id", "relative/workspace")],
+    );
+
+    let reject_all = |_: &std::path::Path| false;
+    let ids: Vec<String> =
+        discover_with_filter(home.path(), &Bounds::default(), Some(&reject_all), |_| true)
+            .into_iter()
+            .filter_map(|o| {
+                o.session()
+                    .map(|s| s.resumable_id.to_string_lossy().into_owned())
+            })
+            .collect();
+    assert_eq!(
+        ids,
+        ["rel-id"],
+        "relative cwd must survive a reject-all gate"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -32,8 +32,25 @@ const MAX_USER_MESSAGES: usize = 1024;
 /// [`DiscoveredSession::Error`] entry rather than aborting discovery.
 /// File bytes, mtimes, and directory entries are never modified.
 pub fn discover(effective_root: &Path, bounds: &Bounds) -> Vec<DiscoveredSession> {
-    discover_with_filter(effective_root, bounds, |_| true)
+    discover_with_filter(effective_root, bounds, None, |_| true)
 }
+
+/// An early per-file Workspace gate: receives `session_meta.payload.cwd`
+/// resolved through the same `canonicalize_workspace` rule as the full parse
+/// (so it sees exactly the value the post-parse filter would see as
+/// `parsed.cwd`) and returns whether the rollout could be in Scope. `None`
+/// disables the gate (every file is fully parsed).
+///
+/// This is a pure read-cost optimization: when the gate rejects a `cwd`, the
+/// rollout is skipped after a small first-record read instead of paying the
+/// full bounded read and per-line parse for title derivation. Callers MUST
+/// pass a gate consistent with their post-parse `filter` (typically the same
+/// `Scope::contains_workspace` check); the post-parse filter remains
+/// authoritative for every session actually parsed. Files whose
+/// `session_meta` has no `cwd`, or a relative/unresolvable one (which the
+/// full parse drops to `parsed.cwd == None` -- kept unconditionally by the
+/// post-parse filter), are never offered to the gate.
+pub type WorkspaceGate<'a> = &'a dyn Fn(&Path) -> bool;
 
 /// Discover Codex Sessions, applying a workspace filter.
 ///
@@ -44,6 +61,7 @@ pub fn discover(effective_root: &Path, bounds: &Bounds) -> Vec<DiscoveredSession
 pub fn discover_with_filter<F>(
     effective_root: &Path,
     bounds: &Bounds,
+    workspace_gate: Option<WorkspaceGate<'_>>,
     filter: F,
 ) -> Vec<DiscoveredSession>
 where
@@ -62,7 +80,7 @@ where
             continue;
         }
         for path in list_rollout_files(&root.path) {
-            match parse_rollout_file(&path, &canonical_root, bounds) {
+            match parse_rollout_file_gated(&path, &canonical_root, bounds, workspace_gate) {
                 Ok(parsed_opt) => match parsed_opt {
                     None => {}
                     Some(mut parsed) => {
@@ -101,6 +119,7 @@ where
 pub fn discover_with_filter_enriched<F>(
     effective_root: &Path,
     bounds: &Bounds,
+    workspace_gate: Option<WorkspaceGate<'_>>,
     filter: F,
 ) -> (Vec<DiscoveredSession>, sqlite::SqliteOutcome)
 where
@@ -132,7 +151,7 @@ where
             continue;
         }
         for path in list_rollout_files(&root.path) {
-            match parse_rollout_file(&path, &canonical_root, bounds) {
+            match parse_rollout_file_gated(&path, &canonical_root, bounds, workspace_gate) {
                 Ok(None) => {}
                 Ok(Some(mut parsed)) => {
                     parsed.effective_root = Some(canonical_root.clone());
@@ -364,6 +383,57 @@ impl ImportMeta {
 /// a full read (see below) only for the rare file where 64 KiB is not
 /// enough, so correctness never trades off against speed.
 const DISCOVERY_EARLY_READ_BYTES: u64 = 64 * 1024;
+/// Workspace-gate read: stop after the FIRST parsed record (`max_records: 1`
+/// -- the shared reader stops reading as soon as one record parses), inside
+/// the same byte budget as the early read. Real `session_meta` first lines
+/// are large (median ~4 KiB, p99 ~22 KiB on a real 3582-file corpus: the
+/// payload embeds instructions), so a small fixed byte budget would truncate
+/// most of them and defeat the gate; the record cap makes the gate cost
+/// "read to the first newline + one parse" regardless of line size. A first
+/// record that is not `session_meta`, is malformed, or exceeds the byte
+/// budget simply falls through to the normal ladder below -- the gate never
+/// trades correctness, only skips work for files it can already rule out.
+
+/// [`parse_rollout_file`] with an optional early Workspace gate (see
+/// [`WorkspaceGate`]).
+///
+/// With a gate, a first-record read resolves `session_meta.payload.cwd`; a
+/// rejected `cwd` returns `Ok(None)` without the title-derivation read. The
+/// gate read is never used as a parse source: an accepted (or `cwd`-less)
+/// rollout continues through the exact same read ladder as the ungated
+/// path, so titles and every other field are byte-identical with and
+/// without a gate.
+pub fn parse_rollout_file_gated(
+    path: &Path,
+    effective_root: &Path,
+    bounds: &Bounds,
+    workspace_gate: Option<WorkspaceGate<'_>>,
+) -> Result<Option<ParsedSession>, IntegrationError> {
+    if let Some(gate) = workspace_gate {
+        let gate_bounds = Bounds {
+            max_file_bytes: bounds.max_file_bytes.min(DISCOVERY_EARLY_READ_BYTES),
+            max_records: 1,
+            ..bounds.clone()
+        };
+        let gate_read = read_confined(path, effective_root, &gate_bounds)?;
+        if let Some(meta) = find_session_meta(&gate_read.records)
+            && let Some(cwd) = meta
+                .get("payload")
+                .and_then(Value::as_object)
+                .and_then(|payload| payload.get("cwd"))
+                .and_then(Value::as_str)
+            // Resolve exactly as the full parse does (`canonicalize_workspace`):
+            // a relative/unresolvable cwd becomes `parsed.cwd == None` there,
+            // which the post-parse filter keeps unconditionally -- so the gate
+            // must not reject it either.
+            && let Some(resolved) = canonicalize_workspace(Path::new(cwd))
+            && !gate(&resolved)
+        {
+            return Ok(None);
+        }
+    }
+    parse_rollout_file(path, effective_root, bounds)
+}
 
 /// Parse a single rollout JSONL file into an optional [`ParsedSession`].
 ///

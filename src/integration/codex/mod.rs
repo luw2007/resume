@@ -50,8 +50,9 @@ pub(crate) mod resume;
 pub(crate) mod roots;
 
 pub use discover::{
-    DiscoveredSession, ImportMeta, ParsedSession, build_session, discover, discover_with_filter,
-    discover_with_filter_enriched, extract_user_messages, parse_rollout_file,
+    DiscoveredSession, ImportMeta, ParsedSession, WorkspaceGate, build_session, discover,
+    discover_with_filter, discover_with_filter_enriched, extract_user_messages, parse_rollout_file,
+    parse_rollout_file_gated,
 };
 pub use resume::resume_spec;
 pub use roots::{ENV_CODEX_HOME, RolloutKind, RolloutRoot, effective_root, rollout_roots};
