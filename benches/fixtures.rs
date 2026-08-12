@@ -117,24 +117,27 @@ pub fn grouped_session_tree(
     let unique_workspaces = (files as f64).sqrt().round().clamp(1.0, 20.0) as usize;
 
     for i in 0..files {
-        let workspace_dir = session_root.join(format!("workspace-{}", i % unique_workspaces));
+        let cwd = session_root.join(format!("ws{}", i % unique_workspaces));
+        let workspace_dir = session_root.join(encode_workspace_dir(&cwd));
         std::fs::create_dir_all(&workspace_dir).unwrap();
         let path = workspace_dir.join(format!("session-{i:05}.jsonl"));
-        let cwd = workspace_dir.clone();
         write_grouped_session(&path, &format!("pi-synth-{i:05}"), &cwd, avg_lines);
     }
     for i in 0..big_files {
-        let workspace_dir = session_root.join("workspace-0");
+        let cwd = session_root.join("ws0");
+        let workspace_dir = session_root.join(encode_workspace_dir(&cwd));
         std::fs::create_dir_all(&workspace_dir).unwrap();
         let path = workspace_dir.join(format!("session-big-{i:03}.jsonl"));
-        write_big_grouped_session(
-            &path,
-            &format!("pi-synth-big-{i:03}"),
-            &workspace_dir,
-            big_file_mb,
-        );
+        write_big_grouped_session(&path, &format!("pi-synth-big-{i:03}"), &cwd, big_file_mb);
     }
     session_root.to_path_buf()
+}
+
+/// The grouped directory name Pi/OMP would use for an absolute workspace
+/// path: `-{path with '/' -> '-'}-`. Matches the real on-disk encoding so
+/// discovery's directory-name Scope prefilter keeps these fixtures.
+fn encode_workspace_dir(workspace: &Path) -> String {
+    format!("-{}-", workspace.display().to_string().replace('/', "-"))
 }
 
 fn write_grouped_session(path: &Path, id: &str, cwd: &Path, lines: usize) {

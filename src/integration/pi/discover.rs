@@ -20,6 +20,9 @@ pub struct DiscoverConfig<'a> {
     pub scope: &'a Scope,
     /// Bounds for the JSONL reader. Discovery uses a record cap.
     pub bounds: Bounds,
+    /// Home directory for the grouped-directory-name prefilter (OMP encodes
+    /// home-relative Workspace paths). Tests override; production uses `$HOME`.
+    pub home: Option<PathBuf>,
 }
 
 impl<'a> DiscoverConfig<'a> {
@@ -33,6 +36,7 @@ impl<'a> DiscoverConfig<'a> {
             roots,
             scope,
             bounds,
+            home: std::env::var_os("HOME").map(PathBuf::from),
         }
     }
 }
@@ -77,6 +81,9 @@ pub struct DiscoverOutcome {
     pub no_header_files: usize,
     /// Number of files skipped because the header `cwd` was outside Scope.
     pub out_of_scope: usize,
+    /// Number of grouped Workspace directories pruned by the directory-name
+    /// prefilter without reading any file inside them.
+    pub pruned_dirs: usize,
 }
 
 /// Discover Pi sessions under the effective session root. Reads JSONL
@@ -84,10 +91,13 @@ pub struct DiscoverOutcome {
 /// by header `cwd` through Scope. Never invokes Pi or migrates files.
 ///
 /// Discovery scans `.jsonl` files one level under the session root. In the
-/// default grouped layout that means `<session-root>/<encoded-workspace>/*.jsonl`;
-/// in a custom flat layout it means `<session-root>/*.jsonl`. The caller
-/// does not need to know the layout: header `cwd` is authoritative and
-/// directory names are never reversed.
+/// default grouped layout that means `<session-root>/<encoded-workspace>/*.jsonl`,
+/// and directory names are used as a lossy Scope prefilter: a grouped
+/// directory whose encoded name cannot correspond to any in-Scope Workspace
+/// is skipped without reading its files (`Scope::may_contain_session_dir`).
+/// In a custom flat layout (`custom_session_root`) directory names carry no
+/// encoding and are never pruned. Header `cwd` stays authoritative for every
+/// file that is read.
 pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
     let session_root = config.roots.session_root.clone();
     let confined_root = session_root
@@ -96,7 +106,7 @@ pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
     let mut outcome = DiscoverOutcome::default();
     let mut seen: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    for jsonl_path in iter_session_files(&session_root)? {
+    for jsonl_path in iter_session_files(config, &mut outcome)? {
         let parsed = match parse_session_file(&jsonl_path, &confined_root, &config.bounds) {
             Ok(Some(parsed)) => parsed,
             Ok(None) => {
@@ -140,27 +150,39 @@ pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
 
     Ok(outcome)
 }
-
 /// Enumerate `.jsonl` files reachable from the session root. Tolerates a
 /// missing session root (returns empty). Does not follow symlinks for
 /// directories but does read symlinked files (the shared reader confines
 /// reads to the effective root at the API boundary when requested).
-fn iter_session_files(session_root: &Path) -> io::Result<Vec<PathBuf>> {
+fn iter_session_files(
+    config: &DiscoverConfig<'_>,
+    outcome: &mut DiscoverOutcome,
+) -> io::Result<Vec<PathBuf>> {
+    let session_root = &config.roots.session_root;
     let mut paths = Vec::new();
     if !session_root.exists() {
         return Ok(paths);
     }
-    collect_jsonl(session_root, &mut paths)?;
+    collect_jsonl(config, session_root, &mut paths, outcome)?;
     // Sort for deterministic discovery order.
     paths.sort();
     Ok(paths)
 }
 
-/// Recursively collect `.jsonl` file paths. Bounded by the filesystem; the
-/// shared reader imposes record/byte bounds on each file. This recursion is
-/// over the storage layout (not Scope), which is permitted: Scope membership
-/// is decided later per header `cwd`.
-fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+/// Recursively collect `.jsonl` file paths over the storage layout. In the
+/// default grouped layout, encoded Workspace directory names always start
+/// with `-` (`-{abs path with '/' -> '-'}-`, or OMP's home-relative form);
+/// such a directory whose name cannot encode any in-Scope Workspace is
+/// pruned without reading it (counted in `outcome.pruned_dirs`). Any other
+/// directory (e.g. a literal `sessions` level between the agent root and
+/// the grouped directories) is descended unconditionally, and custom
+/// session roots are never pruned.
+fn collect_jsonl(
+    config: &DiscoverConfig<'_>,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    outcome: &mut DiscoverOutcome,
+) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -172,8 +194,17 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
             Err(_) => continue,
         };
         if file_type.is_dir() {
-            // Recurse into grouped Workspace directories and flat subdirs.
-            collect_jsonl(&path, out)?;
+            if !config.roots.custom_session_root
+                && let Some(name) = entry.file_name().to_str()
+                && name.starts_with('-')
+                && !config
+                    .scope
+                    .may_contain_session_dir(name, config.home.as_deref())
+            {
+                outcome.pruned_dirs += 1;
+                continue;
+            }
+            collect_jsonl(config, &path, out, outcome)?;
         } else if (file_type.is_file() || file_type.is_symlink())
             && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
         {
@@ -182,6 +213,7 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     }
     Ok(())
 }
+
 
 /// Parse a single Pi JSONL session file read-only. Returns `Ok(None)` when the
 /// file has no valid `session` header (not a Pi session transcript).

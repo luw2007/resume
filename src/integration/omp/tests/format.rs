@@ -9,7 +9,7 @@ fn parses_v3_header_when_title_sidecar_precedes_it() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "s.jsonl",
         &[
             title_sidecar("Initial Title"),
@@ -32,7 +32,7 @@ fn file_without_session_header_skipped_as_no_header() {
     // Title sidecar present but no session header.
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "nohdr.jsonl",
         &[
             title_sidecar("Only Title"),
@@ -52,7 +52,7 @@ fn header_not_required_to_be_first_record() {
     let unknown = json!({ "type": "unknown_future_record", "foo": "bar" });
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "order.jsonl",
         &[
             title_sidecar("T"),
@@ -75,7 +75,7 @@ fn title_sidecar_provides_initial_title() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "t.jsonl",
         &[
             title_sidecar("Sidecar Title"),
@@ -92,7 +92,7 @@ fn header_title_metadata_wins_over_earlier_sidecar() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "h.jsonl",
         &[
             title_sidecar("Old"),
@@ -108,7 +108,7 @@ fn title_change_overrides_header_and_sidecar() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "tc.jsonl",
         &[
             title_sidecar("Side"),
@@ -125,7 +125,7 @@ fn latest_title_change_wins() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "multi.jsonl",
         &[
             header_v3("multi", &fx.workspace, 1700000000),
@@ -143,7 +143,7 @@ fn title_falls_back_to_summary_from_first_human_input() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "fallback.jsonl",
         &[
             header_v3("fb", &fx.workspace, 1700000000),
@@ -161,7 +161,7 @@ fn title_none_when_no_title_and_no_user_messages() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "empty.jsonl",
         &[header_v3("empty", &fx.workspace, 1700000000)],
     );
@@ -178,7 +178,7 @@ fn extracts_string_user_message() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "s.jsonl",
         &[
             header_v3("s", &fx.workspace, 1700000000),
@@ -195,7 +195,7 @@ fn extracts_text_plus_image_with_placeholder_not_base64() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "img.jsonl",
         &[
             header_v3("img", &fx.workspace, 1700000000),
@@ -217,7 +217,7 @@ fn extracts_image_only_message() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "imgonly.jsonl",
         &[
             header_v3("io", &fx.workspace, 1700000000),
@@ -235,7 +235,7 @@ fn excludes_assistant_messages() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "a.jsonl",
         &[
             header_v3("a", &fx.workspace, 1700000000),
@@ -253,7 +253,7 @@ fn excludes_injected_user_messages_by_attribution() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "inj.jsonl",
         &[
             header_v3("inj", &fx.workspace, 1700000000),
@@ -272,7 +272,7 @@ fn injection_wrappers_collapsed_in_user_messages() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "wrap.jsonl",
         &[
             header_v3("wrap", &fx.workspace, 1700000000),
@@ -294,7 +294,7 @@ fn import_creates_safe_badge_and_keeps_new_omp_id() {
     fs::create_dir_all(&origin_cwd).unwrap();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "imp.jsonl",
         &[
             title_sidecar("Imported Session"),
@@ -339,7 +339,7 @@ fn import_never_merges_with_origin_session_identity() {
     fs::create_dir_all(&origin_cwd).unwrap();
     let p1 = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "a.jsonl",
         &[
             header_v3("omp-1", &fx.workspace, 1700000000),
@@ -348,7 +348,7 @@ fn import_never_merges_with_origin_session_identity() {
     );
     let p2 = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "b.jsonl",
         &[
             header_v3("omp-2", &fx.workspace, 1700000000),
@@ -374,7 +374,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let fx = Fixture::new();
     let path = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "ts.jsonl",
         &[
             header_v3("ts", &fx.workspace, 1700000000),
@@ -392,7 +392,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let bounds = crate::preview::jsonl::Bounds::default();
     let path2 = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "ho.jsonl",
         &[header_v3("ho", &fx.workspace, 1700000000)],
     );
@@ -405,7 +405,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
 
     // No header timestamp → mtime.
     let header_no_ts = json!({ "type": "session", "id": "nts", "cwd": fx.workspace });
-    let path3 = fx.write(&fx.default_agent_root, "ws", "nts.jsonl", &[header_no_ts]);
+    let path3 = fx.write(&fx.default_agent_root, &fx.encoded_ws(), "nts.jsonl", &[header_no_ts]);
     let mtime = fs::metadata(&path3).unwrap().modified().unwrap();
     let result3 = crate::preview::jsonl::read_file(&path3, &bounds).unwrap();
     let parsed3 = omp::extract_session_pub(&path3, &result3, Some(mtime)).unwrap();

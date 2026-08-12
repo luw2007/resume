@@ -20,7 +20,7 @@ use std::{
 fn parses_v3_header_extracts_id_and_workspace() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "session-1.jsonl",
         &[
             header_v3("abc-123", &fx.workspace, 1700000000),
@@ -40,7 +40,7 @@ fn parses_v3_header_extracts_id_and_workspace() {
 fn parses_v2_header_same_shape_as_v3() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "session-v2.jsonl",
         &[
             header_v2("v2-id", &fx.workspace, 1700000000),
@@ -56,7 +56,7 @@ fn parses_v2_header_same_shape_as_v3() {
 fn parses_v1_header_uses_id_field() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "session-v1.jsonl",
         &[
             header_v1("v1-id", &fx.workspace, 1700000000),
@@ -73,7 +73,7 @@ fn file_without_session_header_is_skipped_as_no_header() {
     let fx = Fixture::new();
     // No "session" type record.
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "not-a-session.jsonl",
         &[user_message_string("hello", 1700000000)],
     );
@@ -90,7 +90,7 @@ fn file_without_session_header_is_skipped_as_no_header() {
 fn title_prefers_latest_session_info_name() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "named.jsonl",
         &[
             header_v3("named", &fx.workspace, 1700000000),
@@ -110,7 +110,7 @@ fn title_prefers_latest_session_info_name() {
 fn title_latest_session_info_name_wins_over_earlier() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "renamed.jsonl",
         &[
             header_v3("renamed", &fx.workspace, 1700000000),
@@ -126,7 +126,7 @@ fn title_latest_session_info_name_wins_over_earlier() {
 fn title_falls_back_to_summary_from_first_human_input() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "unnamed.jsonl",
         &[
             header_v3("unnamed", &fx.workspace, 1700000000),
@@ -143,7 +143,7 @@ fn title_falls_back_to_summary_from_first_human_input() {
 fn title_none_when_no_name_and_no_user_messages() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "empty.jsonl",
         &[header_v3("empty", &fx.workspace, 1700000000)],
     );
@@ -159,7 +159,7 @@ fn title_none_when_no_name_and_no_user_messages() {
 fn extracts_text_plus_image_blocks_with_placeholder_not_base64() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "img.jsonl",
         &[
             header_v3("img", &fx.workspace, 1700000000),
@@ -180,7 +180,7 @@ fn extracts_text_plus_image_blocks_with_placeholder_not_base64() {
 fn extracts_image_only_message() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "imgonly.jsonl",
         &[
             header_v3("imgonly", &fx.workspace, 1700000000),
@@ -203,7 +203,7 @@ fn extracts_image_only_message() {
 fn excludes_assistant_messages() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "assistant.jsonl",
         &[
             header_v3("a", &fx.workspace, 1700000000),
@@ -220,7 +220,7 @@ fn excludes_assistant_messages() {
 fn injection_wrappers_collapsed_in_user_messages() {
     let fx = Fixture::new();
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "injected.jsonl",
         &[
             header_v3("inj", &fx.workspace, 1700000000),
@@ -247,7 +247,7 @@ fn extracts_parent_session_id() {
         "parentSession": "parent-id",
     });
     fx.write_grouped(
-        "encoded-ws",
+        &fx.encoded_ws(),
         "child.jsonl",
         &[header, user_message_string("branched", 1700000010)],
     );

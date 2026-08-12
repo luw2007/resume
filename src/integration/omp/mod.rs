@@ -21,8 +21,11 @@
 //! - Existing XDG OMP directories (`XDG_DATA_HOME`, `XDG_STATE_HOME`,
 //!   `XDG_CACHE_HOME`) can split data/state/cache; root resolution mirrors the
 //!   installed OMP behavior and is fixture-driven. Profile and effective root
-//!   are part of Session provenance and identity. Workspace is never inferred
-//!   from encoded or migrated directory names when the header is readable.
+//!   are part of Session provenance and identity. Workspace *identity* is
+//!   never inferred from encoded directory names when the header is readable;
+//!   directory names are only used as a lossy Scope prefilter to skip whole
+//!   out-of-Scope Workspace directories without reading them (see
+//!   `Scope::may_contain_session_dir`).
 //!
 //! ## Format
 //!

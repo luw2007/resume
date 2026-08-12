@@ -78,6 +78,13 @@ impl Fixture {
         self.base_root.parent().unwrap().to_path_buf()
     }
 
+    /// The grouped directory name OMP would use for `self.workspace`
+    /// (absolute form; the matcher also accepts it where OMP would have
+    /// used the home-relative form).
+    fn encoded_ws(&self) -> String {
+        format!("-{}-", self.workspace.display().to_string().replace('/', "-"))
+    }
+
     /// Named profile agent root: `<base>/profiles/<name>/agent`.
     fn profile_agent_root(&self, name: &str) -> PathBuf {
         let root = self.base_root.join("profiles").join(name).join("agent");

@@ -209,7 +209,7 @@ fn activity_unknown_without_evidence() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "act.jsonl",
         &[
             header_v3("act", &fx.workspace, 1700000000),
@@ -228,7 +228,7 @@ fn activity_active_only_with_live_process_tty_and_matching_breadcrumb() {
     let fx = Fixture::new();
     let path = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "act2.jsonl",
         &[
             header_v3("act2", &fx.workspace, 1700000000),

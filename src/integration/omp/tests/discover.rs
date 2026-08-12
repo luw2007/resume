@@ -107,7 +107,7 @@ fn duplicate_files_within_same_profile_root_are_deduped() {
     let fx = Fixture::new();
     let path = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "dup.jsonl",
         &[
             header_v3("dup", &fx.workspace, 1700000000),
@@ -116,7 +116,7 @@ fn duplicate_files_within_same_profile_root_are_deduped() {
     );
     #[cfg(unix)]
     {
-        let link = fx.default_agent_root.join("ws").join("dup-link.jsonl");
+        let link = fx.default_agent_root.join(fx.encoded_ws()).join("dup-link.jsonl");
         std::os::unix::fs::symlink(&path, &link).unwrap();
     }
     let outcome = fx.discover(fx.roots_default());
@@ -141,7 +141,7 @@ fn symlinked_session_inside_effective_root_is_read() {
             user_message_string("followed safely", 1700000010),
         ],
     );
-    let link_dir = fx.default_agent_root.join("ws");
+    let link_dir = fx.default_agent_root.join(fx.encoded_ws());
     fs::create_dir_all(&link_dir).unwrap();
     std::os::unix::fs::symlink(&target, link_dir.join("inside.jsonl")).unwrap();
 
@@ -164,7 +164,7 @@ fn symlinked_session_outside_effective_root_is_rejected_with_diagnostic_count() 
             user_message_string("must not leak", 1700000010),
         ],
     );
-    let link_dir = fx.default_agent_root.join("ws");
+    let link_dir = fx.default_agent_root.join(fx.encoded_ws());
     fs::create_dir_all(&link_dir).unwrap();
     std::os::unix::fs::symlink(&target, link_dir.join("outside.jsonl")).unwrap();
 
@@ -184,7 +184,7 @@ fn out_of_scope_workspace_excluded() {
     fs::create_dir_all(&other_ws).unwrap();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "other.jsonl",
         &[
             header_v3("other", &other_ws, 1700000000),
@@ -194,6 +194,54 @@ fn out_of_scope_workspace_excluded() {
     let outcome = fx.discover(fx.roots_default());
     assert_eq!(outcome.parsed.len(), 0);
     assert_eq!(outcome.out_of_scope, 1);
+}
+#[test]
+fn out_of_scope_grouped_directory_is_pruned_without_reading_files() {
+    let fx = Fixture::new();
+    let other_ws = fx.home().join("other-ws");
+    fs::create_dir_all(&other_ws).unwrap();
+    let encoded_other = format!("-{}-", other_ws.display().to_string().replace('/', "-"));
+    let dir = fx.default_agent_root.join(&encoded_other);
+    fs::create_dir_all(&dir).unwrap();
+    // Garbage contents: pruning must skip the read entirely (a read would
+    // surface as no_header_files/skipped_files).
+    fs::write(dir.join("garbage.jsonl"), b"not json at all\n").unwrap();
+
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(outcome.parsed.len(), 0);
+    assert_eq!(outcome.pruned_dirs, 1);
+    assert_eq!(outcome.no_header_files, 0, "pruned dir must not be read");
+    assert_eq!(outcome.skipped_files, 0);
+}
+
+#[test]
+fn home_relative_grouped_directory_is_kept() {
+    let fx = Fixture::new();
+    // OMP's real encoding for a workspace under $HOME is home-relative:
+    // `<home>/workspace` -> `-workspace`. The prefilter must keep it when
+    // given the fixture home.
+    let relative = fx
+        .workspace
+        .strip_prefix(fx.home())
+        .unwrap()
+        .display()
+        .to_string();
+    let dir_name = format!("-{}", relative.replace('/', "-"));
+    fx.write(
+        &fx.default_agent_root,
+        &dir_name,
+        "rel.jsonl",
+        &[
+            header_v3("rel", &fx.workspace, 1700000000),
+            user_message_string("rel", 1700000010),
+        ],
+    );
+    let scope = fx.scope_exact_workspace();
+    let mut cfg = DiscoverConfig::new(fx.roots_default(), &scope);
+    cfg.home = Some(fx.home());
+    let outcome = omp::discover(&cfg).unwrap();
+    assert_eq!(outcome.parsed.len(), 1);
+    assert_eq!(outcome.pruned_dirs, 0);
 }
 
 #[test]
@@ -222,7 +270,7 @@ fn down_scope_includes_descendant_workspaces() {
     fs::create_dir_all(&child_ws).unwrap();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "child.jsonl",
         &[
             header_v3("child", &child_ws, 1700000000),
@@ -246,7 +294,7 @@ fn down_scope_includes_descendant_workspaces() {
 #[test]
 fn malformed_middle_record_does_not_abort_discovery() {
     let fx = Fixture::new();
-    let path = fx.default_agent_root.join("ws").join("mid.jsonl");
+    let path = fx.default_agent_root.join(fx.encoded_ws()).join("mid.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(
@@ -271,7 +319,7 @@ fn malformed_middle_record_does_not_abort_discovery() {
 #[test]
 fn truncated_tail_keeps_valid_records() {
     let fx = Fixture::new();
-    let path = fx.default_agent_root.join("ws").join("trunc.jsonl");
+    let path = fx.default_agent_root.join(fx.encoded_ws()).join("trunc.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(
@@ -307,7 +355,7 @@ fn missing_workspace_is_discoverable_but_unresumable_cwd() {
     let header = json!({ "type": "session", "id": "nws", "timestamp": 1700000000u64 });
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "nws.jsonl",
         &[header, user_message_string("hi", 1700000010)],
     );
@@ -325,7 +373,7 @@ fn discovery_does_not_modify_files_bytes_or_mtimes() {
     let fx = Fixture::new();
     let path = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "ro.jsonl",
         &[
             title_sidecar("RO"),
@@ -349,7 +397,7 @@ fn discovery_of_growing_file_is_read_only() {
     let fx = Fixture::new();
     let path = fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "live.jsonl",
         &[
             header_v3("live", &fx.workspace, 1700000000),
@@ -372,7 +420,7 @@ fn discovery_does_not_create_or_migrate_any_files() {
     let fx = Fixture::new();
     fx.write(
         &fx.default_agent_root,
-        "ws",
+        &fx.encoded_ws(),
         "a.jsonl",
         &[
             header_v3("a", &fx.workspace, 1700000000),

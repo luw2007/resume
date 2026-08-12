@@ -200,6 +200,39 @@ impl Scope {
     pub fn git_warning(&self) -> Option<&str> {
         self.git_warning.as_deref()
     }
+    /// Lossy directory-name prefilter for grouped session layouts (Pi/OMP).
+    ///
+    /// Pi encodes a Session's Workspace into its grouping directory name as
+    /// `-{absolute path with '/' -> '-'}-`; OMP uses the home-relative form
+    /// (no wrapping dashes) when the Workspace is under `$HOME`, and the Pi
+    /// form otherwise. Both encodings are lossy: a literal '-' in a path
+    /// component is indistinguishable from a separator. This matcher
+    /// therefore compares trimmed lossy keys and answers "could ANY decoding
+    /// of this directory name be in Scope?" -- ambiguity only ever widens
+    /// the match, and the header-`cwd` check downstream stays authoritative
+    /// for every kept directory. The only way a Session can be lost is a
+    /// directory whose name does not encode its files' Workspace at all
+    /// (deliberate: callers skip this prefilter for custom/flat layouts).
+    pub fn may_contain_session_dir(&self, name: &str, home: Option<&Path>) -> bool {
+        let dir_key = lossy_key(name);
+        if dir_key.is_empty() {
+            // Encodes the filesystem root (or nothing): ancestor of anything.
+            return true;
+        }
+        let scope_paths: &[PathBuf] = match &self.mode {
+            ScopeMode::Git { worktrees, .. } => worktrees,
+            _ => std::slice::from_ref(&self.base),
+        };
+        scope_paths.iter().any(|path| {
+            candidate_keys(path, home)
+                .iter()
+                .any(|cand| match &self.mode {
+                    ScopeMode::Exact => *cand == dir_key,
+                    ScopeMode::Down(_) | ScopeMode::Git { .. } => key_is_prefix(cand, &dir_key),
+                    ScopeMode::Up(_) => key_is_prefix(&dir_key, cand),
+                })
+        })
+    }
 }
 
 fn within(distance: &Distance, edges: usize) -> bool {
@@ -207,6 +240,43 @@ fn within(distance: &Distance, edges: usize) -> bool {
         Distance::Finite(max) => edges <= *max,
         Distance::All => true,
     }
+}
+/// Lossy comparison key: '/' mapped to '-', wrapping '-' trimmed, and a
+/// leading `private-` stripped (macOS `/var`/`/tmp` -> `/private/...` alias;
+/// recorded Workspaces and canonical Scope bases may sit on either side).
+fn lossy_key(path_like: &str) -> String {
+    let key: String = path_like
+        .chars()
+        .map(|c| if c == '/' { '-' } else { c })
+        .collect();
+    let trimmed = key.trim_matches('-');
+    trimmed.strip_prefix("private-").unwrap_or(trimmed).to_owned()
+}
+
+/// Lossy keys a Scope path may appear under in a grouped directory name:
+/// the absolute form, plus the home-relative form when under `home`. The
+/// home prefix is stripped in lossy-key space so a canonicalized Scope base
+/// (`/private/var/...` on macOS) still matches an uncanonicalized `$HOME`.
+fn candidate_keys(path: &Path, home: Option<&Path>) -> Vec<String> {
+    let abs = lossy_key(&path.to_string_lossy());
+    let mut keys = Vec::with_capacity(2);
+    if let Some(home_key) = home.map(|home| lossy_key(&home.to_string_lossy()))
+        && !home_key.is_empty()
+        && abs.len() > home_key.len()
+        && key_is_prefix(&home_key, &abs)
+    {
+        keys.push(abs[home_key.len() + 1..].to_owned());
+    }
+    keys.push(abs);
+    keys
+}
+
+/// Whether `prefix` names the same path as `key` or an ancestor of it, in
+/// lossy-key space (component boundary = '-'). An empty prefix is the root.
+fn key_is_prefix(prefix: &str, key: &str) -> bool {
+    prefix.is_empty()
+        || key == prefix
+        || (key.starts_with(prefix) && key.as_bytes()[prefix.len()] == b'-')
 }
 
 pub fn canonical_base(path: &Path) -> io::Result<PathBuf> {
@@ -713,5 +783,86 @@ mod tests {
         assert!(wide.worktrees.contains(&repo));
         assert!(wide.worktrees.contains(&linked));
         assert_eq!(wide.worktrees.len(), 2);
+    }
+    // -----------------------------------------------------------------------
+    // may_contain_session_dir: lossy grouped-directory-name prefilter
+    // -----------------------------------------------------------------------
+
+    fn scope_with(base: &str, direction: Option<Direction>) -> Scope {
+        Scope::new(
+            PathBuf::from(base),
+            direction,
+            DefaultScope::Exact { git_warning: None },
+        )
+    }
+
+    #[test]
+    fn dir_prefilter_matches_pi_absolute_encoding() {
+        let scope = scope_with("/Users/u/ai/resume", None);
+        // Exact: the workspace's own encoding matches; siblings do not.
+        assert!(scope.may_contain_session_dir("--Users-u-ai-resume--", None));
+        assert!(!scope.may_contain_session_dir("--Users-u-ai-other--", None));
+        // Ancestor-only names are out for Exact.
+        assert!(!scope.may_contain_session_dir("--Users-u--", None));
+    }
+
+    #[test]
+    fn dir_prefilter_down_accepts_descendants_and_ambiguous_dashes() {
+        let scope = scope_with("/a/b", Some(Direction::Down(Distance::All)));
+        assert!(scope.may_contain_session_dir("--a-b--", None));
+        assert!(scope.may_contain_session_dir("--a-b-c--", None));
+        // Lossy: `/a/b-c` and `/a/b/c` encode identically; must be kept
+        // (header check decides), never pruned.
+        assert!(scope.may_contain_session_dir("-a-b-c-", None));
+        // `/a/bc` shares no component boundary: pruned.
+        assert!(!scope.may_contain_session_dir("--a-bc--", None));
+        assert!(!scope.may_contain_session_dir("--x-b--", None));
+    }
+
+    #[test]
+    fn dir_prefilter_up_accepts_ancestors_including_root() {
+        let scope = scope_with("/a/b/c", Some(Direction::Up(Distance::All)));
+        assert!(scope.may_contain_session_dir("--a-b--", None));
+        assert!(scope.may_contain_session_dir("--a--", None));
+        // Root encodes to an empty key: ancestor of everything.
+        assert!(scope.may_contain_session_dir("--", None));
+        assert!(!scope.may_contain_session_dir("--a-b-c-d--", None));
+        assert!(!scope.may_contain_session_dir("--z--", None));
+    }
+
+    #[test]
+    fn dir_prefilter_matches_omp_home_relative_encoding() {
+        let home = Path::new("/Users/u");
+        let scope = scope_with("/Users/u/ai/resume", None);
+        // OMP under $HOME: `-ai-resume` (home-relative, wrapping dashes
+        // already trimmed by the key).
+        assert!(scope.may_contain_session_dir("-ai-resume", Some(home)));
+        assert!(!scope.may_contain_session_dir("-ai-other", Some(home)));
+        // Without home knowledge the relative form cannot match Exact.
+        assert!(!scope.may_contain_session_dir("-ai-resume", None));
+    }
+
+    #[test]
+    fn dir_prefilter_bridges_macos_private_alias() {
+        // Canonical base `/private/var/...` must match a dir name encoded
+        // from the `/var/...` alias, and vice versa.
+        let scope = scope_with("/private/var/folders/x/ws", None);
+        assert!(scope.may_contain_session_dir("--var-folders-x-ws--", None));
+        assert!(scope.may_contain_session_dir("--private-var-folders-x-ws--", None));
+    }
+
+    #[test]
+    fn dir_prefilter_git_mode_uses_worktrees() {
+        let scope = Scope::new(
+            PathBuf::from("/repo/wt"),
+            None,
+            DefaultScope::Git {
+                common_dir: PathBuf::from("/repo/main/.git"),
+                worktrees: vec![PathBuf::from("/repo/wt")],
+            },
+        );
+        assert!(scope.may_contain_session_dir("--repo-wt--", None));
+        assert!(scope.may_contain_session_dir("--repo-wt-sub--", None));
+        assert!(!scope.may_contain_session_dir("--repo-other--", None));
     }
 }

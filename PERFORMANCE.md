@@ -242,26 +242,27 @@ parsing.
 
 ## Known remaining gaps (not yet fixed)
 
-- **Pi and OMP discovery still scale with total rollout bytes, not Session count, and a
-  naive Codex-style early-exit fix would be incorrect for real data -- and OMP is already
-  user-visibly slow at this repo owner's actual corpus size, not just theoretically at
-  risk.** A real `~/.pi` corpus check found 23% of files (135/581) have more than one
-  user message; a real `~/.omp` corpus check (using the correct
-  `record.message.role == "user"` field, 1351 files, ~1.03 GB) found an even higher 40.8%
-  (551/1351). `latest_message_time` genuinely requires scanning to the true last
-  occurrence for a large fraction of real Sessions in both integrations (see
-  `pi_discovery`/`omp_discovery` above for the full research writeup, including why
-  "read only the file's tail" is also not reliably sufficient: the last user message's
-  position averages 28% into the file but reaches 94.5% at the 90th percentile). Profiling
-  confirmed OMP's ~2.4-3.9s real-corpus steady-state is spent entirely in the shared JSON
-  parsing layer, not OMP-specific code, so there is no low-risk optimization available
-  without either a correctness-preserving "find latest within a full scan, faster" parse
-  strategy (e.g. avoiding full `serde_json::Value` tree construction in favor of a
-  lighter-weight streaming extraction, a materially larger change touching the shared
-  `jsonl.rs` reader used by all four integrations) or accepting the scan-to-end cost. Not
-  yet a problem for Pi at the corpus size checked, but already real for OMP -- prioritize
-  OMP first if this work resumes, since it has already crossed from theoretical to
-  user-visible on real data, not just a projection about future corpus growth.
+- **Pi and OMP discovery now prune whole out-of-Scope Workspace directories by
+  their encoded directory name before reading any file.** Both integrations group
+  Sessions under a directory whose name lossily encodes the Workspace path: Pi
+  uses `-{abs path with '/' -> '-'}-`, OMP uses
+  the home-relative form under `$HOME` and the absolute form otherwise. Since a
+  literal `-` in a path component is indistinguishable from a separator, the
+  prefilter (`Scope::may_contain_session_dir`) is deliberately lossy-conservative:
+  it only skips a dash-prefixed directory when *no* decoding of its name could be
+  in Scope; ambiguity always keeps the directory, and the header `cwd` remains
+  authoritative for every file actually read. Custom session roots (flat layouts,
+  where directory names carry no encoding) are never pruned. Measured on real
+  corpora inside this repository's default Scope, back-to-back binaries on
+  identical data: **OMP `--json --agent omp` 4.85s -> 0.26s; Pi 1.72s -> 0.06s**,
+  with identical discovered session sets (88 and 10 sessions respectively).
+  The prior finding still holds for *in-Scope* bytes: for files inside kept
+  directories, "latest wins" semantics require a full scan (23% of real Pi files
+  and 40.8% of real OMP files have more than one user message), and the shared
+  `serde_json::Value` parse layer dominates that remaining cost. A lighter-weight
+  streaming extraction remains the only further optimization for corpora whose
+  Sessions are mostly in Scope (e.g. `--up all`, where the prefilter keeps
+  everything).
 - **Claude discovery has the same scaling problem, is the most file-size-sensitive of the
   three in this benchmark's synthetic scale (~11.4x slower with two 40 MiB outliers vs
   ~3.6x for Pi/OMP), and a naive fix is similarly ruled out by real data**: a real
