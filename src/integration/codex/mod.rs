@@ -45,6 +45,7 @@
 pub const AGENT: &str = "codex";
 
 pub mod activity;
+pub(crate) mod cache;
 pub(crate) mod discover;
 pub(crate) mod resume;
 pub(crate) mod roots;
