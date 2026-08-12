@@ -1609,7 +1609,6 @@ fn cached_and_uncached_discovery_produce_identical_sessions() {
 
     let cold_cache = cache::DiscoveryCache::load(Some(cache_path.clone()));
     let cold = discover_all(&cold_cache);
-    cold_cache.save();
     assert_eq!(cold.len(), 2, "exactly the two real sessions, not the empty rollout");
 
     // A second, independently loaded cache over the same now-populated

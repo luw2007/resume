@@ -22,6 +22,13 @@
 //! One shared file for every `CODEX_HOME`: entries are keyed by each
 //! rollout's absolute path, which already encodes which root it came from,
 //! so a nonstandard `CODEX_HOME` cannot collide with the default `~/.codex`.
+//! `save` prunes an entry whose path falls under the *current* run's
+//! effective root but was not seen this run -- the file no longer exists,
+//! since caching means every current file under that root is always
+//! enumerated (the Workspace gate never applies when a cache is present).
+//! An entry under a *different* effective root (a different `CODEX_HOME`
+//! from an earlier run) is left untouched: this run has no fresh
+//! information about that root, so it is never treated as orphaned.
 
 use std::{
     collections::HashMap,
@@ -204,21 +211,31 @@ impl DiscoveryCache {
             .insert(cache_key(rollout_path), entry);
     }
 
-    /// Writes every entry recorded this run back to disk in one pass,
-    /// merged over whatever was loaded: a loaded entry not re-visited this
-    /// run (out of every root this invocation scanned) is kept, so a
-    /// narrower Scope invocation never evicts entries a wider one already
-    /// warmed. Best-effort -- a write failure (permissions, disk full) is
-    /// silently swallowed; losing an update is never a correctness
-    /// problem, only a missed speedup on the next run.
-    pub fn save(&self) {
+    /// Writes this run's cache state to disk in one pass: every entry
+    /// recorded this run, merged over whatever was loaded, then pruned of
+    /// orphans -- an entry whose path is under `effective_root` but not in
+    /// `seen` no longer exists on disk (deleted since it was cached) and is
+    /// dropped rather than lingering forever. An entry under a *different*
+    /// root is always kept: this run scanned only `effective_root`, so it
+    /// has no evidence either way about anything outside it. Best-effort --
+    /// a write failure (permissions, disk full) is silently swallowed;
+    /// losing an update is never a correctness problem, only a missed
+    /// speedup on the next run.
+    pub fn save(&self, effective_root: &Path, seen: &[PathBuf]) {
         let Some(path) = &self.path else { return };
+        let seen_keys: std::collections::HashSet<String> =
+            seen.iter().map(|p| cache_key(p)).collect();
         let fresh = self.fresh.lock().unwrap();
-        if fresh.is_empty() {
-            return;
-        }
         let mut entries = self.loaded.clone();
         entries.extend(fresh.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let before = entries.len();
+        entries.retain(|key, _| {
+            !Path::new(key.as_str()).starts_with(effective_root) || seen_keys.contains(key)
+        });
+        let pruned = before - entries.len();
+        if fresh.is_empty() && pruned == 0 {
+            return;
+        }
         let file = CacheFile {
             version: CACHE_VERSION,
             entries,
@@ -469,19 +486,19 @@ mod tests {
     }
 
     #[test]
-    fn persists_across_load_save_load_and_never_evicts_entries_outside_this_runs_scope() {
+    fn persists_across_load_save_load() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("cache");
-        let path = cache_dir.join(CACHE_FILE_NAME);
+        let path = dir.path().join("cache").join(CACHE_FILE_NAME);
+        let root = dir.path();
 
-        let rollout_a = dir.path().join("a.jsonl");
-        let rollout_b = dir.path().join("b.jsonl");
+        let rollout_a = root.join("a.jsonl");
+        let rollout_b = root.join("b.jsonl");
         write_rollout(&rollout_a, b"{}\n");
         write_rollout(&rollout_b, b"{}\n");
         let meta_a = fs::metadata(&rollout_a).unwrap();
         let meta_b = fs::metadata(&rollout_b).unwrap();
+        let seen = [rollout_a.clone(), rollout_b.clone()];
 
-        // Run 1: both files scanned and recorded.
         let cache = DiscoveryCache::load(Some(path.clone()));
         cache.record(
             &rollout_a,
@@ -490,21 +507,99 @@ mod tests {
             Some(&sample_parsed(rollout_a.clone())),
         );
         cache.record(&rollout_b, meta_b.len(), meta_b.modified().unwrap(), None);
-        cache.save();
+        cache.save(root, &seen);
 
-        // Run 2: only `a` is in this run's Scope/root set and gets a fresh
-        // lookup; `b` is never touched. Both must still be present after save.
         let cache2 = DiscoveryCache::load(Some(path.clone()));
         assert!(cache2.lookup(&rollout_a).is_some(), "a must survive a reload");
         assert!(
             matches!(cache2.lookup(&rollout_b), Some(None)),
-            "b must survive a reload even though this run never records it again"
+            "b must survive a reload"
         );
-        cache2.save(); // no new records: must be a no-op, not truncate the file.
+        cache2.save(root, &seen); // no new records: must be a no-op, not truncate the file.
 
         let cache3 = DiscoveryCache::load(Some(path));
         assert!(cache3.lookup(&rollout_a).is_some());
         assert!(matches!(cache3.lookup(&rollout_b), Some(None)));
+    }
+
+    #[test]
+    fn save_prunes_an_entry_for_a_file_deleted_since_it_was_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILE_NAME);
+        let root = dir.path();
+
+        let rollout_a = root.join("a.jsonl");
+        let rollout_b = root.join("b.jsonl");
+        write_rollout(&rollout_a, b"{}\n");
+        write_rollout(&rollout_b, b"{}\n");
+        let meta_a = fs::metadata(&rollout_a).unwrap();
+        let meta_b = fs::metadata(&rollout_b).unwrap();
+
+        // Run 1: both files exist, both recorded, both seen.
+        let cache = DiscoveryCache::load(Some(path.clone()));
+        cache.record(
+            &rollout_a,
+            meta_a.len(),
+            meta_a.modified().unwrap(),
+            Some(&sample_parsed(rollout_a.clone())),
+        );
+        cache.record(&rollout_b, meta_b.len(), meta_b.modified().unwrap(), None);
+        cache.save(root, &[rollout_a.clone(), rollout_b.clone()]);
+
+        // Between runs, `b` is deleted -- a real `discover_with_filter_
+        // enriched` pass over `root` would no longer find it in
+        // `list_rollout_files`, so it is never in `seen` again.
+        fs::remove_file(&rollout_b).unwrap();
+
+        // Run 2: only `a` is seen (the true current file list under `root`).
+        let cache2 = DiscoveryCache::load(Some(path.clone()));
+        cache2.save(root, &[rollout_a.clone()]);
+
+        let cache3 = DiscoveryCache::load(Some(path));
+        assert!(
+            cache3.lookup(&rollout_a).is_some(),
+            "a is still on disk and must survive pruning"
+        );
+        let deleted_path = std::path::Path::new(&rollout_b);
+        assert!(
+            fs::metadata(deleted_path).is_err(),
+            "sanity: b really is deleted"
+        );
+    }
+
+    #[test]
+    fn save_never_prunes_entries_under_a_different_effective_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILE_NAME);
+        let root_x = dir.path().join("codex_home_x");
+        let root_y = dir.path().join("codex_home_y");
+        fs::create_dir_all(&root_x).unwrap();
+        fs::create_dir_all(&root_y).unwrap();
+
+        let rollout_x = root_x.join("x.jsonl");
+        write_rollout(&rollout_x, b"{}\n");
+        let meta_x = fs::metadata(&rollout_x).unwrap();
+
+        // Run 1: a rollout cached under a nonstandard CODEX_HOME (`root_x`).
+        let cache = DiscoveryCache::load(Some(path.clone()));
+        cache.record(
+            &rollout_x,
+            meta_x.len(),
+            meta_x.modified().unwrap(),
+            Some(&sample_parsed(rollout_x.clone())),
+        );
+        cache.save(&root_x, &[rollout_x.clone()]);
+
+        // Run 2: a *different* CODEX_HOME (`root_y`) is scanned; `root_x`'s
+        // rollout is never seen (or even known about) this run.
+        let cache2 = DiscoveryCache::load(Some(path));
+        cache2.save(&root_y, &[]);
+
+        let reloaded = DiscoveryCache::load(Some(dir.path().join(CACHE_FILE_NAME)));
+        assert!(
+            reloaded.lookup(&rollout_x).is_some(),
+            "an entry outside this run's effective_root must never be pruned"
+        );
     }
 
     #[test]
@@ -547,7 +642,7 @@ mod tests {
             Some(&sample_parsed(rollout.clone())),
         );
         assert!(cache.lookup(&rollout).is_some());
-        cache.save(); // must not panic or attempt any I/O.
+        cache.save(dir.path(), &[rollout]); // must not panic or attempt any I/O.
     }
 
     #[test]

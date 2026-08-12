@@ -192,6 +192,13 @@ where
         },
     }
     let mut pending: Vec<Pending> = Vec::new();
+    // Every rollout path actually observed under `effective_root` this run
+    // (regardless of parse outcome) -- only meaningful when caching is
+    // active, since only then does `parse_for_discovery` bypass the
+    // Workspace gate and guarantee every current file gets visited. Used to
+    // prune the cache of entries for files deleted since they were cached
+    // (see `cache::DiscoveryCache::save`).
+    let mut seen: Vec<PathBuf> = Vec::new();
     for root in rollout_roots(effective_root) {
         if let Some((path, error)) = unreadable_root(&root.path) {
             pending.push(Pending::Error { path, error });
@@ -201,7 +208,10 @@ where
         let results = parallel_map(&paths, |path| {
             parse_for_discovery(path, &canonical_root, bounds, workspace_gate, cache)
         });
-        for (path, result) in paths.into_iter().zip(results) {
+        for (path, (canonical_path, result)) in paths.into_iter().zip(results) {
+            if cache.is_some() {
+                seen.push(canonical_path);
+            }
             match result {
                 Ok(None) => {}
                 Ok(Some(mut parsed)) => {
@@ -218,6 +228,9 @@ where
                 Err(error) => pending.push(Pending::Error { path, error }),
             }
         }
+    }
+    if let Some(cache) = cache {
+        cache.save(&canonical_root, &seen);
     }
 
     // Collect the parsed sessions for enrichment.
@@ -255,7 +268,11 @@ where
 }
 
 /// Parse one rollout file for discovery, consulting `cache` first and
-/// recording the outcome for later write-back on a miss.
+/// recording the outcome for later write-back on a miss. Returns the
+/// canonical (symlink-resolved) path alongside the outcome so the caller
+/// can track which paths were actually seen this run for cache pruning --
+/// only computed when a cache is present (the no-cache path returns the
+/// original, non-canonical `path`, which no caller relies on).
 ///
 /// Skips [`WorkspaceGate`] entirely whenever a cache is present: caching
 /// requires the file's TRUE content regardless of Scope (see the `cache`
@@ -273,13 +290,16 @@ fn parse_for_discovery(
     bounds: &Bounds,
     workspace_gate: Option<WorkspaceGate<'_>>,
     cache: Option<&cache::DiscoveryCache>,
-) -> Result<Option<ParsedSession>, IntegrationError> {
+) -> (PathBuf, Result<Option<ParsedSession>, IntegrationError>) {
     let Some(cache) = cache else {
-        return parse_rollout_file_gated(path, effective_root, bounds, workspace_gate);
+        return (
+            path.to_path_buf(),
+            parse_rollout_file_gated(path, effective_root, bounds, workspace_gate),
+        );
     };
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(hit) = cache.lookup(&canonical_path) {
-        return Ok(hit);
+        return (canonical_path, Ok(hit));
     }
     let result = parse_rollout_file(path, effective_root, bounds);
     if let Ok(parsed) = &result
@@ -288,7 +308,7 @@ fn parse_for_discovery(
     {
         cache.record(&canonical_path, metadata.len(), mtime, parsed.as_ref());
     }
-    result
+    (canonical_path, result)
 }
 
 /// A discovery outcome for one rollout file.
