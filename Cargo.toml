@@ -41,6 +41,12 @@ rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 default = []
 codex-sqlite = ["dep:rusqlite"]
 
+# skim-tuikit 0.6.6 omits xterm's `CSI 1;3{C,D}` Alt-arrow mappings. The
+# picker uses those keys for tab navigation; retain the upstream API and patch
+# only the parser until the dependency ships the mapping.
+[patch.crates-io]
+skim-tuikit = { path = "vendor/skim-tuikit" }
+
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 portable-pty = "0.9"
