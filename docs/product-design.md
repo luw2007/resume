@@ -278,7 +278,7 @@ Discovery and content parsing are two-stage:
 
 If Skim can safely update an emitted item without moving the stable selection, user content becomes searchable after parsing. Otherwise do not rebuild the list; that Session's content remains browsable through Preview but may not join main-list matching during that run. First-screen speed and selection safety take priority over complete transcript indexing.
 
-There is no pagination, implicit age limit, or result count cap. There is also no continuous watch or refresh; rerun `resume` to rescan.
+There is no implicit age limit or result count cap, and no continuous watch or refresh; rerun `resume` to rescan. Pressing `Alt+P` once discovery settles switches the live stream into an explicit, user-requested paginated view: every discovered Session is retained, sorted oldest-first with the most recently active last, split into pages of 50, opening on the last (newest) page; `Alt+P`/`Alt+N` move to the older/newer page. This is opt-in only — the default live stream is never implicitly paginated or reordered.
 
 Within an open Session Preview, search applies only to that Session's user inputs and supports previous/next match navigation, subject to Skim's proven public interaction surface.
 
