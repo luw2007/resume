@@ -310,10 +310,17 @@ Within an open Session Preview, search applies only to that Session's user input
 - Raw and Normalized share a parsed message representation.
 - The currently displayed item may temporarily exceed the soft total.
 - Use no disk cache.
-- One discovery worker per integration; each integration scans its stores/profiles sequentially.
+- One discovery worker per integration; each integration scans its stores/profiles sequentially. **Codex is a scoped exception**: see "Codex parallel scan and discovery cache" below.
 - At most four Preview workers; never one thread per Session.
 - Prefer selected-item parsing via Skim selection/Preview callbacks. If selection changes cannot be observed reliably, parse on demand in `preview()` with cache, then fall back to newest-first background parsing.
 - All workers use cooperative cancellation. Ordinary exit waits at most 250 ms; a successful `exec` does not wait on slow discovery.
+
+### Codex parallel scan and discovery cache
+
+Codex's rollout store has no Workspace-encoded directory names (unlike Pi/OMP/Claude), so it cannot prune whole directories by Scope before reading; every invocation walks the full store. Measured on a real corpus (3546 rollouts, ~2.9 GB) this made Codex the one integration whose single-threaded scan time scales with total corpus size rather than Scope size — up to 18-19 seconds, dwarfing every other integration's sub-second scan on the same machine. Two changes address this, both scoped to Codex only:
+
+- **Bounded parallel scan.** Codex's own file list is processed by up to 8 scoped worker threads (not one thread per file) instead of sequentially, an explicit, documented exception to "one discovery worker per integration... scans sequentially" above. Chosen from real-corpus, in-process measurement (no per-file process spawn, which would only measure process-creation overhead, not disk throughput): 8 workers cut a 1200-file read from 1.2s to 0.086s (14x); 16 workers were only marginally faster (0.074s) for twice the threads. Output order and content are unaffected — results are reassembled in the original sorted order before any downstream code sees them.
+- **Discovery cache.** A small file at `$XDG_CACHE_HOME/resume/codex-discovery-v1.json` (falling back to `~/.cache/resume/`) maps each rollout's absolute path to its parsed content, keyed by (size, mtime). A cache hit skips the file read and JSON parse entirely; a miss does a full parse and records the result for next time. Purely a discovery-speed optimization with the same non-authoritative posture as `state_5.sqlite` enrichment above: the rollout JSONL remains authoritative, a missing/corrupt/version-mismatched cache file silently degrades to a full fresh scan (never blocks discovery, never changes the result), and deleting the cache file is always safe. Measured on the same corpus: a warm-cache rerun of a 1016-session Scope dropped from 3.95s (cold, populating the cache) to 0.17-0.19s (20-23x), with byte-identical output confirmed against the uncached path. The cache intentionally ignores Scope when deciding what to cache -- it stores every rollout's true parsed content regardless of which Scope discovered it, so a cache warmed from one project directory also speeds up a later invocation from a completely different one against the same underlying store.
 
 ### Asynchronous stability
 
@@ -668,7 +675,7 @@ Second-batch agents do not block v0.1.0.
 - Session modification, repair, migration, deletion, import, merge, or cross-agent deduplication.
 - Automatic replacement of a missing worktree.
 - Continuous watching or refresh.
-- Persistent transcript/full-text index.
+- Persistent transcript/full-text search index (a user-facing "search across all Session content" feature): rejected. Distinct from the narrow, non-authoritative Codex discovery cache (see "Codex parallel scan and discovery cache" in section 5), which adds no search capability and exists purely to skip re-parsing an unchanged rollout file.
 - External pager/editor.
 - Custom Skim fork or direct Ratatui UI.
 - Automatic agent install, process termination, terminal takeover, or Resume fallback to “latest.”

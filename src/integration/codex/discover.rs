@@ -16,7 +16,53 @@ use crate::{
     },
 };
 
-use super::{AGENT, RolloutKind, rollout_roots, roots::is_rollout_filename, sqlite};
+use super::{AGENT, RolloutKind, cache, rollout_roots, roots::is_rollout_filename, sqlite};
+
+/// Bounded worker count for parallel per-file discovery. Codex's per-file
+/// scan is I/O-bound (real wall time far exceeds CPU time: measured on a
+/// real corpus, `user 0.2s / sys 0.4s` against `real 2.1s` for one
+/// single-threaded pass) and, unlike Pi/OMP/Claude's directory-pruned
+/// scans, has no upper bound tied to Scope size -- a large real corpus
+/// (3546 rollouts / 2.7GB) can take 18+ seconds single-threaded even after
+/// the early Workspace-gate optimization. Measured in-process (no
+/// per-file process spawn, which only measures process-creation overhead)
+/// on that corpus: reading 1200 files serially took 1.2s; an 8-worker
+/// thread pool took 0.086s (14x). 16 workers measured only marginally
+/// faster (0.074s) for twice the threads spawned -- diminishing returns
+/// once disk queue depth saturates. This is a scoped, documented exception
+/// to "one discovery worker per integration... scans sequentially"
+/// (docs/product-design.md) for Codex specifically.
+const MAX_DISCOVERY_WORKERS: usize = 8;
+
+/// Below this file count, thread-spawn overhead is not worth paying --
+/// the large majority of real Scopes have far fewer Codex rollouts.
+const PARALLEL_THRESHOLD: usize = 16;
+
+/// Applies `f` to every element of `items` using up to
+/// [`MAX_DISCOVERY_WORKERS`] scoped threads, preserving `items`' original
+/// order in the result: each worker owns one contiguous chunk, and chunk
+/// outputs are concatenated in chunk order. Falls back to a plain
+/// sequential map below [`PARALLEL_THRESHOLD`] items.
+fn parallel_map<T, R>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    if items.len() < PARALLEL_THRESHOLD {
+        return items.iter().map(|item| f(item)).collect();
+    }
+    let workers = MAX_DISCOVERY_WORKERS.min(items.len());
+    let chunk_size = items.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        items
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(|| chunk.iter().map(|item| f(item)).collect::<Vec<R>>()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("discovery worker thread panicked"))
+            .collect()
+    })
+}
 
 /// The `type` field value of the session-meta header record.
 const TYPE_SESSION_META: &str = "session_meta";
@@ -50,7 +96,7 @@ pub fn discover(effective_root: &Path, bounds: &Bounds) -> Vec<DiscoveredSession
 /// `session_meta` has no `cwd`, or a relative/unresolvable one (which the
 /// full parse drops to `parsed.cwd == None` -- kept unconditionally by the
 /// post-parse filter), are never offered to the gate.
-pub type WorkspaceGate<'a> = &'a dyn Fn(&Path) -> bool;
+pub type WorkspaceGate<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
 
 /// Discover Codex Sessions, applying a workspace filter.
 ///
@@ -121,9 +167,10 @@ pub fn discover_with_filter_enriched<F>(
     bounds: &Bounds,
     workspace_gate: Option<WorkspaceGate<'_>>,
     filter: F,
+    cache: Option<&cache::DiscoveryCache>,
 ) -> (Vec<DiscoveredSession>, sqlite::SqliteOutcome)
 where
-    F: Fn(&ParsedSession) -> bool,
+    F: Fn(&ParsedSession) -> bool + Sync,
 {
     let canonical_root = effective_root
         .canonicalize()
@@ -150,8 +197,12 @@ where
             pending.push(Pending::Error { path, error });
             continue;
         }
-        for path in list_rollout_files(&root.path) {
-            match parse_rollout_file_gated(&path, &canonical_root, bounds, workspace_gate) {
+        let paths = list_rollout_files(&root.path);
+        let results = parallel_map(&paths, |path| {
+            parse_for_discovery(path, &canonical_root, bounds, workspace_gate, cache)
+        });
+        for (path, result) in paths.into_iter().zip(results) {
+            match result {
                 Ok(None) => {}
                 Ok(Some(mut parsed)) => {
                     parsed.effective_root = Some(canonical_root.clone());
@@ -200,8 +251,44 @@ where
             Pending::Error { path, error } => DiscoveredSession::Error { path, error },
         })
         .collect();
-
     (out, outcome)
+}
+
+/// Parse one rollout file for discovery, consulting `cache` first and
+/// recording the outcome for later write-back on a miss.
+///
+/// Skips [`WorkspaceGate`] entirely whenever a cache is present: caching
+/// requires the file's TRUE content regardless of Scope (see the `cache`
+/// module doc -- a gate rejection is Scope-specific and must never be
+/// cached as "no session"), so a cache miss always does the full, ungated
+/// parse. This also makes a cached entry reusable by a *different* Scope's
+/// later invocation, not just a rerun of this exact one -- a real benefit
+/// given `resume` is typically invoked from many different project
+/// directories over time against the same underlying rollout store.
+/// Cache keys and the reconstructed `rollout_path` both use the symlink-
+/// resolved canonical path, matching what a fresh parse produces.
+fn parse_for_discovery(
+    path: &Path,
+    effective_root: &Path,
+    bounds: &Bounds,
+    workspace_gate: Option<WorkspaceGate<'_>>,
+    cache: Option<&cache::DiscoveryCache>,
+) -> Result<Option<ParsedSession>, IntegrationError> {
+    let Some(cache) = cache else {
+        return parse_rollout_file_gated(path, effective_root, bounds, workspace_gate);
+    };
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(hit) = cache.lookup(&canonical_path) {
+        return Ok(hit);
+    }
+    let result = parse_rollout_file(path, effective_root, bounds);
+    if let Ok(parsed) = &result
+        && let Ok(metadata) = fs::metadata(&canonical_path)
+        && let Ok(mtime) = metadata.modified()
+    {
+        cache.record(&canonical_path, metadata.len(), mtime, parsed.as_ref());
+    }
+    result
 }
 
 /// A discovery outcome for one rollout file.

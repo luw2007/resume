@@ -614,6 +614,11 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
     let Some(root) = codex::effective_root() else {
         return AgentDiscovery::failed("codex_root_unavailable");
     };
+    let cache_path = codex::cache::cache_path(
+        std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from),
+        home(),
+    );
+    let cache = codex::cache::DiscoveryCache::load(cache_path);
     let workspace_gate = |cwd: &Path| scope.contains_workspace(cwd);
     let (outcomes, sqlite_outcome) = codex::discover_with_filter_enriched(
         &root,
@@ -625,7 +630,9 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                 .as_ref()
                 .is_none_or(|cwd| scope.contains_workspace(cwd))
         },
+        Some(&cache),
     );
+    cache.save();
     let mut errors = match sqlite_outcome {
         codex::sqlite::SqliteOutcome::Used { diagnostics, .. } => diagnostics,
         codex::sqlite::SqliteOutcome::Degraded { category } => vec![Diagnostic {

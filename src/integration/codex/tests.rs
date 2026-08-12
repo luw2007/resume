@@ -1547,3 +1547,75 @@ fn session_meta_beyond_early_read_budget_falls_back_to_full_read() {
         Some("late header still discovered")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Discovery cache correctness
+// ---------------------------------------------------------------------------
+
+/// A fresh cache and a warm (second-run) cache must discover byte-identical
+/// Sessions from the same corpus: the cache is purely a discovery-speed
+/// optimization, never a source of truth. This runs `discover_with_filter_
+/// enriched` twice -- once against a `DiscoveryCache` backed by a real file
+/// that starts empty (populating and saving it), once against a fresh
+/// `DiscoveryCache::load` of that same now-populated file (an all-hits
+/// warm run) -- and asserts the two full `Session` lists are equal.
+#[test]
+fn cached_and_uncached_discovery_produce_identical_sessions() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let ws_canon = workspace.canonicalize().unwrap();
+
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-one.jsonl",
+        &[
+            session_meta("cache-one", ws_canon.to_str().unwrap()),
+            event_msg_user("first session message"),
+        ],
+    );
+    write_rollout(
+        home.path(),
+        "archived_sessions/2026/01/01/rollout-two.jsonl",
+        &[
+            session_meta("cache-two", ws_canon.to_str().unwrap()),
+            event_msg_user("second session message"),
+        ],
+    );
+    // A rollout with no session_meta at all -- must be cached as a
+    // definitive "no session" and still absent from both runs.
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-empty.jsonl",
+        &[json!({ "type": "turn_context", "payload": {} })],
+    );
+
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache_path = cache_dir.path().join("codex-discovery-v1.json");
+
+    let discover_all = |cache: &cache::DiscoveryCache| -> Vec<Session> {
+        let (outcomes, _) = discover_with_filter_enriched(
+            home.path(),
+            &Bounds::default(),
+            None,
+            |_| true,
+            Some(cache),
+        );
+        outcomes
+            .into_iter()
+            .filter_map(|o| o.session().cloned())
+            .collect()
+    };
+
+    let cold_cache = cache::DiscoveryCache::load(Some(cache_path.clone()));
+    let cold = discover_all(&cold_cache);
+    cold_cache.save();
+    assert_eq!(cold.len(), 2, "exactly the two real sessions, not the empty rollout");
+
+    // A second, independently loaded cache over the same now-populated
+    // file: every rollout must be an all-hits cache lookup, never a re-read.
+    let warm_cache = cache::DiscoveryCache::load(Some(cache_path));
+    let warm = discover_all(&warm_cache);
+
+    assert_eq!(cold, warm, "cached discovery must be byte-identical to uncached");
+}
