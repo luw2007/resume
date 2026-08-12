@@ -626,6 +626,8 @@ fn build_tabbed_options(
 
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
+        .no_sort(true)
+        .tac(true)
         .multi(false)
         .header(Some(format!(
             "{tabs}{pending_note}  PAGE {}/{}  (alt-p/alt-n page, alt-left/alt-right tab)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
@@ -999,6 +1001,21 @@ mod tests {
         // The key type carries no path, agent, or launch state.
         let k = CandidateKey(42);
         assert_eq!(format!("{k:?}"), "CandidateKey(42)");
+    }
+
+    #[test]
+    fn tabbed_picker_preserves_chronological_row_order() {
+        let options = build_tabbed_options(
+            0,
+            &["omp"],
+            0,
+            1,
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            None,
+        );
+        assert!(options.no_sort);
+        assert!(options.tac);
     }
 
     #[test]
