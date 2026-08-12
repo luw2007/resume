@@ -398,6 +398,68 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     assert!(out.contains("key:"), "out={out:?}");
 }
 
+/// Left/Right (bare xterm arrows) and Tab/Shift-Tab are bound alongside
+/// Alt-Left/Alt-Right for the same tab-cycle move, so a terminal or
+/// keyboard layout that never emits the Alt-modified form still switches
+/// tabs. Reuses the same fixture as `tabbed_picker_paginates_and_switches_tabs`.
+#[test]
+fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 100, 30);
+
+    // Default: "All" tab, last page (2/2).
+    let all_page2 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    assert!(
+        all_page2.contains("[All]") && all_page2.contains("PAGE 2/2"),
+        "expected All tab page 2/2: {all_page2:?}"
+    );
+
+    // Plain Right (no Alt modifier): next tab -> pi, its last page (2/2).
+    sess.write(b"\x1b[C");
+    let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
+    assert!(
+        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 2/2"),
+        "expected pi tab page 2/2: {pi_tab:?}"
+    );
+
+    // Tab: next tab -> claude, its only page (1/1).
+    sess.write(b"\t");
+    let claude_tab = wait_for(
+        &mut sess,
+        "claude-candidate-000",
+        Duration::from_millis(4000),
+    );
+    assert!(
+        claude_tab.contains("[claude]") && claude_tab.contains("PAGE 1/1"),
+        "expected claude tab page 1/1: {claude_tab:?}"
+    );
+
+    // Plain Left (no Alt modifier): previous tab -> back to pi, last page.
+    sess.write(b"\x1b[D");
+    let pi_tab_again = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
+    assert!(
+        pi_tab_again.contains("[pi]") && pi_tab_again.contains("PAGE 2/2"),
+        "expected pi tab page 2/2 again: {pi_tab_again:?}"
+    );
+
+    // Shift-Tab (CSI Z, standard backtab): previous tab -> back to All, last page.
+    sess.write(b"\x1b[Z");
+    let all_again = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    assert!(
+        all_again.contains("[All]") && all_again.contains("PAGE 2/2"),
+        "expected All tab page 2/2 again: {all_again:?}"
+    );
+
+    // Enter selects the highlighted candidate from the current view.
+    sess.write(b"\r");
+    let exit = wait_child(&mut sess);
+    assert_eq!(exit, 0, "exit={exit}");
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(out.contains("key:"), "out={out:?}");
+}
+
 /// `run_tabbed_picker` with a [`resume::picker::BackgroundAgent`] (the path
 /// `app::run_interactive` uses when Codex is configured alongside other
 /// agents): the picker opens immediately on the agents that are already

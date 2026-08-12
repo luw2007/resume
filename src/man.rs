@@ -295,8 +295,9 @@ PICKER KEYS
     Ctrl-R      No-op by design; see the v0.1.0 specifics below.
     Alt-P       Page to older Sessions in the current tab.
     Alt-N       Page to newer Sessions in the current tab.
-    Alt-Left    Switch to the previous tab (wraps).
-    Alt-Right   Switch to the next tab (wraps).
+    Alt-Left    Switch to the previous tab (wraps). Left, Shift-Tab do the
+                same.
+    Alt-Right   Switch to the next tab (wraps). Right, Tab do the same.
 
     The Picker opens once Pi, OMP, and Claude have all finished discovery
     (see PROGRESS below), with an `All` tab plus one tab per agent that

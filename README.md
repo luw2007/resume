@@ -73,7 +73,7 @@ The Skim picker starts with Preview hidden unless config says otherwise.
 | `Ctrl-O` | Toggle Preview |
 | `Ctrl-R` | Intentionally ignored |
 | `Alt-P` / `Alt-N` | Move to the older / newer page in the current tab |
-| `Alt-Left` / `Alt-Right` | Move to the previous / next tab, wrapping and opening its newest page |
+| `Alt-Left` / `Alt-Right`, `Left` / `Right`, `Tab` / `Shift-Tab` | Move to the previous / next tab, wrapping and opening its newest page |
 | `Esc` | Cancel without resuming |
 | `Ctrl-C` | Interrupt (exit 130) |
 Preview uses a safe dual-section fallback: normalized and raw-but-terminal-safe sections are shown together. **Ctrl-R does not reload, refresh, or switch views live.** A channel-fed Skim `reload` can execute its default filesystem command, so `resume` explicitly binds Ctrl-R to `ignore` to prevent an accidental filesystem listing. Preview currently presents the Session metadata/title available to the assembled picker; integration parsers and text-safety foundations have broader user-input coverage, but this README does not claim a full native transcript viewer.

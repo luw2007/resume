@@ -369,8 +369,8 @@ fn classify_nav(outcome: Option<SkimOutput>) -> NavExit {
             match o.final_key {
                 SkimKey::Alt('p') => return NavExit::OlderPage,
                 SkimKey::Alt('n') => return NavExit::NewerPage,
-                SkimKey::AltLeft => return NavExit::PrevTab,
-                SkimKey::AltRight => return NavExit::NextTab,
+                SkimKey::AltLeft | SkimKey::Left | SkimKey::BackTab => return NavExit::PrevTab,
+                SkimKey::AltRight | SkimKey::Right | SkimKey::Tab => return NavExit::NextTab,
                 _ => {}
             }
         }
@@ -405,7 +405,8 @@ pub struct BackgroundAgent {
 /// agent present in `candidates`, each sorted ascending by `rank` and
 /// paginated at [`PAGE_SIZE`]. Starts on the "All" tab's last (newest) page.
 /// `Alt+P`/`Alt+N` move between pages of the current tab; `Alt+Left`/
-/// `Alt+Right` switch tabs (wrapping), resetting to that tab's last page.
+/// `Alt+Right`, `Left`/`Right`, and `Tab`/`Shift+Tab` all switch tabs
+/// (wrapping), resetting to that tab's last page.
 /// Every page turn or tab switch relaunches a fresh, small Skim instance,
 /// since Skim has no API to reorder or replace an already-open list.
 ///
@@ -607,9 +608,16 @@ fn build_tabbed_options(
     // "All" plus one tab per agent is always >= 2 tabs whenever there is any
     // data at all (run_tabbed_picker's wait loop only lets the render loop
     // start once there is at least one candidate), so tab switching is
-    // unconditionally bound and wraps in the caller.
+    // unconditionally bound and wraps in the caller. Left/Right and Tab/
+    // Shift-Tab are bound alongside Alt-Left/Alt-Right for the same move;
+    // this sacrifices Skim's default arrow-key cursor movement inside the
+    // typed filter query in exchange for one-key tab switching.
     binds.push(String::from("alt-left:accept")); // previous tab
     binds.push(String::from("alt-right:accept")); // next tab
+    binds.push(String::from("left:accept")); // previous tab
+    binds.push(String::from("right:accept")); // next tab
+    binds.push(String::from("tab:accept")); // next tab
+    binds.push(String::from("shift-tab:accept")); // previous tab
 
     let mut tabs = String::from(if tab_index == 0 { "[All]" } else { "All" });
     for (i, agent) in agent_tabs.iter().enumerate() {
@@ -630,7 +638,7 @@ fn build_tabbed_options(
         .tac(true)
         .multi(false)
         .header(Some(format!(
-            "{tabs}{pending_note}  PAGE {}/{}  (alt-p/alt-n page, alt-left/alt-right tab)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            "{tabs}{pending_note}  PAGE {}/{}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
             page_index + 1,
             total_pages
         )))
