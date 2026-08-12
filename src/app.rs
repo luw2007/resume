@@ -632,7 +632,6 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
         },
         Some(&cache),
     );
-    cache.save();
     let mut errors = match sqlite_outcome {
         codex::sqlite::SqliteOutcome::Used { diagnostics, .. } => diagnostics,
         codex::sqlite::SqliteOutcome::Degraded { category } => vec![Diagnostic {
