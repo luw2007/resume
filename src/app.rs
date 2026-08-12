@@ -467,7 +467,10 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
     ) else {
         return AgentDiscovery::failed("claude_root_unavailable");
     };
-    match claude::discover(&root) {
+    let home_dir = home();
+    match claude::discover_with_dir_filter(&root, |name| {
+        scope.may_contain_session_dir(name, home_dir.as_deref())
+    }) {
         Ok(discovery) => {
             let mut diagnostics = discovery.diagnostics;
             let records = discovery

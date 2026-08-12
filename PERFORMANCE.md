@@ -242,20 +242,27 @@ parsing.
 
 ## Known remaining gaps (not yet fixed)
 
-- **Pi and OMP discovery now prune whole out-of-Scope Workspace directories by
-  their encoded directory name before reading any file.** Both integrations group
+- **Pi, OMP and Claude discovery now prune whole out-of-Scope Workspace
+  directories by their encoded directory name before reading any file.** All
+  three integrations group
   Sessions under a directory whose name lossily encodes the Workspace path: Pi
   uses `-{abs path with '/' -> '-'}-`, OMP uses
-  the home-relative form under `$HOME` and the absolute form otherwise. Since a
-  literal `-` in a path component is indistinguishable from a separator, the
-  prefilter (`Scope::may_contain_session_dir`) is deliberately lossy-conservative:
+  the home-relative form under `$HOME` and the absolute form otherwise, and
+  Claude maps every non-alphanumeric character (not just `/`) to `-`. Since a
+  literal `-` in a path component is indistinguishable from a separator (and
+  Claude collapses `.`, `_`, etc. as well), the
+  prefilter (`Scope::may_contain_session_dir`, normalizing BOTH sides to the
+  coarsest key: every non-ASCII-alphanumeric character -> `-`) is deliberately
+  lossy-conservative:
   it only skips a dash-prefixed directory when *no* decoding of its name could be
   in Scope; ambiguity always keeps the directory, and the header `cwd` remains
   authoritative for every file actually read. Custom session roots (flat layouts,
   where directory names carry no encoding) are never pruned. Measured on real
   corpora inside this repository's default Scope, back-to-back binaries on
-  identical data: **OMP `--json --agent omp` 4.85s -> 0.26s; Pi 1.72s -> 0.06s**,
-  with identical discovered session sets (88 and 10 sessions respectively).
+  identical data: **OMP `--json --agent omp` 4.85s -> 0.26s; Pi 1.72s -> 0.06s;
+  Claude 0.92s -> 0.01s** (89 project directories, none in this repository's
+  Scope), with identical discovered session sets in every case, including a
+  positive-hit check from `$HOME` (both binaries: same 1 session).
   The prior finding still holds for *in-Scope* bytes: for files inside kept
   directories, "latest wins" semantics require a full scan (23% of real Pi files
   and 40.8% of real OMP files have more than one user message), and the shared
@@ -263,7 +270,8 @@ parsing.
   streaming extraction remains the only further optimization for corpora whose
   Sessions are mostly in Scope (e.g. `--up all`, where the prefilter keeps
   everything).
-- **Claude discovery has the same scaling problem, is the most file-size-sensitive of the
+- **For in-Scope Claude directories, per-file parsing remains the most
+  file-size-sensitive of the
   three in this benchmark's synthetic scale (~11.4x slower with two 40 MiB outliers vs
   ~3.6x for Pi/OMP), and a naive fix is similarly ruled out by real data**: a real
   `~/.claude` corpus check found `agent-name`/`agentName` needs more than 1 MiB of file

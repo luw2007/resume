@@ -21,6 +21,9 @@ pub(super) struct Candidate {
 pub struct Discovery {
     pub sessions: Vec<Session>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Number of workspace-key directories pruned by the directory-name
+    /// filter without reading any file inside them.
+    pub pruned_dirs: usize,
 }
 
 impl Discovery {
@@ -28,18 +31,42 @@ impl Discovery {
         Self {
             sessions: Vec::new(),
             diagnostics: Vec::new(),
+            pruned_dirs: 0,
         }
     }
 }
 
-/// Discover Claude Sessions under a resolved root.
+/// Discover Claude Sessions under a resolved root, without directory
+/// pruning (scans every workspace-key directory).
+pub fn discover(root: &ClaudeRoot) -> Result<Discovery, IntegrationError> {
+    discover_with_dir_filter(root, |_| true)
+}
+
+/// Discover Claude Sessions under a resolved root, pruning workspace-key
+/// directories the filter rejects.
+///
+/// `dir_filter` receives each dash-prefixed workspace-key directory name
+/// (Claude encodes the Workspace path into the name by mapping every
+/// non-alphanumeric character to '-'); returning `false` skips the whole
+/// directory without reading any file inside it (counted in
+/// [`Discovery::pruned_dirs`]). Follows the same convention as Codex's
+/// `discover_with_filter`: typically a Scope membership prefilter
+/// (`Scope::may_contain_session_dir`). Non-dash-prefixed directory names
+/// carry no encoding and are never offered to the filter.
 ///
 /// Scans only valid top-level Session transcripts (direct `.jsonl` children of
 /// each workspace-key directory), excluding nested subagent artifacts. Each
 /// retained Session carries the recorded `cwd` as its Workspace evidence so
-/// callers can apply Scope membership. Read-only: no file is opened for write,
-/// no directory entry or mtime is changed, and the Claude CLI is never invoked.
-pub fn discover(root: &ClaudeRoot) -> Result<Discovery, IntegrationError> {
+/// callers can apply authoritative Scope membership. Read-only: no file is
+/// opened for write, no directory entry or mtime is changed, and the Claude
+/// CLI is never invoked.
+pub fn discover_with_dir_filter<F>(
+    root: &ClaudeRoot,
+    dir_filter: F,
+) -> Result<Discovery, IntegrationError>
+where
+    F: Fn(&str) -> bool,
+{
     let projects = root.effective_root.join(PROJECTS_DIR);
     let projects_real = match projects.canonicalize() {
         Ok(path) => path,
@@ -50,7 +77,7 @@ pub fn discover(root: &ClaudeRoot) -> Result<Discovery, IntegrationError> {
     };
 
     let mut discovery = Discovery::new();
-    let candidates = collect_candidates(&projects_real, &mut discovery.diagnostics);
+    let candidates = collect_candidates(&projects_real, &dir_filter, &mut discovery);
 
     for candidate in candidates {
         match parse_candidate(&candidate, root) {
@@ -75,13 +102,20 @@ pub fn discover(root: &ClaudeRoot) -> Result<Discovery, IntegrationError> {
 /// nested files are never surfaced as independent top-level Sessions because we
 /// only enumerate the **direct** `.jsonl` children of each workspace-key
 /// directory.
-fn collect_candidates(projects: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec<Candidate> {
+fn collect_candidates<F>(
+    projects: &Path,
+    dir_filter: &F,
+    discovery: &mut Discovery,
+) -> Vec<Candidate>
+where
+    F: Fn(&str) -> bool,
+{
     let mut candidates = Vec::new();
     let workspace_dirs = match fs::read_dir(projects) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return candidates,
         Err(error) => {
-            diagnostics.push(Diagnostic {
+            discovery.diagnostics.push(Diagnostic {
                 category: "claude_root_unavailable",
                 count: 1,
                 verbose_path: Some(projects.to_path_buf()),
@@ -93,6 +127,13 @@ fn collect_candidates(projects: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec
 
     for entry in workspace_dirs.flatten() {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str()
+            && name.starts_with('-')
+            && !dir_filter(name)
+        {
+            discovery.pruned_dirs += 1;
             continue;
         }
         let workspace_key_dir = entry.path();
@@ -113,7 +154,7 @@ fn collect_candidates(projects: &Path, diagnostics: &mut Vec<Diagnostic>) -> Vec
             let stem = match path.file_stem() {
                 Some(stem) => stem.to_os_string(),
                 None => {
-                    diagnostics.push(diagnostic_count(
+                    discovery.diagnostics.push(diagnostic_count(
                         "claude_skipped",
                         &path,
                         "transcript without filename stem",

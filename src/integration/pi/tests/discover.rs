@@ -143,7 +143,10 @@ fn duplicate_files_under_same_root_are_deduped() {
     // Symlink the same file to a second path; canonical locator is identical.
     #[cfg(unix)]
     {
-        let link = fx.session_root.join(&fx.encoded_ws()).join("dup-link.jsonl");
+        let link = fx
+            .session_root
+            .join(&fx.encoded_ws())
+            .join("dup-link.jsonl");
         std::os::unix::fs::symlink(&path, &link).unwrap();
     }
     let outcome = fx.discover_default();

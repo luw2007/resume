@@ -200,19 +200,23 @@ impl Scope {
     pub fn git_warning(&self) -> Option<&str> {
         self.git_warning.as_deref()
     }
-    /// Lossy directory-name prefilter for grouped session layouts (Pi/OMP).
+    /// Lossy directory-name prefilter for grouped session layouts
+    /// (Pi/OMP/Claude).
     ///
     /// Pi encodes a Session's Workspace into its grouping directory name as
     /// `-{absolute path with '/' -> '-'}-`; OMP uses the home-relative form
     /// (no wrapping dashes) when the Workspace is under `$HOME`, and the Pi
-    /// form otherwise. Both encodings are lossy: a literal '-' in a path
-    /// component is indistinguishable from a separator. This matcher
-    /// therefore compares trimmed lossy keys and answers "could ANY decoding
-    /// of this directory name be in Scope?" -- ambiguity only ever widens
-    /// the match, and the header-`cwd` check downstream stays authoritative
-    /// for every kept directory. The only way a Session can be lost is a
-    /// directory whose name does not encode its files' Workspace at all
-    /// (deliberate: callers skip this prefilter for custom/flat layouts).
+    /// form otherwise; Claude maps every non-alphanumeric character (not
+    /// just '/') to '-'. All encodings are lossy: a literal '-' in a path
+    /// component is indistinguishable from a separator, and Claude collapses
+    /// '.', '_', etc. as well. This matcher therefore normalizes BOTH sides
+    /// to the coarsest key (every non-ASCII-alphanumeric character -> '-')
+    /// and answers "could ANY decoding of this directory name be in Scope?"
+    /// -- ambiguity only ever widens the match, and the header-`cwd` check
+    /// downstream stays authoritative for every kept directory. The only way
+    /// a Session can be lost is a directory whose name does not encode its
+    /// files' Workspace at all (deliberate: callers skip this prefilter for
+    /// custom/flat layouts).
     pub fn may_contain_session_dir(&self, name: &str, home: Option<&Path>) -> bool {
         let dir_key = lossy_key(name);
         if dir_key.is_empty() {
@@ -241,16 +245,21 @@ fn within(distance: &Distance, edges: usize) -> bool {
         Distance::All => true,
     }
 }
-/// Lossy comparison key: '/' mapped to '-', wrapping '-' trimmed, and a
-/// leading `private-` stripped (macOS `/var`/`/tmp` -> `/private/...` alias;
+/// Lossy comparison key: every non-ASCII-alphanumeric character mapped to
+/// '-' (the coarsest of the Pi/OMP/Claude encodings -- Claude collapses
+/// '.', '_', etc., not just '/'), wrapping '-' trimmed, and a leading
+/// `private-` stripped (macOS `/var`/`/tmp` -> `/private/...` alias;
 /// recorded Workspaces and canonical Scope bases may sit on either side).
 fn lossy_key(path_like: &str) -> String {
     let key: String = path_like
         .chars()
-        .map(|c| if c == '/' { '-' } else { c })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let trimmed = key.trim_matches('-');
-    trimmed.strip_prefix("private-").unwrap_or(trimmed).to_owned()
+    trimmed
+        .strip_prefix("private-")
+        .unwrap_or(trimmed)
+        .to_owned()
 }
 
 /// Lossy keys a Scope path may appear under in a grouped directory name:
@@ -864,5 +873,17 @@ mod tests {
         assert!(scope.may_contain_session_dir("--repo-wt--", None));
         assert!(scope.may_contain_session_dir("--repo-wt-sub--", None));
         assert!(!scope.may_contain_session_dir("--repo-other--", None));
+    }
+
+    #[test]
+    fn dir_prefilter_matches_claude_non_alnum_collapse() {
+        // Claude maps every non-alphanumeric character to '-': the dir for
+        // `/home/example/ai/resume` is `-Users-luwei-will-ai-resume`.
+        let scope = scope_with("/home/example/ai/resume", None);
+        assert!(scope.may_contain_session_dir("-Users-luwei-will-ai-resume", None));
+        assert!(!scope.may_contain_session_dir("-Users-luwei-will-ai-other", None));
+        // Hidden-dir dot also collapses: `/Users/u/.ao` -> `-Users-u--ao`.
+        let hidden = scope_with("/Users/u/.ao", None);
+        assert!(hidden.may_contain_session_dir("-Users-u--ao", None));
     }
 }

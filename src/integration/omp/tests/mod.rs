@@ -82,7 +82,10 @@ impl Fixture {
     /// (absolute form; the matcher also accepts it where OMP would have
     /// used the home-relative form).
     fn encoded_ws(&self) -> String {
-        format!("-{}-", self.workspace.display().to_string().replace('/', "-"))
+        format!(
+            "-{}-",
+            self.workspace.display().to_string().replace('/', "-")
+        )
     }
 
     /// Named profile agent root: `<base>/profiles/<name>/agent`.

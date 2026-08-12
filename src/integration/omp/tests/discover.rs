@@ -116,7 +116,10 @@ fn duplicate_files_within_same_profile_root_are_deduped() {
     );
     #[cfg(unix)]
     {
-        let link = fx.default_agent_root.join(fx.encoded_ws()).join("dup-link.jsonl");
+        let link = fx
+            .default_agent_root
+            .join(fx.encoded_ws())
+            .join("dup-link.jsonl");
         std::os::unix::fs::symlink(&path, &link).unwrap();
     }
     let outcome = fx.discover(fx.roots_default());
@@ -294,7 +297,10 @@ fn down_scope_includes_descendant_workspaces() {
 #[test]
 fn malformed_middle_record_does_not_abort_discovery() {
     let fx = Fixture::new();
-    let path = fx.default_agent_root.join(fx.encoded_ws()).join("mid.jsonl");
+    let path = fx
+        .default_agent_root
+        .join(fx.encoded_ws())
+        .join("mid.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(
@@ -319,7 +325,10 @@ fn malformed_middle_record_does_not_abort_discovery() {
 #[test]
 fn truncated_tail_keeps_valid_records() {
     let fx = Fixture::new();
-    let path = fx.default_agent_root.join(fx.encoded_ws()).join("trunc.jsonl");
+    let path = fx
+        .default_agent_root
+        .join(fx.encoded_ws())
+        .join("trunc.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(

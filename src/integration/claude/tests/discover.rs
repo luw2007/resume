@@ -60,6 +60,68 @@ fn workspace_key_collision_pair_keeps_distinct_cwd() {
     // Read-only: no bytes or mtimes changed.
     snapshot::assert_unchanged(&snap_before, &snap_after);
 }
+#[test]
+fn out_of_scope_workspace_key_directory_is_pruned_without_reading_files() {
+    use crate::scope::{DefaultScope, Scope};
+
+    let home = tempfile::tempdir().unwrap();
+    let root = claude::resolve_root(None, Some(home.path())).unwrap();
+    let ws = home.path().join("workspace");
+    fs::create_dir_all(&ws).unwrap();
+
+    let encode = |path: &Path| {
+        path.display()
+            .to_string()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+    };
+    // In-scope encoded dir with a valid transcript.
+    write_transcript(
+        &default_root_dir(home.path()),
+        &encode(&ws),
+        UUID_A,
+        &standard_records(UUID_A, ws.to_str().unwrap(), "kept"),
+    );
+    // Out-of-scope encoded dir with garbage contents: pruning must skip the
+    // read entirely (a read would surface as a claude_skipped diagnostic).
+    write_transcript_bytes(
+        &default_root_dir(home.path()),
+        &encode(&home.path().join("other-ws")),
+        UUID_B,
+        b"not json at all\n",
+    );
+    // A non-dash-prefixed dir carries no encoding and is never offered to
+    // the filter, even though the filter would reject its name.
+    write_transcript(
+        &default_root_dir(home.path()),
+        "opaque",
+        "77777777-eeee-8888-ffff-999999999999",
+        &standard_records(
+            "77777777-eeee-8888-ffff-999999999999",
+            ws.to_str().unwrap(),
+            "opaque dir kept",
+        ),
+    );
+
+    let scope = Scope::new(
+        ws.canonicalize().unwrap(),
+        None,
+        DefaultScope::Exact { git_warning: None },
+    );
+    let discovery = claude::discover_with_dir_filter(&root, |name| {
+        scope.may_contain_session_dir(name, Some(home.path()))
+    })
+    .unwrap();
+
+    assert_eq!(discovery.sessions.len(), 2, "in-scope + opaque dir kept");
+    assert_eq!(discovery.pruned_dirs, 1);
+    assert!(
+        discovery.diagnostics.is_empty(),
+        "pruned dir must not be read: {:?}",
+        discovery.diagnostics
+    );
+}
 
 // ===========================================================================
 // Fixture: UUID agreement / disagreement

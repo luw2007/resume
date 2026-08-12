@@ -4,9 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added an opt-in paginated picker view: `Alt+P` on the live stream switches to a stable, oldest-first (most recently active last) view split into pages of 50, once discovery settles; `Alt+P`/`Alt+N` move between older/newer pages. The default live stream is unchanged.
+
 ### Changed
 
-- Pi and OMP discovery now prune whole grouped Workspace directories by their encoded directory name before reading any file: a dash-prefixed directory whose lossy-decoded name cannot correspond to any in-Scope Workspace is skipped entirely (`Scope::may_contain_session_dir`). The header `cwd` stays authoritative for every file that is read, and custom session roots (flat layouts) are never pruned. Measured against real corpora inside this repository's default Scope: OMP `--json` 4.85s -> 0.26s, Pi 1.72s -> 0.06s, with identical discovered session sets.
+- Pi, OMP, and Claude discovery now prune whole grouped Workspace directories by their encoded directory name before reading any file: a dash-prefixed directory whose lossy-decoded name cannot correspond to any in-Scope Workspace is skipped entirely (`Scope::may_contain_session_dir`; both sides normalized to the coarsest encoding, every non-alphanumeric character -> `-`, covering Pi/OMP's `/`-only mapping and Claude's full non-alphanumeric collapse). The header `cwd` stays authoritative for every file that is read, and custom session roots (flat layouts) are never pruned. Measured against real corpora inside this repository's default Scope: OMP `--json` 4.85s -> 0.26s, Pi 1.72s -> 0.06s, Claude 0.92s -> 0.01s, with identical discovered session sets. Codex is unaffected: its store is date-partitioned (`sessions/YYYY/MM/DD/`), carries no Workspace encoding, and already uses a bounded 64 KiB early read.
 
 ## 0.2.1 - 2026-08-11
 

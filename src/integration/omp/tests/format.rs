@@ -405,7 +405,12 @@ fn activity_time_prefers_message_then_header_then_mtime() {
 
     // No header timestamp → mtime.
     let header_no_ts = json!({ "type": "session", "id": "nts", "cwd": fx.workspace });
-    let path3 = fx.write(&fx.default_agent_root, &fx.encoded_ws(), "nts.jsonl", &[header_no_ts]);
+    let path3 = fx.write(
+        &fx.default_agent_root,
+        &fx.encoded_ws(),
+        "nts.jsonl",
+        &[header_no_ts],
+    );
     let mtime = fs::metadata(&path3).unwrap().modified().unwrap();
     let result3 = crate::preview::jsonl::read_file(&path3, &bounds).unwrap();
     let parsed3 = omp::extract_session_pub(&path3, &result3, Some(mtime)).unwrap();
