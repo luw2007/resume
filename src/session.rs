@@ -112,27 +112,19 @@ pub enum IntegrationError {
 }
 
 pub fn compare_sessions(left: &Session, right: &Session) -> Ordering {
-    activity_rank(&right.activity)
-        .cmp(&activity_rank(&left.activity))
-        .then_with(|| activity_time(&right.activity).cmp(&activity_time(&left.activity)))
+    right
+        .updated_at
+        .map(|updated_at| updated_at.at)
+        .cmp(&left.updated_at.map(|updated_at| updated_at.at))
         .then_with(|| left.key.cmp(&right.key))
 }
 
-fn activity_rank(activity: &ActivityStatus) -> u8 {
-    match activity {
-        ActivityStatus::Active { .. } => 2,
-        ActivityStatus::Inactive { .. } => 1,
-        ActivityStatus::Unknown => 0,
-    }
-}
-
-fn activity_time(activity: &ActivityStatus) -> Option<SystemTime> {
-    match activity {
-        ActivityStatus::Active { observed_at } | ActivityStatus::Inactive { observed_at } => {
-            Some(*observed_at)
-        }
-        ActivityStatus::Unknown => None,
-    }
+/// Ascending sort key for the interactive picker's paginated view (oldest
+/// first, most recently active last, unknown-time first), mirroring
+/// `compare_sessions` reversed. `Option<SystemTime>`'s natural `Ord` already
+/// puts `None` before any `Some`, matching that ordering directly.
+pub(crate) fn sort_rank(updated_at: Option<UpdateTime>) -> Option<SystemTime> {
+    updated_at.map(|update| update.at)
 }
 
 pub fn sort_sessions(sessions: &mut [Session]) {
@@ -166,13 +158,20 @@ mod tests {
     }
 
     #[test]
-    fn final_order_is_activity_descending_unknown_last_then_key() {
-        fn session(key_name: &str, activity: ActivityStatus) -> Session {
+    fn final_order_is_updated_at_descending_unknown_last_then_key() {
+        fn session(
+            key_name: &str,
+            updated_at: Option<SystemTime>,
+            activity: ActivityStatus,
+        ) -> Session {
             Session {
                 key: key("pi", "/root", None, key_name),
                 resumable_id: key_name.into(),
                 title: None,
-                updated_at: None,
+                updated_at: updated_at.map(|at| UpdateTime {
+                    at,
+                    source: UpdateTimeSource::Native,
+                }),
                 workspace: WorkspaceEvidence::Unknown,
                 support: SupportStatus::Supported,
                 activity,
@@ -182,10 +181,15 @@ mod tests {
         let old = SystemTime::UNIX_EPOCH;
         let new = old + std::time::Duration::from_secs(1);
         let mut sessions = vec![
-            session("z", ActivityStatus::Unknown),
-            session("b", ActivityStatus::Active { observed_at: old }),
-            session("a", ActivityStatus::Active { observed_at: new }),
-            session("a", ActivityStatus::Inactive { observed_at: new }),
+            session("z", None, ActivityStatus::Active { observed_at: new }),
+            session("b", Some(old), ActivityStatus::Active { observed_at: old }),
+            session("a", Some(new), ActivityStatus::Unknown),
+            session(
+                "c",
+                Some(old),
+                ActivityStatus::Inactive { observed_at: new },
+            ),
+            session("y", None, ActivityStatus::Unknown),
         ];
         sort_sessions(&mut sessions);
         assert_eq!(
@@ -193,7 +197,7 @@ mod tests {
                 .iter()
                 .map(|session| session.resumable_id.clone())
                 .collect::<Vec<_>>(),
-            ["a", "b", "a", "z"].map(OsString::from)
+            ["a", "b", "c", "y", "z"].map(OsString::from)
         );
     }
 

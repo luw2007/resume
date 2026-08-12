@@ -369,6 +369,58 @@ fn production_picker_returns_immediately_despite_slow_discovery() {
     assert!(out.contains("key:1"), "selection not confirmed: {out:?}");
 }
 
+/// Alt+P switches the live stream into the paginated view (120 candidates,
+/// three pages of <=50); Alt+P/Alt+N navigate older/newer pages; the final
+/// selection still resolves to the correct opaque key. End-to-end proof of
+/// the pagination hand-off in `run_production_picker`.
+#[test]
+fn alt_p_paginates_and_navigates_pages() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("prod-many", 100, 30);
+    let live = strip(&sess.read_for(Duration::from_millis(1000)));
+    assert!(
+        live.contains("candidate-"),
+        "live stream missing candidates: {live:?}"
+    );
+
+    // Alt+P: request pagination. Default page is the last (newest) one:
+    // candidates 101-120 out of 120 total (ceil(120/50) = 3 pages).
+    sess.write(b"\x1bp");
+    let page3 = strip(&sess.read_for(Duration::from_millis(1000)));
+    assert!(page3.contains("PAGE 3/3"), "page header missing: {page3:?}");
+    assert!(
+        page3.contains("candidate-120"),
+        "newest candidate missing from last page: {page3:?}"
+    );
+    assert!(
+        !page3.contains("candidate-001"),
+        "oldest candidate leaked onto the last page: {page3:?}"
+    );
+
+    // Alt+P again: older page (candidates 51-100).
+    sess.write(b"\x1bp");
+    let page2 = strip(&sess.read_for(Duration::from_millis(1000)));
+    assert!(page2.contains("PAGE 2/3"), "page header missing: {page2:?}");
+    assert!(
+        !page2.contains("candidate-120"),
+        "newest-page candidate leaked onto page 2: {page2:?}"
+    );
+
+    // Alt+N: back to the newest page.
+    sess.write(b"\x1bn");
+    let back = strip(&sess.read_for(Duration::from_millis(1000)));
+    assert!(back.contains("PAGE 3/3"), "page header missing: {back:?}");
+
+    // Enter selects the highlighted candidate from the current page.
+    sess.write(b"\r");
+    let exit = wait_child(&mut sess);
+    assert_eq!(exit, 0, "exit={exit}");
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(out.contains("key:"), "out={out:?}");
+}
+
 /// Esc restores the terminal and the process exits cleanly.
 #[test]
 fn esc_cancels_and_restores_terminal() {

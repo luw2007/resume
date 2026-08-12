@@ -758,6 +758,7 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         display,
         search_text,
         preview,
+        rank: crate::session::sort_rank(session.updated_at),
     }
 }
 

@@ -7,6 +7,9 @@
 //!                                  sender stays open past selection, to
 //!                                  reproduce/guard against the picker
 //!                                  blocking its return on slow discovery
+//!   resume-spike prod-many       – production picker fed 120 candidates,
+//!                                  well over one page, to exercise Alt+P
+//!                                  pagination
 //!   resume-spike preflight       – run preflight only, print result, exit
 //!   resume-spike empty           – zero candidates
 //!   resume-spike control-chars   – candidates carrying ANSI/OSC/bidi attacks
@@ -14,7 +17,7 @@
 //! The chosen opaque key is printed to stdout on selection as `key:<N>`.
 
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use resume::config::{PreviewMode, PreviewPosition};
 use resume::picker::{
@@ -37,6 +40,7 @@ fn main() -> ExitCode {
             print_outcome(outcome)
         }
         "prod-slow" => print_outcome(run_prod_slow()),
+        "prod-many" => print_outcome(run_prod_many()),
         "raw" => run(demo_candidates(), true),
         "empty" => run(Vec::new(), false),
         "control-chars" => run(control_attack_candidates(), false),
@@ -80,11 +84,36 @@ fn run_prod_slow() -> PickerOutcome {
             display: "pi  slow-candidate".into(),
             search_text: "pi  slow-candidate".into(),
             preview: "Session 1\nstill discovering other agents".into(),
+            rank: None,
         });
         std::thread::sleep(SLOW_DISCOVERY_HOLD);
         // `tx` drops here, unblocking the picker's internal producer thread
         // if it is still waiting on `recv()`. The picker itself must not
         // have waited for this.
+    });
+    run_production_picker(rx, PreviewMode::Hidden, PreviewPosition::Auto)
+}
+
+/// Streams `PAGE_MANY_TOTAL` candidates (well over one page) into
+/// `run_production_picker`, then closes the sender immediately — modeling
+/// discovery that has already finished by the time the picker is driven.
+/// Exercises the Alt+P pagination hand-off end to end.
+const PAGE_MANY_TOTAL: usize = 120;
+
+fn run_prod_many() -> PickerOutcome {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PickerCandidate>(PAGE_MANY_TOTAL);
+    std::thread::spawn(move || {
+        for i in 1..=PAGE_MANY_TOTAL {
+            let _ = tx.send(PickerCandidate {
+                key: CandidateKey(i as u64),
+                display: format!("candidate-{i:03}"),
+                search_text: format!("candidate-{i:03}"),
+                preview: format!("Session {i}"),
+                rank: Some(UNIX_EPOCH + Duration::from_secs(i as u64)),
+            });
+        }
+        // `tx` drops here once every candidate is sent, closing the channel
+        // so the picker's producer thread can settle instantly on Alt+P.
     });
     run_production_picker(rx, PreviewMode::Hidden, PreviewPosition::Auto)
 }

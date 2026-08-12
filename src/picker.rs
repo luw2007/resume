@@ -28,6 +28,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::config::{PreviewMode, PreviewPosition};
 
@@ -43,6 +44,11 @@ use skim::tuikit::key::Key as SkimKey;
 /// picker start").
 pub const MIN_TERM_WIDTH: usize = 60;
 pub const MIN_TERM_HEIGHT: usize = 10;
+
+/// Maximum candidates rendered per page once the live view switches into
+/// paginated mode (Alt+P after the live stream). Every discovered session is
+/// retained in memory; only the per-page render is capped.
+pub const PAGE_SIZE: usize = 50;
 
 /// An opaque, content-independent identity for a spike candidate.
 ///
@@ -287,17 +293,20 @@ fn run_skim_panic_safe_streaming(rx: SkimItemReceiver) -> Option<SkimOutput> {
 }
 
 fn run_skim_panic_safe(rx: SkimItemReceiver) -> Option<SkimOutput> {
-    let options = build_options();
-    // Skim's run_with calls `Term::with_options(...).unwrap()`, which panics if
-    // the TUI cannot init (e.g. /dev/tty missing despite our preflight, or a
-    // panic inside rendering). We catch the unwind so tuikit's drop impl still
-    // restores the terminal, then classify the failure instead of aborting.
-    let result = panic::catch_unwind(AssertUnwindSafe(|| Skim::run_with(&options, Some(rx))));
-    // tuikit's Term::Drop restores the terminal during unwind; here we only
-    // need to signal the caller that the run failed. We cannot fabricate a
-    // real SkimOutput (the Event type is private), so we return None on panic
-    // and let `classify` map it to InternalError.
-    result.ok().flatten()
+    run_skim_with_options(&build_options(), rx)
+}
+
+/// Run Skim behind a panic guard, shared by the spike, production, and
+/// paginated call sites. `Term::with_options` panics if the TUI cannot init
+/// (e.g. /dev/tty missing despite preflight, or a panic inside rendering);
+/// tuikit's `Term::Drop` still restores the terminal during the unwind, so we
+/// only need to signal the caller that the run failed. A real `SkimOutput`
+/// cannot be fabricated on panic (the `Event` type is private), so `None`
+/// maps to `InternalError` in `classify`.
+fn run_skim_with_options(options: &SkimOptions, rx: SkimItemReceiver) -> Option<SkimOutput> {
+    panic::catch_unwind(AssertUnwindSafe(|| Skim::run_with(options, Some(rx))))
+        .ok()
+        .flatten()
 }
 
 fn classify(outcome: Option<SkimOutput>) -> PickerOutcome {
@@ -343,6 +352,44 @@ fn is_interrupt(key: &SkimKey) -> bool {
     matches!(key, SkimKey::Ctrl('c'))
 }
 
+/// Internal control-flow result for the live streaming session: either a
+/// terminal outcome to hand back to the caller, or a request (Alt+P) to
+/// switch into the paginated view once discovery settles.
+enum LiveExit {
+    Terminal(PickerOutcome),
+    Paginate,
+}
+
+fn classify_live(outcome: Option<SkimOutput>) -> LiveExit {
+    if let Some(o) = &outcome {
+        if !o.is_abort && matches!(o.final_key, SkimKey::Alt('p')) {
+            return LiveExit::Paginate;
+        }
+    }
+    LiveExit::Terminal(classify(outcome))
+}
+
+/// Internal control-flow result for one paginated page: either a terminal
+/// outcome, or a request to move to the older/newer page.
+enum PageExit {
+    Terminal(PickerOutcome),
+    Older,
+    Newer,
+}
+
+fn classify_page(outcome: Option<SkimOutput>) -> PageExit {
+    if let Some(o) = &outcome {
+        if !o.is_abort {
+            match o.final_key {
+                SkimKey::Alt('p') => return PageExit::Older,
+                SkimKey::Alt('n') => return PageExit::Newer,
+                _ => {}
+            }
+        }
+    }
+    PageExit::Terminal(classify(outcome))
+}
+
 /// Immutable production candidate. Display text is never identity or launch state.
 #[derive(Clone, Debug)]
 pub struct PickerCandidate {
@@ -350,9 +397,16 @@ pub struct PickerCandidate {
     pub display: String,
     pub search_text: String,
     pub preview: String,
+    /// Ascending ordering key for the paginated view (oldest first, most
+    /// recently active last — the bottom of the final page). Mirrors
+    /// `session::compare_sessions`, reversed.
+    pub rank: Option<SystemTime>,
 }
 
-/// Production bounded streaming picker, preserving the Step 2 interaction contract.
+/// Production bounded streaming picker, preserving the Step 2 interaction
+/// contract. Once the live stream ends in an Alt+P request, transparently
+/// hands off to [`run_paginated_picker`] over every candidate seen so far
+/// (including any still arriving from discovery).
 pub fn run_production_picker(
     candidates: std::sync::mpsc::Receiver<PickerCandidate>,
     preview_mode: PreviewMode,
@@ -368,37 +422,56 @@ pub fn run_production_picker(
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(crate::runtime::CHANNEL_CAPACITY);
     let producer_store = store.clone();
-    std::thread::spawn(move || {
+    let producer = std::thread::spawn(move || {
+        let mut seen = Vec::new();
         while let Ok(candidate) = candidates.recv() {
-            producer_store.insert(candidate.key.clone(), candidate.preview);
+            producer_store.insert(candidate.key.clone(), candidate.preview.clone());
+            // Cloned rather than moved: `candidate` is also buffered below so
+            // it survives for a possible later pagination hand-off.
             let item = Arc::new(SpikeItem {
-                key: candidate.key,
-                display: candidate.display,
-                search_text: candidate.search_text,
+                key: candidate.key.clone(),
+                display: candidate.display.clone(),
+                search_text: candidate.search_text.clone(),
                 preview_store: producer_store.clone(),
             }) as Arc<dyn SkimItem>;
-            if tx.send(item).is_err() {
-                break;
+            let forwarded = tx.send(item).is_ok();
+            seen.push(candidate);
+            if !forwarded {
+                return (seen, Some(candidates));
             }
         }
+        (seen, None)
     });
     let options = build_production_options(preview_mode, preview_position);
-    let result = panic::catch_unwind(AssertUnwindSafe(|| Skim::run_with(&options, Some(rx))))
-        .ok()
-        .flatten();
-    drop(store);
-    // Deliberately not joined: the producer thread blocks on
-    // `candidates.recv()`, which only unblocks once every discovery-worker
-    // sender upstream (in `app::run_interactive`) drops — independent of
-    // whether Skim already returned a selection. Joining here would make
-    // Resume wait for the slowest discovery worker instead of the user's
-    // keystroke. The caller already cancels discovery and reaps its workers
-    // on a budget after this function returns, which drops the remaining
-    // senders and lets this thread finish on its own.
-    classify(result)
+    let result = run_skim_with_options(&options, rx);
+    match classify_live(result) {
+        // Deliberately not joined here: the producer thread blocks on
+        // `candidates.recv()`, which only unblocks once every discovery-worker
+        // sender upstream (in `app::run_interactive`) drops — independent of
+        // whether Skim already returned a selection. Joining would make
+        // Resume wait for the slowest discovery worker instead of the user's
+        // keystroke. The caller already cancels discovery and reaps its
+        // workers on a budget after this function returns, which drops the
+        // remaining senders and lets this thread finish on its own.
+        LiveExit::Terminal(outcome) => outcome,
+        // Alt+P is an explicit user request to see the rest of the results,
+        // so — unlike the path above — we do join and drain the remainder,
+        // effectively waiting for discovery to finish.
+        LiveExit::Paginate => {
+            let (mut seen, remaining) = producer.join().unwrap_or_default();
+            if let Some(remaining) = remaining {
+                while let Ok(candidate) = remaining.recv() {
+                    store.insert(candidate.key.clone(), candidate.preview.clone());
+                    seen.push(candidate);
+                }
+            }
+            seen.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
+            run_paginated_picker(&store, &seen, preview_mode, preview_position)
+        }
+    }
 }
 
-fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> SkimOptions {
+fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str, &'static str) {
     let position = match position {
         PreviewPosition::Right => "right",
         PreviewPosition::Bottom => "down",
@@ -415,6 +488,11 @@ fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> Ski
     } else {
         ""
     };
+    (position, visibility)
+}
+
+fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> SkimOptions {
+    let (position, visibility) = preview_layout(mode, position);
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
@@ -426,9 +504,102 @@ fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> Ski
             String::from("ctrl-r:ignore"),
             String::from("enter:accept"),
             String::from("esc:abort"),
+            // Alt+P requests the paginated view (see `run_production_picker`).
+            String::from("alt-p:accept"),
         ])
         .build()
         .expect("hardcoded production skim options are valid")
+}
+
+/// Run the paginated view once the live stream ends with a pagination
+/// request: `candidates` is the full, already-sorted (ascending) buffer.
+/// Starts on the last page (most recently active sessions) and relaunches a
+/// fresh, small Skim instance for every page turn (Alt+P older / Alt+N
+/// newer), since Skim has no API to reorder or replace an already-open list.
+fn run_paginated_picker(
+    store: &Arc<PreviewStore>,
+    candidates: &[PickerCandidate],
+    preview_mode: PreviewMode,
+    preview_position: PreviewPosition,
+) -> PickerOutcome {
+    if candidates.is_empty() {
+        return PickerOutcome::Cancelled;
+    }
+    let total_pages = candidates.len().div_ceil(PAGE_SIZE);
+    let mut page_index = total_pages - 1;
+    loop {
+        let start = page_index * PAGE_SIZE;
+        let end = (start + PAGE_SIZE).min(candidates.len());
+        match run_single_page(
+            store,
+            &candidates[start..end],
+            page_index,
+            total_pages,
+            preview_mode,
+            preview_position,
+        ) {
+            PageExit::Older => page_index -= 1,
+            PageExit::Newer => page_index += 1,
+            PageExit::Terminal(outcome) => return outcome,
+        }
+    }
+}
+
+fn run_single_page(
+    store: &Arc<PreviewStore>,
+    page: &[PickerCandidate],
+    page_index: usize,
+    total_pages: usize,
+    preview_mode: PreviewMode,
+    preview_position: PreviewPosition,
+) -> PageExit {
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(page.len().max(1));
+    for candidate in page {
+        let item = Arc::new(SpikeItem {
+            key: candidate.key.clone(),
+            display: candidate.display.clone(),
+            search_text: candidate.search_text.clone(),
+            preview_store: store.clone(),
+        }) as Arc<dyn SkimItem>;
+        let _ = tx.send(item);
+    }
+    drop(tx);
+    let options = build_paginated_options(page_index, total_pages, preview_mode, preview_position);
+    classify_page(run_skim_with_options(&options, rx))
+}
+
+fn build_paginated_options(
+    page_index: usize,
+    total_pages: usize,
+    mode: PreviewMode,
+    position: PreviewPosition,
+) -> SkimOptions {
+    let (position, visibility) = preview_layout(mode, position);
+    let mut binds = vec![
+        String::from("ctrl-o:toggle-preview"),
+        String::from("ctrl-r:ignore"),
+        String::from("enter:accept"),
+        String::from("esc:abort"),
+    ];
+    if page_index > 0 {
+        binds.push(String::from("alt-p:accept")); // older page
+    }
+    if page_index + 1 < total_pages {
+        binds.push(String::from("alt-n:accept")); // newer page
+    }
+    SkimOptionsBuilder::default()
+        .height(String::from("100%"))
+        .multi(false)
+        .header(Some(format!(
+            "PAGE {}/{} (alt-p older / alt-n newer)  UPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            page_index + 1,
+            total_pages
+        )))
+        .preview(Some(String::new()))
+        .preview_window(format!("{position}:60%{visibility}"))
+        .bind(binds)
+        .build()
+        .expect("hardcoded paginated skim options are valid")
 }
 
 // ---------------------------------------------------------------------------
