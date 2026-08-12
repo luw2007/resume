@@ -29,7 +29,7 @@ resume --since 2026-01-01      # only Sessions active on or after a date
 resume --since all             # no time filtering (default)
 ```
 
-The interactive picker receives candidates asynchronously. Late candidates can change Skim's visible rank order, but selection remains attached to an opaque Session identity rather than a row number. Do not rely on exact global display order while loading.
+The interactive picker opens after discovery completes. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a row number.
 
 ## Scope and Directory Distance
 
@@ -72,9 +72,10 @@ The Skim picker starts with Preview hidden unless config says otherwise.
 |---|---|
 | `Ctrl-O` | Toggle Preview |
 | `Ctrl-R` | Intentionally ignored |
+| `Alt-P` / `Alt-N` | Move to the older / newer page in the current tab |
+| `Alt-Left` / `Alt-Right` | Move to the previous / next tab, wrapping and opening its newest page |
 | `Esc` | Cancel without resuming |
 | `Ctrl-C` | Interrupt (exit 130) |
-
 Preview uses a safe dual-section fallback: normalized and raw-but-terminal-safe sections are shown together. **Ctrl-R does not reload, refresh, or switch views live.** A channel-fed Skim `reload` can execute its default filesystem command, so `resume` explicitly binds Ctrl-R to `ignore` to prevent an accidental filesystem listing. Preview currently presents the Session metadata/title available to the assembled picker; integration parsers and text-safety foundations have broader user-input coverage, but this README does not claim a full native transcript viewer.
 
 ## List and JSON output
