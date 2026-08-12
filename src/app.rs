@@ -6,9 +6,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -242,18 +243,43 @@ fn run_interactive(
     }
     state.errors.lock().unwrap().extend(ctx.diagnostics.clone());
     let cancel = CancelToken::new();
-    let records: Arc<Mutex<Vec<CandidateRecord>>> = Arc::new(Mutex::new(Vec::new()));
-    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(String, std::time::Duration)>();
+
+    let next_key = Arc::new(AtomicU64::new(1));
+    let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> = Arc::new(Mutex::new(HashMap::new()));
+    let candidates: Arc<Mutex<Vec<PickerCandidate>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Codex's discovery cost is dominated by per-file JSONL parsing and, on
+    // a large real corpus, is not bounded the way the directory-pruned
+    // pi/omp/claude scans are (observed: sub-second for those three,
+    // single-digit to tens of seconds for Codex). When at least one other
+    // agent is configured, Codex discovers in the background instead of
+    // holding the picker closed: the picker opens on the other agents'
+    // results, and Codex's Sessions merge in on the next tab switch or
+    // page turn once its scan finishes (`picker::run_tabbed_picker`
+    // re-reads the shared candidate list on every navigation). When Codex
+    // is the *only* configured agent there is nothing else to show while
+    // waiting, so it stays synchronous like every other agent.
+    let codex_async =
+        options.agents.iter().any(|a| a == codex::AGENT) && options.agents.len() > 1;
+    let sync_agents: Vec<&String> = options
+        .agents
+        .iter()
+        .filter(|a| !codex_async || a.as_str() != codex::AGENT)
+        .collect();
+
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(String, Duration)>();
     let mut handles = Vec::new();
-    for agent in &options.agents {
+    for agent in sync_agents {
         let agent = agent.clone();
         let scope = scope.clone();
         let ctx = ctx.clone();
         let state = state.clone();
-        let records = records.clone();
         let cancel = cancel.clone();
         let since_cutoff = options.since_cutoff;
         let progress_tx = progress_tx.clone();
+        let next_key = next_key.clone();
+        let map = map.clone();
+        let candidates = candidates.clone();
         handles.push(thread::spawn(move || {
             let start = std::time::Instant::now();
             let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
@@ -264,7 +290,7 @@ fn run_interactive(
                 .sessions
                 .fetch_add(result.records.len(), Ordering::SeqCst);
             state.errors.lock().unwrap().extend(result.errors);
-            records.lock().unwrap().extend(result.records);
+            merge_records(result.records, &next_key, &map, &candidates);
             let _ = progress_tx.send((agent, start.elapsed()));
         }));
     }
@@ -279,18 +305,58 @@ fn run_interactive(
     for handle in handles {
         let _ = handle.join();
     }
-    let records = Arc::try_unwrap(records).ok().unwrap().into_inner().unwrap();
 
-    let mut map: HashMap<CandidateKey, CandidateRecord> = HashMap::with_capacity(records.len());
-    let mut candidates = Vec::with_capacity(records.len());
-    for (index, record) in records.into_iter().enumerate() {
-        let key = CandidateKey(index as u64 + 1);
-        candidates.push(picker_candidate(key.clone(), &record.session));
-        map.insert(key, record);
+    let codex_pending = Arc::new(AtomicBool::new(codex_async));
+    let (codex_progress_tx, codex_progress_rx) = std::sync::mpsc::channel::<Duration>();
+    if codex_async {
+        let scope = scope.clone();
+        let ctx = ctx.clone();
+        let state = state.clone();
+        let cancel = cancel.clone();
+        let since_cutoff = options.since_cutoff;
+        let next_key = next_key.clone();
+        let map = map.clone();
+        let candidates = candidates.clone();
+        let codex_pending = codex_pending.clone();
+        // Detached on purpose: never joined before the picker opens (that
+        // would reintroduce the exact block this split avoids), and never
+        // joined after either -- once the user has an outcome the process
+        // exits shortly after, which reaps this thread regardless.
+        thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let result = discover_agent(codex::AGENT, &scope, &ctx, since_cutoff, &cancel);
+            if result.integration_ok {
+                state.successful_integrations.fetch_add(1, Ordering::SeqCst);
+            }
+            state
+                .sessions
+                .fetch_add(result.records.len(), Ordering::SeqCst);
+            state.errors.lock().unwrap().extend(result.errors);
+            merge_records(result.records, &next_key, &map, &candidates);
+            codex_pending.store(false, Ordering::SeqCst);
+            let _ = codex_progress_tx.send(start.elapsed());
+        });
     }
 
-    let outcome =
-        crate::picker::run_tabbed_picker(candidates, options.preview, options.preview_position);
+    let background = codex_async.then(|| crate::picker::BackgroundAgent {
+        label: codex::AGENT.to_string(),
+        pending: codex_pending,
+    });
+    let outcome = crate::picker::run_tabbed_picker(
+        candidates,
+        options.preview,
+        options.preview_position,
+        background,
+    );
+    // Codex's own progress line cannot be printed while it might race
+    // Skim's raw-mode rendering, so it is buffered and only flushed once
+    // the picker has released the terminal. A still-running background
+    // scan (the user acted before Codex finished) prints nothing here --
+    // there is no result to time yet, and waiting for one would
+    // reintroduce exactly the blocking this design avoids.
+    if let Ok(elapsed) = codex_progress_rx.try_recv() {
+        eprintln!("resume: codex scanned ({elapsed:.2?})");
+    }
     print_diagnostics(&state, options.verbose);
     match outcome {
         PickerOutcome::Cancelled => {
@@ -315,13 +381,42 @@ fn run_interactive(
             EXIT_ERROR
         }
         PickerOutcome::Selected(key) => {
-            let Some(record) = map.remove(&key) else {
+            let Some(record) = map.lock().unwrap().remove(&key) else {
                 eprintln!("resume: selected Session disappeared");
                 return EXIT_ERROR;
             };
             resume_selected(record, options)
         }
     }
+}
+
+/// Fold freshly discovered records into the shared, live candidate list:
+/// assign each an opaque key, insert it into `map` (resolvable by
+/// `PickerOutcome::Selected`) before it is ever visible in `candidates`
+/// (picked up by `picker::run_tabbed_picker` on its next navigation), then
+/// re-sort `candidates` once for the whole batch. Called once per sync
+/// agent batch and once when the background Codex scan finishes.
+fn merge_records(
+    records: Vec<CandidateRecord>,
+    next_key: &AtomicU64,
+    map: &Mutex<HashMap<CandidateKey, CandidateRecord>>,
+    candidates: &Mutex<Vec<PickerCandidate>>,
+) {
+    if records.is_empty() {
+        return;
+    }
+    let mut new_candidates = Vec::with_capacity(records.len());
+    {
+        let mut map = map.lock().unwrap();
+        for record in records {
+            let key = CandidateKey(next_key.fetch_add(1, Ordering::SeqCst));
+            new_candidates.push(picker_candidate(key.clone(), &record.session));
+            map.insert(key, record);
+        }
+    }
+    let mut candidates = candidates.lock().unwrap();
+    candidates.extend(new_candidates);
+    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
 }
 
 fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {

@@ -298,20 +298,36 @@ PICKER KEYS
     Alt-Left    Switch to the previous tab (wraps).
     Alt-Right   Switch to the next tab (wraps).
 
-    The Picker opens once every configured agent has finished discovery
-    (see PROGRESS below), with an `All` tab plus one tab per discovered
-    agent. Each tab holds every Session for its scope, sorted oldest-first
-    with the most recently updated Session last, split into pages of 50;
-    the Picker opens on the newest page of the `All` tab. Paging or
-    switching tabs relaunches a small, fresh view over the target
-    tab/page; it never reorders or drops a Session already discovered.
+    The Picker opens once Pi, OMP, and Claude have all finished discovery
+    (see PROGRESS below), with an `All` tab plus one tab per agent that
+    has produced a Session so far. Each tab holds every Session for its
+    scope, sorted oldest-first with the most recently updated Session
+    last, split into pages of 50; the Picker opens on the newest page of
+    the `All` tab. Paging or switching tabs relaunches a small, fresh view
+    over the target tab/page; it never reorders or drops a Session
+    already discovered.
+
+    When Codex is configured alongside at least one other agent, it
+    discovers in the background instead of holding the Picker closed: its
+    per-file scan cost is not bounded the way the other agents' directory-
+    pruned scans are. A `(codex still scanning)` hint appears in the
+    header while it runs; its Sessions merge in and a `codex` tab appears
+    on the next tab switch or page turn once it finishes. When Codex is
+    the only configured agent it is discovered synchronously like every
+    other agent, since there is nothing else to show while waiting.
 
 PROGRESS
-    Before the Picker opens, resume waits for every configured agent's
-    discovery to finish and prints one line per agent to stderr as it
-    completes, in actual completion order:
+    Before the Picker opens, resume waits for Pi, OMP, and Claude (every
+    configured agent, if none of them is Codex) and prints one line per
+    agent to stderr as it completes, in actual completion order:
 
         resume: <agent> scanned (<elapsed>)
+
+    When Codex discovers in the background, its own line prints the same
+    way once it finishes -- but only after the Picker has released the
+    terminal (on exit), so it never interleaves with the Picker's
+    rendering. If Codex is still scanning when the Picker exits, no line
+    prints for it.
 
     This is diagnostic output, not a stable format.
 

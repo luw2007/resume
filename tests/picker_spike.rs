@@ -368,18 +368,18 @@ fn tabbed_picker_paginates_and_switches_tabs() {
         "omp leaked onto All page 1: {all_page1:?}"
     );
 
-    // Alt+Left from "All": wraps to the last tab, "omp" (single page).
-    sess.write(b"\x1b\x1b[D");
+    // macOS terminals emit the xterm modifier form for Option+Left.
+    sess.write(b"\x1b[1;3D");
     let omp_tab = wait_for(&mut sess, "omp-candidate-000", Duration::from_millis(4000));
     assert!(
         omp_tab.contains("[omp]") && omp_tab.contains("PAGE 1/1"),
         "expected omp tab page 1/1: {omp_tab:?}"
     );
 
-    // Alt+Right twice: omp -> All -> pi, landing on pi's last page (2/2).
-    sess.write(b"\x1b\x1b[C");
+    // macOS terminals emit the xterm modifier form for Option+Right.
+    sess.write(b"\x1b[1;3C");
     sess.read_for(Duration::from_millis(800));
-    sess.write(b"\x1b\x1b[C");
+    sess.write(b"\x1b[1;3C");
     let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
         pi_tab.contains("[pi]") && pi_tab.contains("PAGE 2/2"),
@@ -391,6 +391,63 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     );
 
     // Enter selects the highlighted candidate from the current view.
+    sess.write(b"\r");
+    let exit = wait_child(&mut sess);
+    assert_eq!(exit, 0, "exit={exit}");
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(out.contains("key:"), "out={out:?}");
+}
+
+/// `run_tabbed_picker` with a [`resume::picker::BackgroundAgent`] (the path
+/// `app::run_interactive` uses when Codex is configured alongside other
+/// agents): the picker opens immediately on the agents that are already
+/// ready, showing a "still scanning" header hint, and never blocks on the
+/// simulated slow "codex" background thread. Once that thread finishes
+/// (merging into the same shared candidate list `run_tabbed_picker` reads
+/// on every navigation), the next tab switch picks up its Sessions and the
+/// hint clears -- no relaunch of the whole picker, no re-invocation needed.
+#[test]
+fn tabbed_picker_opens_immediately_while_background_agent_scans() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed-async", 100, 30);
+
+    // Well before the simulated 900ms Codex delay elapses, the picker must
+    // already be open and showing the ready agents' data with a pending
+    // hint -- proving it did not wait for the background agent.
+    let early = wait_for(&mut sess, "omp-candidate-002", Duration::from_millis(500));
+    assert!(
+        early.contains("[All]") && early.contains("codex still scanning"),
+        "expected an immediately open All tab with a pending hint: {early:?}"
+    );
+    assert!(
+        !early.contains("codex-candidate"),
+        "codex candidates appeared before its simulated scan finished: {early:?}"
+    );
+
+    // Once the background scan finishes, its Sessions merge into the
+    // shared candidate list; the *next* navigation picks them up and the
+    // pending hint clears.
+    std::thread::sleep(Duration::from_millis(700));
+    sess.write(b"\x1b[1;3C"); // Alt+Right: All -> pi
+    let pi_tab = wait_for(&mut sess, "[pi]", Duration::from_millis(2000));
+    assert!(pi_tab.contains("[pi]"), "expected the pi tab: {pi_tab:?}");
+    sess.write(b"\x1b[1;3C"); // pi -> omp
+    let omp_tab = wait_for(&mut sess, "[omp]", Duration::from_millis(2000));
+    assert!(omp_tab.contains("[omp]"), "expected the omp tab: {omp_tab:?}");
+    sess.write(b"\x1b[1;3C"); // omp -> codex
+    let codex_tab = wait_for(&mut sess, "codex-candidate-004", Duration::from_millis(4000));
+    assert!(
+        codex_tab.contains("[codex]") && !codex_tab.contains("still scanning"),
+        "expected the codex tab with its pending hint cleared: {codex_tab:?}"
+    );
+    assert!(
+        !codex_tab.contains("pi-candidate") && !codex_tab.contains("omp-candidate"),
+        "other agents leaked onto the codex tab: {codex_tab:?}"
+    );
+
+    // Enter still resolves the correct opaque key from a background-agent tab.
     sess.write(b"\r");
     let exit = wait_child(&mut sess);
     assert_eq!(exit, 0, "exit={exit}");

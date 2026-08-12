@@ -27,8 +27,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use crate::config::{PreviewMode, PreviewPosition};
 
@@ -391,55 +392,95 @@ pub struct PickerCandidate {
     pub agent: String,
 }
 
-/// Run the full production picker once every agent has finished discovery
-/// (see `app::run_interactive`): an "All" tab plus one tab per distinct
+/// A discovery worker still running when the picker opens (see
+/// `app::run_interactive`): its `label` is shown in the header until
+/// `pending` clears. Generic over which agent it names — `picker` has no
+/// agent-specific knowledge, only a name and a flag.
+pub struct BackgroundAgent {
+    pub label: String,
+    pub pending: Arc<AtomicBool>,
+}
+
+/// Run the full production picker: an "All" tab plus one tab per distinct
 /// agent present in `candidates`, each sorted ascending by `rank` and
 /// paginated at [`PAGE_SIZE`]. Starts on the "All" tab's last (newest) page.
 /// `Alt+P`/`Alt+N` move between pages of the current tab; `Alt+Left`/
 /// `Alt+Right` switch tabs (wrapping), resetting to that tab's last page.
 /// Every page turn or tab switch relaunches a fresh, small Skim instance,
-/// since Skim has no API to reorder or replace an already-open list —
-/// there is no live-streaming phase to avoid this in: discovery has already
-/// fully completed by the time this is called.
+/// since Skim has no API to reorder or replace an already-open list.
+///
+/// `candidates` is shared and may keep growing after this call starts: a
+/// `background` agent (see [`BackgroundAgent`]) can still be discovering
+/// when the picker opens (`app::run_interactive` uses this for Codex, whose
+/// per-file JSONL parsing cost is not bounded the way the directory-pruned
+/// agents' scans are). Each navigation re-reads the current snapshot, so a
+/// tab a background agent contributes picks up its Sessions as soon as they
+/// land — but never mid-render, only on the next page turn or tab switch.
+/// The current tab is tracked by agent name, not index, so a tab list that
+/// grows between renders (a background agent's first Session arriving)
+/// never silently retargets the user onto the wrong tab.
 pub fn run_tabbed_picker(
-    mut candidates: Vec<PickerCandidate>,
+    candidates: Arc<Mutex<Vec<PickerCandidate>>>,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
+    background: Option<BackgroundAgent>,
 ) -> PickerOutcome {
     if let Err(reason) = preflight() {
         return PickerOutcome::PreflightFailed(reason);
     }
-    if candidates.is_empty() {
-        return PickerOutcome::Cancelled;
+    let mut announced_wait = false;
+    loop {
+        if !candidates.lock().unwrap().is_empty() {
+            break;
+        }
+        match &background {
+            Some(bg) if bg.pending.load(Ordering::Relaxed) => {
+                if !announced_wait {
+                    eprintln!("resume: waiting for {} to finish scanning...", bg.label);
+                    announced_wait = true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // Nothing else can ever produce a candidate: background is
+            // absent, or it already finished with zero Sessions.
+            _ => return PickerOutcome::Cancelled,
+        }
     }
-    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
 
     let store = Arc::new(PreviewStore::default());
     // The accepted dual-section fallback always exposes normalized and raw in Preview.
-    store
-        .show_raw
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    for candidate in &candidates {
-        store.insert(candidate.key.clone(), candidate.preview.clone());
-    }
+    store.show_raw.store(true, Ordering::Relaxed);
 
-    // Tab 0 is "All"; tabs 1.. are each distinct agent, in first-seen order.
-    let mut agent_tabs: Vec<&str> = Vec::new();
-    for candidate in &candidates {
-        if !agent_tabs.contains(&candidate.agent.as_str()) {
-            agent_tabs.push(&candidate.agent);
-        }
-    }
-    let total_tabs = agent_tabs.len() + 1;
-
-    let mut tab_index = 0usize;
+    // `None` is the "All" tab; `Some(agent)` names a per-agent tab. Tracked
+    // by name (not index) so tab-list growth between renders never
+    // retargets the user at the wrong position.
+    let mut current_tab: Option<String> = None;
     let mut page_index = 0usize;
     let mut page_initialized = false;
     loop {
+        let mut snapshot = candidates.lock().unwrap().clone();
+        snapshot.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
+        for candidate in &snapshot {
+            store.insert(candidate.key.clone(), candidate.preview.clone());
+        }
+
+        // Tab 0 is "All"; tabs 1.. are each distinct agent, in first-seen order.
+        let mut agent_tabs: Vec<&str> = Vec::new();
+        for candidate in &snapshot {
+            if !agent_tabs.contains(&candidate.agent.as_str()) {
+                agent_tabs.push(&candidate.agent);
+            }
+        }
+        let total_tabs = agent_tabs.len() + 1;
+        let tab_index = current_tab
+            .as_deref()
+            .and_then(|name| agent_tabs.iter().position(|a| *a == name))
+            .map_or(0, |i| i + 1);
+
         let tab_candidates: Vec<&PickerCandidate> = if tab_index == 0 {
-            candidates.iter().collect()
+            snapshot.iter().collect()
         } else {
-            candidates
+            snapshot
                 .iter()
                 .filter(|c| c.agent == agent_tabs[tab_index - 1])
                 .collect()
@@ -453,6 +494,10 @@ pub fn run_tabbed_picker(
         };
         let start = page_index * PAGE_SIZE;
         let end = (start + PAGE_SIZE).min(tab_candidates.len());
+        let pending_label = background
+            .as_ref()
+            .filter(|bg| bg.pending.load(Ordering::Relaxed))
+            .map(|bg| bg.label.as_str());
 
         match run_single_view(
             &store,
@@ -463,16 +508,19 @@ pub fn run_tabbed_picker(
             total_pages,
             preview_mode,
             preview_position,
+            pending_label,
         ) {
             NavExit::OlderPage if page_index > 0 => page_index -= 1,
             NavExit::NewerPage if page_index + 1 < total_pages => page_index += 1,
             NavExit::OlderPage | NavExit::NewerPage => {}
             NavExit::PrevTab => {
-                tab_index = (tab_index + total_tabs - 1) % total_tabs;
+                let new_index = (tab_index + total_tabs - 1) % total_tabs;
+                current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
                 page_initialized = false;
             }
             NavExit::NextTab => {
-                tab_index = (tab_index + 1) % total_tabs;
+                let new_index = (tab_index + 1) % total_tabs;
+                current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
                 page_initialized = false;
             }
             NavExit::Terminal(outcome) => return outcome,
@@ -509,6 +557,7 @@ fn run_single_view(
     total_pages: usize,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
+    pending_label: Option<&str>,
 ) -> NavExit {
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(page.len().max(1));
     for candidate in page {
@@ -528,6 +577,7 @@ fn run_single_view(
         total_pages,
         preview_mode,
         preview_position,
+        pending_label,
     );
     classify_nav(run_skim_with_options(&options, rx))
 }
@@ -539,6 +589,7 @@ fn build_tabbed_options(
     total_pages: usize,
     mode: PreviewMode,
     position: PreviewPosition,
+    pending_label: Option<&str>,
 ) -> SkimOptions {
     let (position, visibility) = preview_layout(mode, position);
     let mut binds = vec![
@@ -554,8 +605,9 @@ fn build_tabbed_options(
         binds.push(String::from("alt-n:accept")); // newer page
     }
     // "All" plus one tab per agent is always >= 2 tabs whenever there is any
-    // data at all (run_tabbed_picker already returns early on empty input),
-    // so tab switching is unconditionally bound and wraps in the caller.
+    // data at all (run_tabbed_picker's wait loop only lets the render loop
+    // start once there is at least one candidate), so tab switching is
+    // unconditionally bound and wraps in the caller.
     binds.push(String::from("alt-left:accept")); // previous tab
     binds.push(String::from("alt-right:accept")); // next tab
 
@@ -568,12 +620,15 @@ fn build_tabbed_options(
             tabs.push_str(agent);
         }
     }
+    let pending_note = pending_label
+        .map(|label| format!("  ({label} still scanning)"))
+        .unwrap_or_default();
 
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
         .header(Some(format!(
-            "{tabs}  PAGE {}/{}  (alt-p/alt-n page, alt-left/alt-right tab)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            "{tabs}{pending_note}  PAGE {}/{}  (alt-p/alt-n page, alt-left/alt-right tab)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
             page_index + 1,
             total_pages
         )))
@@ -948,8 +1003,15 @@ mod tests {
 
     #[test]
     fn tabbed_picker_header_includes_session_columns() {
-        let options =
-            build_tabbed_options(0, &["pi"], 0, 1, PreviewMode::Hidden, PreviewPosition::Auto);
+        let options = build_tabbed_options(
+            0,
+            &["pi"],
+            0,
+            1,
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            None,
+        );
         assert!(
             options
                 .header
@@ -958,5 +1020,29 @@ mod tests {
             "header={:?}",
             options.header
         );
+    }
+
+    #[test]
+    fn tabbed_picker_header_shows_pending_background_agent() {
+        let without = build_tabbed_options(
+            0,
+            &["pi"],
+            0,
+            1,
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            None,
+        );
+        assert!(!without.header.unwrap().contains("still scanning"));
+        let with = build_tabbed_options(
+            0,
+            &["pi"],
+            0,
+            1,
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            Some("codex"),
+        );
+        assert!(with.header.unwrap().contains("codex still scanning"));
     }
 }
