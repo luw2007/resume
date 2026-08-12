@@ -182,7 +182,6 @@ fn collect_jsonl(
     Ok(())
 }
 
-
 /// Parse a single OMP JSONL session file read-only. Returns `Ok(None)` when
 /// the file has no valid `session` header.
 fn parse_session_file(

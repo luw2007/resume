@@ -177,14 +177,14 @@ fn write_big_grouped_session(path: &Path, id: &str, cwd: &Path, target_mb: usize
 }
 
 /// Build a synthetic Claude-shaped project tree:
-/// `<claude_root>/projects/<workspace-key>/<uuid>.jsonl`, one workspace-key
-/// directory per Session (Claude's real on-disk shape encodes the Workspace
-/// into the directory name; discovery does not reverse it, so this fixture
-/// does not need a realistic encoding, only a distinct directory per
-/// Session). Each transcript's filename UUID matches its embedded
-/// `sessionId`, satisfying Claude's exact-identity contract
-/// (`src/integration/claude/format.rs`: "filename UUID and embedded
-/// sessionId must agree").
+/// `<claude_root>/projects/<workspace-key>/<uuid>.jsonl`. The workspace-key
+/// directory name uses Claude's real encoding of each transcript's `cwd`
+/// (every non-alphanumeric character -> '-'), so the tree stays valid for
+/// discovery paths that prune directories by encoded name (the benchmark
+/// itself uses the unfiltered `discover`, which never prunes). Each
+/// transcript's filename UUID matches its embedded `sessionId`, satisfying
+/// Claude's exact-identity contract (`src/integration/claude/format.rs`:
+/// "filename UUID and embedded sessionId must agree").
 pub fn claude_project_tree(
     claude_root: &Path,
     files: usize,

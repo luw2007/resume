@@ -214,7 +214,6 @@ fn collect_jsonl(
     Ok(())
 }
 
-
 /// Parse a single Pi JSONL session file read-only. Returns `Ok(None)` when the
 /// file has no valid `session` header (not a Pi session transcript).
 fn parse_session_file(

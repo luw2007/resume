@@ -84,7 +84,10 @@ impl Fixture {
     /// The grouped directory name Pi would use for `self.workspace`:
     /// `-{absolute path with '/' -> '-'}-`.
     pub(crate) fn encoded_ws(&self) -> String {
-        format!("-{}-", self.workspace.display().to_string().replace('/', "-"))
+        format!(
+            "-{}-",
+            self.workspace.display().to_string().replace('/', "-")
+        )
     }
 
     /// Write a JSONL file into a grouped Workspace dir, returning its path.
