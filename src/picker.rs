@@ -352,42 +352,29 @@ fn is_interrupt(key: &SkimKey) -> bool {
     matches!(key, SkimKey::Ctrl('c'))
 }
 
-/// Internal control-flow result for the live streaming session: either a
-/// terminal outcome to hand back to the caller, or a request (Alt+P) to
-/// switch into the paginated view once discovery settles.
-enum LiveExit {
+/// Internal control-flow result for one rendered tab+page view: either a
+/// terminal outcome, or a request to move to a different page or tab.
+enum NavExit {
     Terminal(PickerOutcome),
-    Paginate,
+    OlderPage,
+    NewerPage,
+    PrevTab,
+    NextTab,
 }
 
-fn classify_live(outcome: Option<SkimOutput>) -> LiveExit {
-    if let Some(o) = &outcome {
-        if !o.is_abort && matches!(o.final_key, SkimKey::Alt('p')) {
-            return LiveExit::Paginate;
-        }
-    }
-    LiveExit::Terminal(classify(outcome))
-}
-
-/// Internal control-flow result for one paginated page: either a terminal
-/// outcome, or a request to move to the older/newer page.
-enum PageExit {
-    Terminal(PickerOutcome),
-    Older,
-    Newer,
-}
-
-fn classify_page(outcome: Option<SkimOutput>) -> PageExit {
+fn classify_nav(outcome: Option<SkimOutput>) -> NavExit {
     if let Some(o) = &outcome {
         if !o.is_abort {
             match o.final_key {
-                SkimKey::Alt('p') => return PageExit::Older,
-                SkimKey::Alt('n') => return PageExit::Newer,
+                SkimKey::Alt('p') => return NavExit::OlderPage,
+                SkimKey::Alt('n') => return NavExit::NewerPage,
+                SkimKey::AltLeft => return NavExit::PrevTab,
+                SkimKey::AltRight => return NavExit::NextTab,
                 _ => {}
             }
         }
     }
-    PageExit::Terminal(classify(outcome))
+    NavExit::Terminal(classify(outcome))
 }
 
 /// Immutable production candidate. Display text is never identity or launch state.
@@ -397,76 +384,98 @@ pub struct PickerCandidate {
     pub display: String,
     pub search_text: String,
     pub preview: String,
-    /// Ascending ordering key for the paginated view (oldest first, most
-    /// recently active last — the bottom of the final page). Mirrors
-    /// `session::compare_sessions`, reversed.
+    /// Ascending ordering key (oldest first, most recently active last — the
+    /// bottom of the final page). Mirrors `session::compare_sessions`, reversed.
     pub rank: Option<SystemTime>,
+    /// Agent name, used to build the per-agent tabs (`Alt+Left`/`Alt+Right`).
+    pub agent: String,
 }
 
-/// Production bounded streaming picker, preserving the Step 2 interaction
-/// contract. Once the live stream ends in an Alt+P request, transparently
-/// hands off to [`run_paginated_picker`] over every candidate seen so far
-/// (including any still arriving from discovery).
-pub fn run_production_picker(
-    candidates: std::sync::mpsc::Receiver<PickerCandidate>,
+/// Run the full production picker once every agent has finished discovery
+/// (see `app::run_interactive`): an "All" tab plus one tab per distinct
+/// agent present in `candidates`, each sorted ascending by `rank` and
+/// paginated at [`PAGE_SIZE`]. Starts on the "All" tab's last (newest) page.
+/// `Alt+P`/`Alt+N` move between pages of the current tab; `Alt+Left`/
+/// `Alt+Right` switch tabs (wrapping), resetting to that tab's last page.
+/// Every page turn or tab switch relaunches a fresh, small Skim instance,
+/// since Skim has no API to reorder or replace an already-open list —
+/// there is no live-streaming phase to avoid this in: discovery has already
+/// fully completed by the time this is called.
+pub fn run_tabbed_picker(
+    mut candidates: Vec<PickerCandidate>,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
 ) -> PickerOutcome {
     if let Err(reason) = preflight() {
         return PickerOutcome::PreflightFailed(reason);
     }
+    if candidates.is_empty() {
+        return PickerOutcome::Cancelled;
+    }
+    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
+
     let store = Arc::new(PreviewStore::default());
     // The accepted dual-section fallback always exposes normalized and raw in Preview.
     store
         .show_raw
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(crate::runtime::CHANNEL_CAPACITY);
-    let producer_store = store.clone();
-    let producer = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        while let Ok(candidate) = candidates.recv() {
-            producer_store.insert(candidate.key.clone(), candidate.preview.clone());
-            // Cloned rather than moved: `candidate` is also buffered below so
-            // it survives for a possible later pagination hand-off.
-            let item = Arc::new(SpikeItem {
-                key: candidate.key.clone(),
-                display: candidate.display.clone(),
-                search_text: candidate.search_text.clone(),
-                preview_store: producer_store.clone(),
-            }) as Arc<dyn SkimItem>;
-            let forwarded = tx.send(item).is_ok();
-            seen.push(candidate);
-            if !forwarded {
-                return (seen, Some(candidates));
-            }
+    for candidate in &candidates {
+        store.insert(candidate.key.clone(), candidate.preview.clone());
+    }
+
+    // Tab 0 is "All"; tabs 1.. are each distinct agent, in first-seen order.
+    let mut agent_tabs: Vec<&str> = Vec::new();
+    for candidate in &candidates {
+        if !agent_tabs.contains(&candidate.agent.as_str()) {
+            agent_tabs.push(&candidate.agent);
         }
-        (seen, None)
-    });
-    let options = build_production_options(preview_mode, preview_position);
-    let result = run_skim_with_options(&options, rx);
-    match classify_live(result) {
-        // Deliberately not joined here: the producer thread blocks on
-        // `candidates.recv()`, which only unblocks once every discovery-worker
-        // sender upstream (in `app::run_interactive`) drops — independent of
-        // whether Skim already returned a selection. Joining would make
-        // Resume wait for the slowest discovery worker instead of the user's
-        // keystroke. The caller already cancels discovery and reaps its
-        // workers on a budget after this function returns, which drops the
-        // remaining senders and lets this thread finish on its own.
-        LiveExit::Terminal(outcome) => outcome,
-        // Alt+P is an explicit user request to see the rest of the results,
-        // so — unlike the path above — we do join and drain the remainder,
-        // effectively waiting for discovery to finish.
-        LiveExit::Paginate => {
-            let (mut seen, remaining) = producer.join().unwrap_or_default();
-            if let Some(remaining) = remaining {
-                while let Ok(candidate) = remaining.recv() {
-                    store.insert(candidate.key.clone(), candidate.preview.clone());
-                    seen.push(candidate);
-                }
+    }
+    let total_tabs = agent_tabs.len() + 1;
+
+    let mut tab_index = 0usize;
+    let mut page_index = 0usize;
+    let mut page_initialized = false;
+    loop {
+        let tab_candidates: Vec<&PickerCandidate> = if tab_index == 0 {
+            candidates.iter().collect()
+        } else {
+            candidates
+                .iter()
+                .filter(|c| c.agent == agent_tabs[tab_index - 1])
+                .collect()
+        };
+        let total_pages = tab_candidates.len().div_ceil(PAGE_SIZE).max(1);
+        page_index = if page_initialized {
+            page_index.min(total_pages - 1)
+        } else {
+            page_initialized = true;
+            total_pages - 1 // newest page of this tab
+        };
+        let start = page_index * PAGE_SIZE;
+        let end = (start + PAGE_SIZE).min(tab_candidates.len());
+
+        match run_single_view(
+            &store,
+            &tab_candidates[start..end],
+            tab_index,
+            &agent_tabs,
+            page_index,
+            total_pages,
+            preview_mode,
+            preview_position,
+        ) {
+            NavExit::OlderPage if page_index > 0 => page_index -= 1,
+            NavExit::NewerPage if page_index + 1 < total_pages => page_index += 1,
+            NavExit::OlderPage | NavExit::NewerPage => {}
+            NavExit::PrevTab => {
+                tab_index = (tab_index + total_tabs - 1) % total_tabs;
+                page_initialized = false;
             }
-            seen.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
-            run_paginated_picker(&store, &seen, preview_mode, preview_position)
+            NavExit::NextTab => {
+                tab_index = (tab_index + 1) % total_tabs;
+                page_initialized = false;
+            }
+            NavExit::Terminal(outcome) => return outcome,
         }
     }
 }
@@ -491,68 +500,16 @@ fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str
     (position, visibility)
 }
 
-fn build_production_options(mode: PreviewMode, position: PreviewPosition) -> SkimOptions {
-    let (position, visibility) = preview_layout(mode, position);
-    SkimOptionsBuilder::default()
-        .height(String::from("100%"))
-        .multi(false)
-        .header(Some(String::from("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")))
-        .preview(Some(String::new()))
-        .preview_window(format!("{position}:60%{visibility}"))
-        .bind(vec![
-            String::from("ctrl-o:toggle-preview"),
-            String::from("ctrl-r:ignore"),
-            String::from("enter:accept"),
-            String::from("esc:abort"),
-            // Alt+P requests the paginated view (see `run_production_picker`).
-            String::from("alt-p:accept"),
-        ])
-        .build()
-        .expect("hardcoded production skim options are valid")
-}
-
-/// Run the paginated view once the live stream ends with a pagination
-/// request: `candidates` is the full, already-sorted (ascending) buffer.
-/// Starts on the last page (most recently active sessions) and relaunches a
-/// fresh, small Skim instance for every page turn (Alt+P older / Alt+N
-/// newer), since Skim has no API to reorder or replace an already-open list.
-fn run_paginated_picker(
+fn run_single_view(
     store: &Arc<PreviewStore>,
-    candidates: &[PickerCandidate],
-    preview_mode: PreviewMode,
-    preview_position: PreviewPosition,
-) -> PickerOutcome {
-    if candidates.is_empty() {
-        return PickerOutcome::Cancelled;
-    }
-    let total_pages = candidates.len().div_ceil(PAGE_SIZE);
-    let mut page_index = total_pages - 1;
-    loop {
-        let start = page_index * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(candidates.len());
-        match run_single_page(
-            store,
-            &candidates[start..end],
-            page_index,
-            total_pages,
-            preview_mode,
-            preview_position,
-        ) {
-            PageExit::Older => page_index -= 1,
-            PageExit::Newer => page_index += 1,
-            PageExit::Terminal(outcome) => return outcome,
-        }
-    }
-}
-
-fn run_single_page(
-    store: &Arc<PreviewStore>,
-    page: &[PickerCandidate],
+    page: &[&PickerCandidate],
+    tab_index: usize,
+    agent_tabs: &[&str],
     page_index: usize,
     total_pages: usize,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
-) -> PageExit {
+) -> NavExit {
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(page.len().max(1));
     for candidate in page {
         let item = Arc::new(SpikeItem {
@@ -564,11 +521,20 @@ fn run_single_page(
         let _ = tx.send(item);
     }
     drop(tx);
-    let options = build_paginated_options(page_index, total_pages, preview_mode, preview_position);
-    classify_page(run_skim_with_options(&options, rx))
+    let options = build_tabbed_options(
+        tab_index,
+        agent_tabs,
+        page_index,
+        total_pages,
+        preview_mode,
+        preview_position,
+    );
+    classify_nav(run_skim_with_options(&options, rx))
 }
 
-fn build_paginated_options(
+fn build_tabbed_options(
+    tab_index: usize,
+    agent_tabs: &[&str],
     page_index: usize,
     total_pages: usize,
     mode: PreviewMode,
@@ -587,11 +553,27 @@ fn build_paginated_options(
     if page_index + 1 < total_pages {
         binds.push(String::from("alt-n:accept")); // newer page
     }
+    // "All" plus one tab per agent is always >= 2 tabs whenever there is any
+    // data at all (run_tabbed_picker already returns early on empty input),
+    // so tab switching is unconditionally bound and wraps in the caller.
+    binds.push(String::from("alt-left:accept")); // previous tab
+    binds.push(String::from("alt-right:accept")); // next tab
+
+    let mut tabs = String::from(if tab_index == 0 { "[All]" } else { "All" });
+    for (i, agent) in agent_tabs.iter().enumerate() {
+        tabs.push(' ');
+        if tab_index == i + 1 {
+            tabs.push_str(&format!("[{agent}]"));
+        } else {
+            tabs.push_str(agent);
+        }
+    }
+
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
         .header(Some(format!(
-            "PAGE {}/{} (alt-p older / alt-n newer)  UPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            "{tabs}  PAGE {}/{}  (alt-p/alt-n page, alt-left/alt-right tab)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
             page_index + 1,
             total_pages
         )))
@@ -599,7 +581,7 @@ fn build_paginated_options(
         .preview_window(format!("{position}:60%{visibility}"))
         .bind(binds)
         .build()
-        .expect("hardcoded paginated skim options are valid")
+        .expect("hardcoded tabbed skim options are valid")
 }
 
 // ---------------------------------------------------------------------------
@@ -965,11 +947,16 @@ mod tests {
     }
 
     #[test]
-    fn production_picker_uses_session_column_header() {
-        let options = build_production_options(PreviewMode::Hidden, PreviewPosition::Auto);
-        assert_eq!(
-            options.header.as_deref(),
-            Some("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")
+    fn tabbed_picker_header_includes_session_columns() {
+        let options =
+            build_tabbed_options(0, &["pi"], 0, 1, PreviewMode::Hidden, PreviewPosition::Auto);
+        assert!(
+            options
+                .header
+                .as_deref()
+                .is_some_and(|h| h.contains("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")),
+            "header={:?}",
+            options.header
         );
     }
 }

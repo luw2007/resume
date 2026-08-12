@@ -333,92 +333,86 @@ fn skim_streamed_path_still_selects() {
     assert!(out.contains("key:"), "out={out:?}");
 }
 
-/// `run_production_picker` (the path `app::run_interactive` uses) must
-/// return as soon as the user selects, even while a discovery worker is
-/// still feeding it candidates on the upstream channel. Before the fix, the
-/// picker unconditionally joined its internal producer thread, which itself
-/// blocks on `candidates.recv()` — so selection wait time was bounded by the
-/// *slowest* discovery worker, not by Skim. `prod-slow` holds its sender
-/// open for `SLOW_DISCOVERY_HOLD` (5s) after emitting one candidate; a
-/// bounded return here proves the picker didn't wait for it.
+/// `run_tabbed_picker` (the path `app::run_interactive` uses once discovery
+/// fully completes): default view is the "All" tab's last (newest) page;
+/// Alt+P/Alt+N move pages within a tab; Alt+Left/Alt+Right cycle tabs
+/// (wrapping) and reset to that tab's last page; Enter still resolves the
+/// correct opaque key. Fixture: pi=70 (2 pages), claude=10, omp=5 (1 page
+/// each), so "All" (85 total) and "pi" both exercise pagination while
+/// Alt+Left/Alt+Right cycles all 4 tabs (All, pi, claude, omp).
 #[test]
-fn production_picker_returns_immediately_despite_slow_discovery() {
+fn tabbed_picker_paginates_and_switches_tabs() {
     if !pty_available() {
         return;
     }
-    let mut sess = spawn("prod-slow", 100, 30);
-    let rendered = sess.read_for(Duration::from_millis(1500));
-    let text = strip(&rendered);
-    assert!(
-        text.contains("slow-candidate"),
-        "candidate missing: {text:?}"
-    );
-    let t0 = Instant::now();
-    sess.write(b"\r");
-    let exit = wait_child(&mut sess);
-    let elapsed = t0.elapsed();
-    assert_eq!(exit, 0, "exit={exit}");
-    assert!(
-        elapsed < Duration::from_millis(2500),
-        "picker blocked on slow discovery: selection took {elapsed:?}"
-    );
-    // Non-vacuity: a regression that returns promptly but loses the
-    // selection (e.g. classifies it as Cancelled) must not pass on timing
-    // alone.
-    let out = strip(&sess.read_for(Duration::from_millis(500)));
-    assert!(out.contains("key:1"), "selection not confirmed: {out:?}");
-}
+    let mut sess = spawn("tabbed", 100, 30);
 
-/// Alt+P switches the live stream into the paginated view (120 candidates,
-/// three pages of <=50); Alt+P/Alt+N navigate older/newer pages; the final
-/// selection still resolves to the correct opaque key. End-to-end proof of
-/// the pagination hand-off in `run_production_picker`.
-#[test]
-fn alt_p_paginates_and_navigates_pages() {
-    if !pty_available() {
-        return;
-    }
-    let mut sess = spawn("prod-many", 100, 30);
-    let live = strip(&sess.read_for(Duration::from_millis(1000)));
+    // Default: "All" tab, last (newest) page — 2/2, holding pi 051-069,
+    // claude, and omp (ids 51-85), never the first-page-only pi items.
+    let all_page2 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        live.contains("candidate-"),
-        "live stream missing candidates: {live:?}"
+        all_page2.contains("[All]") && all_page2.contains("PAGE 2/2"),
+        "expected All tab page 2/2: {all_page2:?}"
+    );
+    assert!(
+        !all_page2.contains("pi-candidate-000"),
+        "first-page-only pi candidate leaked onto All page 2: {all_page2:?}"
     );
 
-    // Alt+P: request pagination. Default page is the last (newest) one:
-    // candidates 101-120 out of 120 total (ceil(120/50) = 3 pages).
+    // Alt+P: older page of "All" (1/2) — pure first-50 pi candidates.
     sess.write(b"\x1bp");
-    let page3 = strip(&sess.read_for(Duration::from_millis(1000)));
-    assert!(page3.contains("PAGE 3/3"), "page header missing: {page3:?}");
+    let all_page1 = wait_for(&mut sess, "pi-candidate-000", Duration::from_millis(4000));
+    assert!(all_page1.contains("PAGE 1/2"), "page header: {all_page1:?}");
     assert!(
-        page3.contains("candidate-120"),
-        "newest candidate missing from last page: {page3:?}"
-    );
-    assert!(
-        !page3.contains("candidate-001"),
-        "oldest candidate leaked onto the last page: {page3:?}"
+        !all_page1.contains("omp-candidate"),
+        "omp leaked onto All page 1: {all_page1:?}"
     );
 
-    // Alt+P again: older page (candidates 51-100).
-    sess.write(b"\x1bp");
-    let page2 = strip(&sess.read_for(Duration::from_millis(1000)));
-    assert!(page2.contains("PAGE 2/3"), "page header missing: {page2:?}");
+    // Alt+Left from "All": wraps to the last tab, "omp" (single page).
+    sess.write(b"\x1b\x1b[D");
+    let omp_tab = wait_for(&mut sess, "omp-candidate-000", Duration::from_millis(4000));
     assert!(
-        !page2.contains("candidate-120"),
-        "newest-page candidate leaked onto page 2: {page2:?}"
+        omp_tab.contains("[omp]") && omp_tab.contains("PAGE 1/1"),
+        "expected omp tab page 1/1: {omp_tab:?}"
     );
 
-    // Alt+N: back to the newest page.
-    sess.write(b"\x1bn");
-    let back = strip(&sess.read_for(Duration::from_millis(1000)));
-    assert!(back.contains("PAGE 3/3"), "page header missing: {back:?}");
+    // Alt+Right twice: omp -> All -> pi, landing on pi's last page (2/2).
+    sess.write(b"\x1b\x1b[C");
+    sess.read_for(Duration::from_millis(800));
+    sess.write(b"\x1b\x1b[C");
+    let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
+    assert!(
+        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 2/2"),
+        "expected pi tab page 2/2: {pi_tab:?}"
+    );
+    assert!(
+        !pi_tab.contains("claude-candidate") && !pi_tab.contains("omp-candidate"),
+        "other agents leaked onto the pi tab: {pi_tab:?}"
+    );
 
-    // Enter selects the highlighted candidate from the current page.
+    // Enter selects the highlighted candidate from the current view.
     sess.write(b"\r");
     let exit = wait_child(&mut sess);
     assert_eq!(exit, 0, "exit={exit}");
     let out = strip(&sess.read_for(Duration::from_millis(500)));
     assert!(out.contains("key:"), "out={out:?}");
+}
+
+/// Poll for newly rendered output (only bytes read *during this call*, not
+/// the whole session history — so a later negative assertion isn't polluted
+/// by an earlier frame) until `needle` appears or `timeout` elapses.  Robust
+/// against variable first-render latency for larger fixtures/relaunches,
+/// unlike a single fixed-duration `read_for`.
+fn wait_for(sess: &mut PtySession, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    loop {
+        buf.extend(sess.read_for(Duration::from_millis(150)));
+        let text = strip(&buf);
+        if text.contains(needle) || Instant::now() >= deadline {
+            return text;
+        }
+    }
 }
 
 /// Esc restores the terminal and the process exits cleanly.

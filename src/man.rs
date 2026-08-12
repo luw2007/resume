@@ -287,6 +287,34 @@ LIST OUTPUT
     This table is NOT a stable machine format. Use --json for anything a
     program will read.
 
+PICKER KEYS
+    Enter       Resume the highlighted Session (subject to risk confirmation).
+    Esc         Cancel, exit 0.
+    Ctrl-C      Interrupt, exit 130.
+    Ctrl-O      Toggle the Preview pane (hidden by default).
+    Ctrl-R      No-op by design; see the v0.1.0 specifics below.
+    Alt-P       Page to older Sessions in the current tab.
+    Alt-N       Page to newer Sessions in the current tab.
+    Alt-Left    Switch to the previous tab (wraps).
+    Alt-Right   Switch to the next tab (wraps).
+
+    The Picker opens once every configured agent has finished discovery
+    (see PROGRESS below), with an `All` tab plus one tab per discovered
+    agent. Each tab holds every Session for its scope, sorted oldest-first
+    with the most recently updated Session last, split into pages of 50;
+    the Picker opens on the newest page of the `All` tab. Paging or
+    switching tabs relaunches a small, fresh view over the target
+    tab/page; it never reorders or drops a Session already discovered.
+
+PROGRESS
+    Before the Picker opens, resume waits for every configured agent's
+    discovery to finish and prints one line per agent to stderr as it
+    completes, in actual completion order:
+
+        resume: <agent> scanned (<elapsed>)
+
+    This is diagnostic output, not a stable format.
+
 SCHEMA
     `resume --json` writes exactly one compact JSON document to stdout. The
     envelope is `{schemaVersion, sessions, errors}` and nothing else;
