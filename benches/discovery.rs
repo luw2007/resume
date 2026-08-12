@@ -127,6 +127,38 @@ fn bench_codex_discovery(c: &mut Criterion) {
                 black_box(out.len());
             });
         });
+
+        // Same fixture with a Workspace gate that rejects every rollout:
+        // measures the out-of-scope fast path (small first-record read, no
+        // title-derivation read), the common shape when discovery runs from
+        // one repository against a many-project store.
+        let gate = |_: &std::path::Path| false;
+        let gated_sanity =
+            codex::discover_with_filter(root.path(), &Bounds::default(), Some(&gate), |_| true);
+        assert_eq!(
+            gated_sanity
+                .iter()
+                .filter(|o| matches!(o, codex::DiscoveredSession::Session(_)))
+                .count(),
+            0,
+            "gated fixture sanity check: everything out of scope"
+        );
+        let gated_name = if big_files == 0 {
+            format!("gated_all_out_of_scope_{files}files_{avg_lines}lines")
+        } else {
+            format!("gated_all_out_of_scope_{files}files_{avg_lines}lines_plus_{big_files}x40MB")
+        };
+        group.bench_function(gated_name, |b| {
+            b.iter(|| {
+                let out = codex::discover_with_filter(
+                    root.path(),
+                    &Bounds::default(),
+                    Some(&gate),
+                    |_| true,
+                );
+                black_box(out.len());
+            });
+        });
     }
     group.finish();
 }

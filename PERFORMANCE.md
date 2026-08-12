@@ -125,6 +125,30 @@ same real data, both via a full-corpus per-file comparison (3580 discoverable se
 output (10 sessions, byte-identical across `agent`/`profile`/`id`/`title`/`workspace`/
 `support`/`activity`/`risk` for every session, zero errors both before and after).
 
+**Workspace gate (out-of-scope fast path).** Codex has no Workspace-encoded
+directory layout to prune (its store is date-partitioned, `sessions/YYYY/MM/DD/`),
+so the directory-name prefilter applied to Pi/OMP/Claude does not transfer. The
+equivalent fix is a per-file first-record gate (`parse_rollout_file_gated` with a
+`WorkspaceGate`): a `max_records: 1` read resolves `session_meta.payload.cwd` --
+the shared reader stops at the first parsed record -- and an out-of-Scope `cwd`
+skips the title-derivation read entirely. A fixed small byte budget would NOT
+work here: real first lines are large (median ~4 KiB, p99 ~22 KiB across 3582
+real rollouts -- the payload embeds instructions), so a 4 KiB budget truncates
+half the corpus and the gate always falls through; the record cap is what makes
+the gate cheap regardless of line size. Measured on the real corpus
+(interleaved min-of-4, same machine/data): **`--json --agent codex` 2.64s ->
+1.66s (~1.6x)**, byte-identical `--json` output. The remaining ~1.7s is the
+per-file floor -- open + read + `serde_json::Value`-parse of the fat first
+record, which the gate itself must pay to learn `cwd` -- so any further gain
+requires either a lighter typed parse of just `payload.cwd` for the gate
+(skipping `Value` tree construction), or not opening files at all via the
+`state_5.sqlite` `threads` table (`rollout_path`/`cwd`/`title`/`updated_at`;
+verified complete and synchronous against this corpus: 3579/3582 rows,
+newest rollout present, backfill complete). The DB route is gated behind the
+optional `codex-sqlite` feature and would soften the documented "deleting the
+DB never changes discovery" contract, so it is recorded here as the next
+step's tradeoff, not implemented.
+
 ### `pi_discovery` / `omp_discovery`
 
 Pi and OMP discovery (`src/integration/pi/discover.rs::extract_session`,

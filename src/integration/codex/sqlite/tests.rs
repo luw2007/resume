@@ -201,7 +201,8 @@ fn insert_old(conn: &Connection, path: &str, session_id: &str, title: &str) {
 
 /// Run enriched discovery and return only the Session results.
 fn discover_enriched(home: &Path) -> (Vec<crate::session::Session>, SqliteOutcome) {
-    let (outcomes, outcome) = discover_with_filter_enriched(home, &Bounds::default(), |_| true);
+    let (outcomes, outcome) =
+        discover_with_filter_enriched(home, &Bounds::default(), None, |_| true);
     let sessions = outcomes
         .into_iter()
         .filter_map(|o| match o {
@@ -783,7 +784,8 @@ fn locked_db_degrades_silently_and_does_not_block_discovery() {
     let home_clone = home.path().to_path_buf();
     let handle = thread::spawn(move || {
         let bounds = Bounds::default();
-        let (outcomes, outcome) = discover_with_filter_enriched(&home_clone, &bounds, |_| true);
+        let (outcomes, outcome) =
+            discover_with_filter_enriched(&home_clone, &bounds, None, |_| true);
         let sessions: Vec<_> = outcomes
             .into_iter()
             .filter_map(|o| match o {
