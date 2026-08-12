@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Added an opt-in paginated picker view: `Alt+P` on the live stream switches to a stable, oldest-first (most recently active last) view split into pages of 50, once discovery settles; `Alt+P`/`Alt+N` move between older/newer pages. The default live stream is unchanged.
+- The interactive Picker now waits for every configured agent's discovery to finish (printing one progress line per agent to stderr as it completes) before opening, then presents an `All` tab plus one tab per discovered agent. Each tab is sorted oldest-first with the most recently updated Session last and paginated at 50 per page, opening on its newest page; `Alt+P`/`Alt+N` page within the current tab, `Alt+Left`/`Alt+Right` switch tabs (wrapping). Replaces the prior instant-open, unsorted live stream.
 
 ### Changed
 

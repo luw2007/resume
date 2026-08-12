@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
 };
@@ -22,7 +22,7 @@ use crate::{
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
     preview::jsonl::Bounds,
     preview::text,
-    runtime::{CancelToken, JOIN_BUDGET, join_with_budget},
+    runtime::CancelToken,
     scope::{DefaultScope, Direction, Scope},
     session::{Diagnostic, ResumeSpec, Session, SupportStatus},
 };
@@ -241,47 +241,56 @@ fn run_interactive(
         state.errors.lock().unwrap().push(diagnostic);
     }
     state.errors.lock().unwrap().extend(ctx.diagnostics.clone());
-    let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let next_key = Arc::new(AtomicU64::new(1));
     let cancel = CancelToken::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(crate::runtime::CHANNEL_CAPACITY);
+    let records: Arc<Mutex<Vec<CandidateRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(String, std::time::Duration)>();
     let mut handles = Vec::new();
     for agent in &options.agents {
         let agent = agent.clone();
         let scope = scope.clone();
         let ctx = ctx.clone();
         let state = state.clone();
-        let map = map.clone();
-        let next_key = next_key.clone();
+        let records = records.clone();
         let cancel = cancel.clone();
-        let tx = tx.clone();
         let since_cutoff = options.since_cutoff;
+        let progress_tx = progress_tx.clone();
         handles.push(thread::spawn(move || {
+            let start = std::time::Instant::now();
             let result = discover_agent(&agent, &scope, &ctx, since_cutoff, &cancel);
             if result.integration_ok {
                 state.successful_integrations.fetch_add(1, Ordering::SeqCst);
             }
+            state
+                .sessions
+                .fetch_add(result.records.len(), Ordering::SeqCst);
             state.errors.lock().unwrap().extend(result.errors);
-            for record in result.records {
-                if cancel.is_cancelled() {
-                    break;
-                }
-                let key = CandidateKey(next_key.fetch_add(1, Ordering::SeqCst));
-                let item = picker_candidate(key.clone(), &record.session);
-                map.lock().unwrap().insert(key, record);
-                state.sessions.fetch_add(1, Ordering::SeqCst);
-                if tx.send(item).is_err() {
-                    break;
-                }
-            }
+            records.lock().unwrap().extend(result.records);
+            let _ = progress_tx.send((agent, start.elapsed()));
         }));
     }
-    drop(tx);
+    drop(progress_tx);
+    // Print progress in real completion order (not spawn order): each
+    // thread sends its one message right after its own work finishes, so
+    // draining the channel to closure reports agents as they actually
+    // settle, before we ever open the picker.
+    for (agent, elapsed) in progress_rx {
+        eprintln!("resume: {agent} scanned ({elapsed:.2?})");
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
+    let records = Arc::try_unwrap(records).ok().unwrap().into_inner().unwrap();
+
+    let mut map: HashMap<CandidateKey, CandidateRecord> = HashMap::with_capacity(records.len());
+    let mut candidates = Vec::with_capacity(records.len());
+    for (index, record) in records.into_iter().enumerate() {
+        let key = CandidateKey(index as u64 + 1);
+        candidates.push(picker_candidate(key.clone(), &record.session));
+        map.insert(key, record);
+    }
+
     let outcome =
-        crate::picker::run_production_picker(rx, options.preview, options.preview_position);
-    cancel.cancel();
-    let _ = join_with_budget(handles, JOIN_BUDGET);
+        crate::picker::run_tabbed_picker(candidates, options.preview, options.preview_position);
     print_diagnostics(&state, options.verbose);
     match outcome {
         PickerOutcome::Cancelled => {
@@ -306,7 +315,7 @@ fn run_interactive(
             EXIT_ERROR
         }
         PickerOutcome::Selected(key) => {
-            let Some(record) = map.lock().unwrap().get(&key).cloned() else {
+            let Some(record) = map.remove(&key) else {
                 eprintln!("resume: selected Session disappeared");
                 return EXIT_ERROR;
             };
@@ -764,6 +773,7 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         search_text,
         preview,
         rank: crate::session::sort_rank(session.updated_at),
+        agent: session.key.agent.to_string_lossy().into_owned(),
     }
 }
 

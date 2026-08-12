@@ -3,13 +3,10 @@
 //! Usage:
 //!   resume-spike demo            – open the picker with a few fixed candidates
 //!   resume-spike streamed        – stream candidates from a bounded channel
-//!   resume-spike prod-slow       – production picker fed by a channel whose
-//!                                  sender stays open past selection, to
-//!                                  reproduce/guard against the picker
-//!                                  blocking its return on slow discovery
-//!   resume-spike prod-many       – production picker fed 120 candidates,
-//!                                  well over one page, to exercise Alt+P
-//!                                  pagination
+//!   resume-spike tabbed          – run_tabbed_picker with multiple agents and
+//!                                  over one page in "All"/"pi", to exercise
+//!                                  Alt+P/Alt+N pagination and Alt+Left/
+//!                                  Alt+Right tab switching
 //!   resume-spike preflight       – run preflight only, print result, exit
 //!   resume-spike empty           – zero candidates
 //!   resume-spike control-chars   – candidates carrying ANSI/OSC/bidi attacks
@@ -17,19 +14,13 @@
 //! The chosen opaque key is printed to stdout on selection as `key:<N>`.
 
 use std::process::ExitCode;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use resume::config::{PreviewMode, PreviewPosition};
 use resume::picker::{
     self, CandidateKey, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, PickerCandidate, PickerOutcome,
-    run_picker, run_picker_streamed, run_production_picker,
+    run_picker, run_picker_streamed, run_tabbed_picker,
 };
-
-/// How long the `prod-slow` producer keeps its sender open after emitting
-/// the one candidate. Must comfortably exceed the assertion bound the PTY
-/// test uses, so a regression (picker blocking on this sender) is unmissable
-/// even under CI scheduler contention.
-const SLOW_DISCOVERY_HOLD: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -39,8 +30,7 @@ fn main() -> ExitCode {
             let outcome = run_picker_streamed(demo_candidates(), false);
             print_outcome(outcome)
         }
-        "prod-slow" => print_outcome(run_prod_slow()),
-        "prod-many" => print_outcome(run_prod_many()),
+        "tabbed" => print_outcome(run_tabbed_demo()),
         "raw" => run(demo_candidates(), true),
         "empty" => run(Vec::new(), false),
         "control-chars" => run(control_attack_candidates(), false),
@@ -70,52 +60,31 @@ fn run(candidates: Vec<(CandidateKey, String, String)>, force_raw: bool) -> Exit
     print_outcome(run_picker(candidates, force_raw))
 }
 
-/// Mirrors `app::run_interactive`'s use of `run_production_picker`, but the
-/// producer thread deliberately holds its sender open for
-/// `SLOW_DISCOVERY_HOLD` after emitting the single candidate — modeling a
-/// discovery worker that is still scanning when the user selects. The picker
-/// must return as soon as Skim reports a selection, independent of when this
-/// sender eventually drops.
-fn run_prod_slow() -> PickerOutcome {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<PickerCandidate>(1);
-    std::thread::spawn(move || {
-        let _ = tx.send(PickerCandidate {
-            key: CandidateKey(1),
-            display: "pi  slow-candidate".into(),
-            search_text: "pi  slow-candidate".into(),
-            preview: "Session 1\nstill discovering other agents".into(),
-            rank: None,
-        });
-        std::thread::sleep(SLOW_DISCOVERY_HOLD);
-        // `tx` drops here, unblocking the picker's internal producer thread
-        // if it is still waiting on `recv()`. The picker itself must not
-        // have waited for this.
-    });
-    run_production_picker(rx, PreviewMode::Hidden, PreviewPosition::Auto)
-}
-
-/// Streams `PAGE_MANY_TOTAL` candidates (well over one page) into
-/// `run_production_picker`, then closes the sender immediately — modeling
-/// discovery that has already finished by the time the picker is driven.
-/// Exercises the Alt+P pagination hand-off end to end.
-const PAGE_MANY_TOTAL: usize = 120;
-
-fn run_prod_many() -> PickerOutcome {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<PickerCandidate>(PAGE_MANY_TOTAL);
-    std::thread::spawn(move || {
-        for i in 1..=PAGE_MANY_TOTAL {
-            let _ = tx.send(PickerCandidate {
-                key: CandidateKey(i as u64),
-                display: format!("candidate-{i:03}"),
-                search_text: format!("candidate-{i:03}"),
-                preview: format!("Session {i}"),
-                rank: Some(UNIX_EPOCH + Duration::from_secs(i as u64)),
+/// Builds a multi-agent, multi-page fixture and drives `run_tabbed_picker`
+/// directly — mirrors `app::run_interactive` once discovery has already
+/// fully completed. "pi" gets 70 candidates (2 pages of 50), "claude" and
+/// "omp" get a handful each (1 page), so "All" (85 total, 2 pages) and "pi"
+/// both exercise Alt+P/Alt+N, while Alt+Left/Alt+Right cycles all 4 tabs.
+fn run_tabbed_demo() -> PickerOutcome {
+    let mut candidates = Vec::new();
+    let mut next_id = 1u64;
+    let mut push = |agent: &str, count: usize, candidates: &mut Vec<PickerCandidate>| {
+        for i in 0..count {
+            candidates.push(PickerCandidate {
+                key: CandidateKey(next_id),
+                display: format!("{agent}-candidate-{i:03}"),
+                search_text: format!("{agent}-candidate-{i:03}"),
+                preview: format!("Session {agent}-{i}"),
+                rank: Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                agent: agent.to_string(),
             });
+            next_id += 1;
         }
-        // `tx` drops here once every candidate is sent, closing the channel
-        // so the picker's producer thread can settle instantly on Alt+P.
-    });
-    run_production_picker(rx, PreviewMode::Hidden, PreviewPosition::Auto)
+    };
+    push("pi", 70, &mut candidates);
+    push("claude", 10, &mut candidates);
+    push("omp", 5, &mut candidates);
+    run_tabbed_picker(candidates, PreviewMode::Hidden, PreviewPosition::Auto)
 }
 
 fn print_outcome(outcome: PickerOutcome) -> ExitCode {
