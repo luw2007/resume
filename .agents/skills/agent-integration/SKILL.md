@@ -106,17 +106,27 @@ or `omp`) for shape parity.
    fake-native-executable resume regression, following the existing
    `tests/` patterns for `pi`/`claude`/`codex`/`omp`. These are the tests CI
    runs; they must not touch the real agent binary.
-4. Set `checklist.md` status to `implemented`.
-5. Run the real, maintainer-installed agent end to end: `resume --list -a
+4. Add a `<agent>_discovery` benchmark group to `benches/discovery.rs`
+   and its synthetic fixture generator to `benches/fixtures.rs`, matching
+   the shape of the existing `codex_discovery`/`pi_discovery`/
+   `omp_discovery`/`claude_discovery` groups (comparable file/line/large-
+   file parameters so results are cross-agent comparable). The group's
+   doc comment must state what performance risk it tracks: full-file
+   parse cost for file-based stores, or query-scale cost for indexed
+   stores (SQLite, etc.) — every agent gets a group regardless, so a
+   future regression is always visible. Record the performance
+   characterization in `evidence/<agent>/research.md`.
+5. Set `checklist.md` status to `implemented`.
+6. Run the real, maintainer-installed agent end to end: `resume --list -a
    <agent>` must show the real session probed in step 2; confirm the
    `Session`'s workspace matches; confirm the fake-native-executable test's
    asserted argv matches what the real native resume actually needs (cross-
    check against the agent's own resume docs/`--help`, not just the fixture).
-6. Update `README.md`'s Support list table and any config docs to include
+7. Update `README.md`'s Support list table and any config docs to include
    the new agent.
-7. Commit the source, tests, docs, and checklist/evidence changes for this
+8. Commit the source, tests, docs, and checklist/evidence changes for this
    one agent (see repo git rules — explicit paths, no `git add -A`).
-8. Set `checklist.md` status to `verified`.
+9. Set `checklist.md` status to `verified`.
 
 ### 5. Any step → unsupported
 

@@ -38,6 +38,13 @@
 - `ResumeSpec`: `<program, argv, cwd, env derivation>`
 - Closest existing integration for shape parity: `<pi | claude | codex | omp>`
 
+## Performance characterization
+
+- Benchmark group: `<agent>_discovery` in `benches/discovery.rs`
+- Fixture generator: `<function name>` in `benches/fixtures.rs`
+- Risk tracked: `<full-file parse cost | query-scale cost | other, with one-line justification>`
+- Noted because: `<why this agent's discovery path is or is not file-size sensitive>`
+
 ## Verification (real installation)
 
 - `resume --list -a <agent>` output: `<summary or confirmation>`

@@ -12,7 +12,10 @@ Status is exactly one of:
 - `skill-defined` — the probed evidence is mapped onto `resume`'s
   `SessionKey`/`Session`/`ResumeSpec`/`WorkspaceEvidence` contract.
 - `implemented` — `src/integration/<agent>/` exists, wired into `resume`,
-  with fixture/fake-native tests passing.
+  with fixture/fake-native tests passing **and** a `<agent>_discovery`
+  benchmark group in `benches/discovery.rs` (plus its fixture generator in
+  `benches/fixtures.rs`); performance characterization recorded in
+  `evidence/<agent>/research.md`.
 - `verified` — real local discovery, workspace relation, and exact-resume
   behavior confirmed against the maintainer's actual installation;
   README/docs updated; changes committed. **Terminal.**
