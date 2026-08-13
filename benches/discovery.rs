@@ -44,7 +44,7 @@
 //! cargo bench --bench discovery -- codex_discovery
 //! cargo bench --bench discovery -- pi_discovery
 //! cargo bench --bench discovery -- omp_discovery
-//! cargo bench --bench discovery -- claude_discovery
+//! cargo bench --bench discovery -- opencode_discovery
 //! ```
 
 use std::{hint::black_box, path::PathBuf};
@@ -338,6 +338,48 @@ fn bench_claude_discovery(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark OpenCode discovery against a synthetic SQLite database.
+///
+/// Unlike the file-based integrations above, OpenCode persists sessions in
+/// a single indexed SQLite database and discovery is a `SELECT ... ORDER BY`
+/// rather than per-file parsing. This group tracks **query-scale cost**: how
+/// discovery time grows with the number of session rows, not with file size.
+/// The scaling axis is row count alone — `avg_lines`/`big_files` have no
+/// analogue for an indexed store, so the parameters diverge from the other
+/// groups by design.
+#[cfg(feature = "opencode")]
+fn bench_opencode_discovery(c: &mut Criterion) {
+    use resume::integration::opencode;
+
+    let mut group = c.benchmark_group("opencode_discovery");
+    group.sample_size(10);
+
+    for &sessions in &[200usize, 2000, 20000] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fixtures::opencode_db(tmp.path(), sessions);
+
+        let sanity = opencode::discover(tmp.path())
+            .expect("discover should not error")
+            .expect("database should exist");
+        assert_eq!(
+            sanity.parsed.len(),
+            sessions,
+            "opencode_discovery fixture sanity check"
+        );
+
+        group.bench_function(format!("{sessions}sessions"), |b| {
+            b.iter(|| {
+                let outcome = opencode::discover(tmp.path())
+                    .expect("discover should not error")
+                    .expect("database should exist");
+                black_box(outcome.parsed.len());
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "opencode"))]
 criterion_group!(
     benches,
     bench_git_scope,
@@ -345,5 +387,16 @@ criterion_group!(
     bench_pi_discovery,
     bench_omp_discovery,
     bench_claude_discovery
+);
+
+#[cfg(feature = "opencode")]
+criterion_group!(
+    benches,
+    bench_git_scope,
+    bench_codex_discovery,
+    bench_pi_discovery,
+    bench_omp_discovery,
+    bench_claude_discovery,
+    bench_opencode_discovery
 );
 criterion_main!(benches);

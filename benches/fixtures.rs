@@ -254,3 +254,54 @@ fn write_big_claude_transcript(path: &Path, uuid: &str, cwd: &str, target_mb: us
         written += line.len();
     }
 }
+
+/// Build a synthetic OpenCode SQLite database at `<root>/opencode.db` with
+/// `sessions` rows in the `session` table, matching the schema the discover
+/// function queries (`id`, `directory`, `title`, `time_updated`). Directories
+/// fan in across 20 distinct workspaces under `root` (same shape as the other
+/// generators), and timestamps are monotonically decreasing so the
+/// `ORDER BY time_updated DESC` in discover exercises the sort path.
+///
+/// Requires the `opencode` cargo feature (links `rusqlite`); feature-gated
+/// so `cargo bench` without the feature still compiles.
+#[cfg(feature = "opencode")]
+pub fn opencode_db(root: &Path, sessions: usize) {
+    use rusqlite::Connection;
+
+    let workspaces: Vec<PathBuf> = (0..20)
+        .map(|i| root.join(format!("ws{i}")))
+        .collect();
+    for ws in &workspaces {
+        std::fs::create_dir_all(ws).unwrap();
+    }
+
+    let mut conn = Connection::open(root.join("opencode.db")).expect("open opencode.db");
+    conn.execute_batch(
+        "create table session (
+            id text primary key,
+            directory text not null,
+            title text,
+            time_updated integer
+        )",
+    )
+    .expect("create session table");
+
+    let tx = conn.transaction().expect("begin transaction");
+    {
+        let mut stmt = tx
+            .prepare("insert into session (id, directory, title, time_updated) values (?1, ?2, ?3, ?4)")
+            .expect("prepare insert");
+        for i in 0..sessions {
+            let ws = &workspaces[i % workspaces.len()];
+            stmt.execute(rusqlite::params![
+                format!("ses_bench_{i:08x}"),
+                ws.display().to_string(),
+                format!("Bench session {i}"),
+                (sessions - i) as i64,
+            ])
+            .expect("insert session row");
+        }
+    }
+    tx.commit().expect("commit transaction");
+    conn.close().expect("close connection");
+}

@@ -43,6 +43,16 @@
 - `ResumeSpec`: `program = "opencode"`, `argv = ["--session", id]`, `cwd = session.directory`, `env = []`.
 - Closest existing integration for shape parity: `codex` (optional-SQLite precedent for feature-gating; OpenCode's SQLite is the sole/required source rather than enrichment-only, so the `opencode` cargo feature is required, unlike `codex-sqlite`).
 
+## Performance characterization
+
+- Benchmark group: `opencode_discovery` in `benches/discovery.rs`
+- Fixture generator: `opencode_db` in `benches/fixtures.rs`
+- Risk tracked: query-scale cost (SQLite `SELECT ... ORDER BY time_updated DESC` with no index on `time_updated`). Bench results at three scales (Apple M4 Max, `--quick`):
+  - 200 sessions: ~103 µs
+  - 2000 sessions: ~487 µs (4.7× for 10× rows — sublinear, in-memory sort still cheap)
+  - 20000 sessions: ~9.7 ms (20× for 10× rows — sort becomes the dominant cost at scale)
+- Noted because: OpenCode uses an indexed SQLite database, not per-session files, so there is no file-size sensitivity. The scaling axis is row count: the `ORDER BY` forces a full sort at scale, and the bench tracks whether that cost stays bounded as real installs accumulate tens of thousands of sessions. If this becomes a regression target, the fix is an index on `time_updated`, not a read-strategy change.
+
 ## Verification (real installation)
 
 - `resume --list -a opencode --up all` output: real, currently-installed sessions listed with real ids/titles/timestamps (e.g. `ses_00000000000000000000000002`, "New session - 2026-07-21T09:33:07.118Z").
