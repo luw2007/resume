@@ -102,7 +102,11 @@ Session objects contain `agent`, `profile`, `id`, `title`, `workspace`, `support
 
 ## Configuration
 
-Configuration is strict TOML. Exactly one file is loaded; files are not merged. Precedence is:
+Agent selection is initialized separately in `~/.resume/settings.json`. On the first run, `resume` opens a terminal chooser; rerun it with `resume setup` to replace the saved list. `-a/--agent` overrides the saved selection, and `agents` in the selected TOML config overrides it when `-a` is absent. If neither configuration nor `-a` is present, a noninteractive first run exits with a setup hint instead of scanning every integration.
+
+When a newer binary supports an additional agent, `resume` reports it once and records that it has been seen. It never enables that agent automatically; only `resume setup` changes the selected list.
+
+The existing TOML configuration remains strict and exactly one file is loaded. Its lookup precedence is:
 
 1. `--config <PATH>`
 2. `$XDG_CONFIG_HOME/resume/config.toml`, when it exists

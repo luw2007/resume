@@ -9,6 +9,7 @@ NAME
 
 SYNOPSIS
     resume [DIRECTORY] [OPTIONS]
+    resume setup
     resume config example
     resume completions <bash|zsh|fish>
     resume --man
@@ -45,6 +46,18 @@ DESCRIPTION
     picker. With either flag it prints once and exits, which makes it safe in
     scripts and CI. --json implies --list; passing both is accepted and
     redundant.
+
+    INITIALIZATION. On the first run without --agent or a configured TOML
+    agents list, `resume` opens a chooser and saves the selected integrations
+    in ~/.resume/settings.json. Run `resume setup` to replace that selection.
+    A newly supported integration is reported once but never enabled
+    automatically.
+
+SUBCOMMANDS
+    setup
+        Interactively choose the integrations to scan and write
+        ~/.resume/settings.json. This subcommand does not scan Sessions and
+        requires a controlling terminal.
 
 OPTIONS
     [DIRECTORY]

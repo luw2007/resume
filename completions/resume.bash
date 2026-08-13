@@ -25,6 +25,9 @@ _resume() {
             resume,help)
                 cmd="resume__subcmd__help"
                 ;;
+            resume,setup)
+                cmd="resume__subcmd__setup"
+                ;;
             resume__subcmd__config,example)
                 cmd="resume__subcmd__config__subcmd__example"
                 ;;
@@ -46,6 +49,9 @@ _resume() {
             resume__subcmd__help,help)
                 cmd="resume__subcmd__help__subcmd__help"
                 ;;
+            resume__subcmd__help,setup)
+                cmd="resume__subcmd__help__subcmd__setup"
+                ;;
             resume__subcmd__help__subcmd__config,example)
                 cmd="resume__subcmd__help__subcmd__config__subcmd__example"
                 ;;
@@ -56,7 +62,7 @@ _resume() {
 
     case "${cmd}" in
         resume)
-            opts="-U -D -a -h -V --up --down --agent --since --list --json --verbose --config --confirm-always --no-confirm --man --help --version config completions help"
+            opts="-U -D -a -h -V --up --down --all-worktrees --agent --since --list --json --verbose --config --confirm-always --no-confirm --man --help --version config completions setup help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -186,7 +192,7 @@ _resume() {
             return 0
             ;;
         resume__subcmd__help)
-            opts="config completions help"
+            opts="config completions setup help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -244,6 +250,34 @@ _resume() {
         resume__subcmd__help__subcmd__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        resume__subcmd__help__subcmd__setup)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        resume__subcmd__setup)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

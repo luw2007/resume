@@ -93,6 +93,8 @@ pub enum Shell {
     Fish,
 }
 
+pub const SUPPORTED_AGENTS: [&str; 5] = ["codex", "claude", "pi", "omp", "opencode"];
+
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum Command {
     #[command(
@@ -129,6 +131,15 @@ Session-query option and the bare DIRECTORY positional.\
 "
     )]
     Completions { shell: Shell },
+    #[command(
+        about = "Choose the agents Resume scans",
+        long_about = "\
+Choose the coding-agent integrations Resume scans and save the selection in
+`~/.resume/settings.json`. This subcommand requires an interactive terminal,
+does not scan Sessions, and replaces the previous selection.\
+"
+    )]
+    Setup,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
@@ -185,6 +196,7 @@ either flag it prints once and exits, so it is safe in scripts and CI.\
     after_help = "\
 SYNTAX
   resume [DIRECTORY] [OPTIONS]
+  resume setup
   resume config example
   resume completions <bash|zsh|fish>
 
@@ -222,6 +234,9 @@ COMMON EXAMPLES
 
   resume --json | jq '.sessions[] | .agent, .title'
       Print JSON v1 and post-process it. --json implies --list.
+
+  resume setup
+      Choose the agent integrations to scan and save the selection.
 
   resume config example > ~/.config/resume/config.toml
       Write a commented starter configuration file.
@@ -364,18 +379,18 @@ impl Cli {
             ));
         }
         match &self.command {
-            Some(Command::Config(_)) if self.has_session_query_options() => {
-                Err(Cli::command().error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "`config example` does not scan Sessions and cannot be combined with Session-query options",
-                ))
-            }
-            Some(Command::Completions { .. }) if self.has_session_query_options() => {
-                Err(Cli::command().error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "`completions` does not scan Sessions and cannot be combined with Session-query options",
-                ))
-            }
+            Some(Command::Config(_)) if self.has_session_query_options() => Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "`config example` does not scan Sessions and cannot be combined with Session-query options",
+            )),
+            Some(Command::Completions { .. }) if self.has_session_query_options() => Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "`completions` does not scan Sessions and cannot be combined with Session-query options",
+            )),
+            Some(Command::Setup) if self.has_session_query_options() => Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "`setup` does not scan Sessions and cannot be combined with Session-query options",
+            )),
             _ => Ok(()),
         }
     }
@@ -612,6 +627,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn setup_parses_and_rejects_session_query_options() {
+        assert!(matches!(
+            Cli::try_parse_from(["resume", "setup"]).unwrap().command,
+            Some(Command::Setup)
+        ));
+        let cli = Cli::try_parse_from(["resume", "-a", "pi", "setup"]).unwrap();
+        assert_eq!(cli.validate().unwrap_err().exit_code(), 2);
+    }
     /// `docs/product-design.md` Â§7: "list mode rejects confirmation
     /// options". `--list`/`--json` never open a confirmation prompt, so
     /// `--confirm-always`/`--no-confirm` alongside either must be a usage

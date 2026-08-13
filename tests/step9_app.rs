@@ -40,6 +40,15 @@ fn run_with_env(
     for agent in ["pi", "claude", "codex", "omp"] {
         executable(&bin.join(agent), "#!/bin/sh\nexit 0\n");
     }
+    let settings = home.join(".resume/settings.json");
+    if !settings.exists() {
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            settings,
+            r#"{"schema_version":1,"agents":["codex","claude","pi","omp"],"known_agents":["codex","claude","pi","omp","opencode"]}"#,
+        )
+        .unwrap();
+    }
     let xdg = home.join("xdg");
     for directory in ["config", "data", "state", "cache"] {
         fs::create_dir_all(xdg.join(directory)).unwrap();
@@ -539,12 +548,6 @@ fn missing_base_directory_is_a_usage_error() {
 
 #[test]
 fn no_controlling_terminal_is_a_usage_error_with_a_list_json_suggestion() {
-    // docs/product-design.md §5 "Terminal behavior": "If no controlling
-    // terminal can be opened, exit 2 and suggest --list or --json." Invoking
-    // the real binary with no --list/--json (interactive mode) through
-    // `Command::output()` has no TTY attached, so preflight must fail this
-    // way; before the fix, `PreflightFailed` was mapped to exit 1 with no
-    // suggestion, same as `InternalError`.
     let (tmp, ws) = fixtures();
     let output = run(tmp.path(), &ws, &[]);
     assert_eq!(output.status.code(), Some(2));
@@ -561,13 +564,6 @@ fn no_controlling_terminal_is_a_usage_error_with_a_list_json_suggestion() {
 
 #[test]
 fn git_unavailable_falls_back_to_exact_scope_with_a_visible_diagnostic() {
-    // scope-git-failure-diagnostic / doccheck-git-scope-failure-not-surfaced-as-diagnostic:
-    // every fixture-based test already runs with a PATH containing no `git`
-    // binary (by construction of `run_with_env`), so Git Scope discovery
-    // already fails in-process; this test is the first to assert the
-    // resulting `git_scope_discovery_failed` diagnostic is actually visible
-    // on stderr end-to-end, closing the previously-flagged "constructed but
-    // never surfaced" gap.
     let (tmp, ws) = fixtures();
     let output = run(tmp.path(), &ws, &["--list", "--agent", "pi"]);
     assert!(output.status.success());
@@ -576,7 +572,6 @@ fn git_unavailable_falls_back_to_exact_scope_with_a_visible_diagnostic() {
         stderr.contains("git_scope_discovery_failed"),
         "expected git_scope_discovery_failed on stderr (PATH has no git), got: {stderr}"
     );
-    // The exact-directory fallback still finds the pi session recorded at ws.
     assert!(String::from_utf8_lossy(&output.stdout).contains("pi title"));
 }
 
