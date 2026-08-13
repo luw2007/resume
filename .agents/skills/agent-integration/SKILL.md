@@ -26,6 +26,12 @@ Skill never installs, runs, or judges a candidate the maintainer did not name.
   binary.
 - **CI never installs or runs a real agent.** Only fixture data and
   fake-native-executable regression tests may run unattended.
+- **Probe beats documentation.** A direct probe of the real on-disk
+  artifact is ground truth. Agent docs, community guides, and even the
+  agent's own `--help` can lag or contradict reality — the opencode
+  integration found SQLite where all documentation described JSON files.
+  When docs and probe disagree, correct `research.md` and proceed on the
+  probe.
 - **Closed loop, always.** The run ends in exactly one terminal
   `checklist.md` status: `verified` or `unsupported`. Never leave a run at
   `researched` or `implemented` without continuing to a terminal state or
@@ -55,20 +61,24 @@ don't advance until it's met.
 
 ### 2. Researched → installed & probed (explicit confirmation gate)
 
-1. Determine the install command for the agent (its documented install
+1. If the agent is already installed with real session data on the
+   maintainer's machine, skip to step 4 — the install gate (steps 2–3)
+   is not applicable. Record "already installed" in the Install probe
+   section of `research.md` and probe the existing artifacts directly.
+2. Determine the install command for the agent (its documented install
    method — package manager, script, binary download).
-2. Present the maintainer the exact command, where it writes files, and
+3. Present the maintainer the exact command, where it writes files, and
    whether first run requires login or network access. **Wait for explicit
    approval; do not run anything before it.**
-3. On approval, install and perform one minimal run (e.g. one trivial
+4. On approval, install and perform one minimal run (e.g. one trivial
    prompt) sufficient to produce a real, on-disk session artifact.
-4. Locate and inspect that artifact: exact path, format, the field(s) that
+5. Locate and inspect that artifact: exact path, format, the field(s) that
    identify the session, and the field(s) that record the working
    directory.
-5. Record the install command, approval, and probe evidence (paths, file
+6. Record the install command, approval, and probe evidence (paths, file
    excerpts, format notes) in `evidence/<agent>/research.md`. Set
    `checklist.md`'s Install confirmation to the approval date/reference.
-6. If the probe contradicts step 1's documentation, correct
+7. If the probe contradicts step 1's documentation, correct
    `research.md` — the probe is stronger evidence than docs.
 
 ### 3. Installed & probed → skill-defined (implementation protocol)
@@ -89,6 +99,13 @@ before writing code:
   built as discrete argv — never a shell string.
 - **Isolation/profile concept**, if the agent has one (compare `omp`'s
   profile handling) → part of `SessionKey` identity.
+- **Optional dependency / feature gate**, if the store format requires a
+  non-stdlib crate (e.g., SQLite via `rusqlite`) → gate the integration
+  behind a cargo feature with a no-op stub when the feature is off,
+  following the `codex`/`opencode` pattern. Two shapes: enrichment-only
+  (`codex-sqlite`, the feature adds capability to an already-working
+  file-based integration) vs sole-source (`opencode`, the feature is
+  required for any discovery at all).
 
 Set `checklist.md` status to `skill-defined` once this mapping is written
 down and reviewed against an existing integration (`pi`, `claude`, `codex`,
@@ -114,16 +131,21 @@ or `omp`) for shape parity.
    doc comment must state what performance risk it tracks: full-file
    parse cost for file-based stores, or query-scale cost for indexed
    stores (SQLite, etc.) — every agent gets a group regardless, so a
-   future regression is always visible. Record the performance
-   characterization in `evidence/<agent>/research.md`.
+  future regression is always visible. Feature-gated integrations need
+  `#[cfg(feature = "...")]` on both the bench function and fixture
+  generator, plus a split `criterion_group!` (see `opencode_discovery`
+  for the pattern). Record the performance characterization in
+  `evidence/<agent>/research.md`.
 5. Set `checklist.md` status to `implemented`.
 6. Run the real, maintainer-installed agent end to end: `resume --list -a
    <agent>` must show the real session probed in step 2; confirm the
    `Session`'s workspace matches; confirm the fake-native-executable test's
    asserted argv matches what the real native resume actually needs (cross-
    check against the agent's own resume docs/`--help`, not just the fixture).
-7. Update `README.md`'s Support list table and any config docs to include
-   the new agent.
+7. Update `README.md`'s **Native Resume boundary** table (native
+   invocation + isolation preserved) and **Support list** table
+   (Discovery/Preview/Resume/Profiles/Active capabilities), plus any
+   config docs, to include the new agent.
 8. Commit the source, tests, docs, and checklist/evidence changes for this
    one agent (see repo git rules — explicit paths, no `git add -A`).
 9. Set `checklist.md` status to `verified`.

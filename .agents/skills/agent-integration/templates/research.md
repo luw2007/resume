@@ -24,7 +24,8 @@
 
 ## Install probe
 
-- Install command run: `<exact command>`
+- Already installed?: `<yes — skip install gate, probe existing artifacts | no>`
+- Install command run: `<exact command, or "n/a — already installed">`
 - Maintainer approval: `<date/reference>`
 - Install location: `<path(s) written>`
 - Login/network required: `<yes/no, detail>`
