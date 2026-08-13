@@ -102,12 +102,19 @@ pub fn run(cli: Cli) -> i32 {
             return crate::errors::E1004.report_with(error).emit();
         }
     };
-    let (settings, new_agents) = match settings::load_or_setup() {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("resume: {error}");
-            return EXIT_USAGE;
+    let (settings, new_agents) = if cli.agent.is_empty() && config.agents.is_none() {
+        match settings::load_or_setup() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("resume: {error}");
+                return EXIT_USAGE;
+            }
         }
+    } else {
+        // An explicit CLI or TOML selection has precedence over settings and
+        // must remain usable even when persisted settings were written by an
+        // invalid or incompatible version.
+        (settings::Settings::default(), Vec::new())
     };
     if !new_agents.is_empty() {
         eprintln!(
@@ -142,7 +149,7 @@ pub fn run(cli: Cli) -> i32 {
             print_list(&records);
             print_diagnostics(&state, options.verbose);
         }
-        return discovery_exit(&records, &state);
+        return discovery_exit(&records, &state, options.agents.is_empty());
     }
 
     run_interactive(&options, scope, discovery_ctx)
@@ -1228,8 +1235,15 @@ fn render_diagnostic(error: &Diagnostic, verbose: bool) -> String {
         error.category, error.count, path, chain
     )
 }
-fn discovery_exit(records: &[CandidateRecord], state: &DiscoveryState) -> i32 {
-    if records.is_empty() && state.successful_integrations.load(Ordering::SeqCst) == 0 {
+fn discovery_exit(
+    records: &[CandidateRecord],
+    state: &DiscoveryState,
+    no_agents_selected: bool,
+) -> i32 {
+    if !no_agents_selected
+        && records.is_empty()
+        && state.successful_integrations.load(Ordering::SeqCst) == 0
+    {
         EXIT_ERROR
     } else {
         EXIT_OK

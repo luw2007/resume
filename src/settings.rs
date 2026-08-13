@@ -6,18 +6,20 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::cli::SUPPORTED_AGENTS;
 
 const SCHEMA_VERSION: u32 = 1;
 const SETTINGS_RELATIVE_PATH: &str = ".resume/settings.json";
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Settings {
     schema_version: u32,
     agents: Vec<String>,
     known_agents: Vec<String>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,7 +54,7 @@ impl Settings {
         if self.schema_version != SCHEMA_VERSION {
             return Err(SettingsError::UnsupportedSchema(self.schema_version));
         }
-        for agent in self.agents.iter().chain(&self.known_agents) {
+        for agent in &self.agents {
             if !SUPPORTED_AGENTS.contains(&agent.as_str()) {
                 return Err(SettingsError::UnknownAgent(agent.clone()));
             }
@@ -95,6 +97,7 @@ fn current_settings(agents: Vec<String>) -> Settings {
         schema_version: SCHEMA_VERSION,
         agents,
         known_agents: SUPPORTED_AGENTS.iter().map(ToString::to_string).collect(),
+        extra: Map::new(),
     }
 }
 
@@ -157,7 +160,9 @@ pub fn refresh_known_agents(
 ) -> Result<(Settings, Vec<&'static str>), SettingsError> {
     let new_agents = newly_supported(&settings);
     if !new_agents.is_empty() {
-        settings.known_agents = SUPPORTED_AGENTS.iter().map(ToString::to_string).collect();
+        for agent in &new_agents {
+            settings.known_agents.push((*agent).to_string());
+        }
         save(home, &settings)?;
     }
     Ok((settings, new_agents))
@@ -304,6 +309,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             agents: vec!["pi".into()],
             known_agents: vec!["codex".into(), "claude".into(), "pi".into(), "omp".into()],
+            extra: Map::new(),
         };
         let (updated, new_agents) = refresh_known_agents(home.path(), settings).unwrap();
         assert_eq!(new_agents, ["opencode"]);
