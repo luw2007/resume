@@ -35,13 +35,23 @@ fn run_with_env(
     args: &[&str],
     extra_env: &[(&str, &Path)],
 ) -> std::process::Output {
+    run_with_env_and_settings(home, workspace, args, extra_env, true)
+}
+
+fn run_with_env_and_settings(
+    home: &Path,
+    workspace: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &Path)],
+    create_default_settings: bool,
+) -> std::process::Output {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
     for agent in ["pi", "claude", "codex", "omp"] {
         executable(&bin.join(agent), "#!/bin/sh\nexit 0\n");
     }
     let settings = home.join(".resume/settings.json");
-    if !settings.exists() {
+    if create_default_settings && !settings.exists() {
         fs::create_dir_all(settings.parent().unwrap()).unwrap();
         fs::write(
             settings,
@@ -134,6 +144,131 @@ fn fixtures() -> (TempDir, PathBuf) {
         serde_json::json!({"type":"session","version":3,"id":"omp-id","timestamp":1700000000,"cwd":ws}),
     );
     (tmp, ws)
+}
+
+#[test]
+fn empty_settings_selection_is_a_successful_empty_list_and_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let settings = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        settings,
+        r#"{"schema_version":1,"agents":[],"known_agents":[]}"#,
+    )
+    .unwrap();
+
+    for mode in ["--list", "--json"] {
+        let output = run(tmp.path(), &ws, &[mode]);
+        assert!(output.status.success(), "{mode}: {output:?}");
+    }
+}
+
+#[test]
+fn explicit_agent_bypasses_malformed_settings() {
+    let (tmp, ws) = fixtures();
+    let settings = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(settings, "not json").unwrap();
+
+    let output = run(tmp.path(), &ws, &["--json", "--agent", "pi"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["agent"] == "pi")
+    );
+}
+
+#[test]
+fn config_agents_bypass_malformed_settings() {
+    let (tmp, ws) = fixtures();
+    let settings = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(settings, "not json").unwrap();
+    let config = tmp.path().join("xdg/config/resume/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(config, "agents = ['pi']\n").unwrap();
+
+    let output = run(tmp.path(), &ws, &["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["agent"] == "pi"),
+        "config selection was not honored: {value}"
+    );
+}
+
+#[test]
+fn retired_known_agents_and_unknown_fields_survive_notification_write() {
+    let (tmp, ws) = fixtures();
+    let path = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"schema_version":1,"agents":["pi"],"known_agents":["retired-agent"],"future_option":{"enabled":true}}"#,
+    )
+    .unwrap();
+
+    let output = run(tmp.path(), &ws, &["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["future_option"]["enabled"], true);
+    assert!(
+        saved["known_agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "retired-agent")
+    );
+}
+
+#[test]
+fn future_schema_is_rejected_without_rewriting_settings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let path = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = br#"{"schema_version":999,"agents":[],"known_agents":[],"future":42}"#;
+    fs::write(&path, original).unwrap();
+
+    let output = run(tmp.path(), &ws, &["--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn first_run_without_tty_prints_setup_hint_before_scanning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let pi_root = tmp.path().join("pi-root");
+    fs::create_dir_all(&pi_root).unwrap();
+    // A missing settings file in Command::output's non-TTY environment must
+    // stop at setup, before any integration root can be scanned.
+    let output = run_with_env_and_settings(
+        tmp.path(),
+        &ws,
+        &["--json"],
+        &[("PI_CODING_AGENT_DIR", pi_root.as_path())],
+        false,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("resume setup"), "stderr={stderr:?}");
+    assert!(
+        !stderr.contains("scanned") && !stderr.contains("root_unavailable"),
+        "discovery ran before setup gate: {stderr:?}"
+    );
 }
 
 #[test]
