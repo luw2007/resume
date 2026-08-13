@@ -15,17 +15,17 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    cli::Cli,
+    cli::{Cli, SUPPORTED_AGENTS},
     config::{Config, PreviewMode, PreviewPosition},
     diagnostics::{redact_path, redact_text},
     integration::{claude, codex, omp, opencode, pi},
     launch::{self, LaunchEvidence},
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
-    preview::jsonl::Bounds,
-    preview::text,
+    preview::{jsonl::Bounds, text},
     runtime::CancelToken,
     scope::{DefaultScope, Direction, Scope},
     session::{Diagnostic, ResumeSpec, Session, SupportStatus},
+    settings,
 };
 
 pub const EXIT_OK: i32 = 0;
@@ -102,7 +102,22 @@ pub fn run(cli: Cli) -> i32 {
             return crate::errors::E1004.report_with(error).emit();
         }
     };
-    let options = match effective_options(&cli, config) {
+    let (settings, new_agents) = match settings::load_or_setup() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("resume: {error}");
+            return EXIT_USAGE;
+        }
+    };
+    if !new_agents.is_empty() {
+        eprintln!(
+            "resume: new supported agent{} available: {}; run `resume setup` to enable {}",
+            if new_agents.len() == 1 { "" } else { "s" },
+            new_agents.join(", "),
+            if new_agents.len() == 1 { "it" } else { "them" },
+        );
+    }
+    let options = match effective_options(&cli, config, settings) {
         Ok(options) => options,
         Err(error) => {
             eprintln!("resume: {error}");
@@ -133,19 +148,23 @@ pub fn run(cli: Cli) -> i32 {
     run_interactive(&options, scope, discovery_ctx)
 }
 
-fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, String> {
+fn effective_options(
+    cli: &Cli,
+    config: Config,
+    settings: settings::Settings,
+) -> Result<EffectiveOptions, String> {
     let agents: Vec<String> = if !cli.agent.is_empty() {
         cli.agent
             .iter()
             .map(|a| a.to_string_lossy().to_ascii_lowercase())
             .collect()
+    } else if let Some(agents) = config.agents {
+        agents
     } else {
-        config
-            .agents
-            .unwrap_or_else(|| vec!["codex".into(), "claude".into(), "pi".into(), "omp".into()])
+        settings.agents().to_vec()
     };
     for agent in &agents {
-        if !matches!(agent.as_str(), "pi" | "claude" | "codex" | "omp" | "opencode") {
+        if !SUPPORTED_AGENTS.contains(&agent.as_str()) {
             return Err(format!("unknown agent {agent:?}"));
         }
     }
@@ -245,7 +264,8 @@ fn run_interactive(
     let cancel = CancelToken::new();
 
     let next_key = Arc::new(AtomicU64::new(1));
-    let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> = Arc::new(Mutex::new(HashMap::new()));
+    let map: Arc<Mutex<HashMap<CandidateKey, CandidateRecord>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let candidates: Arc<Mutex<Vec<PickerCandidate>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Codex's discovery cost is dominated by per-file JSONL parsing and, on
@@ -259,8 +279,7 @@ fn run_interactive(
     // re-reads the shared candidate list on every navigation). When Codex
     // is the *only* configured agent there is nothing else to show while
     // waiting, so it stays synchronous like every other agent.
-    let codex_async =
-        options.agents.iter().any(|a| a == codex::AGENT) && options.agents.len() > 1;
+    let codex_async = options.agents.iter().any(|a| a == codex::AGENT) && options.agents.len() > 1;
     let sync_agents: Vec<&String> = options
         .agents
         .iter()
@@ -1289,7 +1308,12 @@ mod tests {
                 risk: RiskStatus::Normal,
             }
         }
-        let options = effective_options(&default_cli(), Config::default()).unwrap();
+        let options = effective_options(
+            &default_cli(),
+            Config::default(),
+            settings::Settings::default(),
+        )
+        .unwrap();
         for support in [
             SupportStatus::Unsupported,
             SupportStatus::DiscoverOnly,
@@ -1482,7 +1506,7 @@ mod tests {
             man: false,
             command: None,
         };
-        assert!(effective_options(&cli, Config::default()).is_err());
+        assert!(effective_options(&cli, Config::default(), settings::Settings::default()).is_err());
     }
 
     fn default_cli() -> Cli {
@@ -1517,7 +1541,7 @@ mod tests {
             verbose: Some(true),
             ..Config::default()
         };
-        let options = effective_options(&cli, config).unwrap();
+        let options = effective_options(&cli, config, settings::Settings::default()).unwrap();
         assert!(
             options.confirm_always,
             "config.confirm_always=true must set EffectiveOptions.confirm_always even with no CLI flag"
@@ -1528,7 +1552,8 @@ mod tests {
         );
 
         // Absent from config and CLI, both default to false.
-        let options = effective_options(&cli, Config::default()).unwrap();
+        let options =
+            effective_options(&cli, Config::default(), settings::Settings::default()).unwrap();
         assert!(!options.confirm_always);
         assert!(!options.verbose);
     }
@@ -1540,7 +1565,8 @@ mod tests {
     fn agent_flag_is_case_insensitive() {
         let mut cli = default_cli();
         cli.agent = vec![OsString::from("PI"), OsString::from("Codex")];
-        let options = effective_options(&cli, Config::default()).unwrap();
+        let options =
+            effective_options(&cli, Config::default(), settings::Settings::default()).unwrap();
         assert_eq!(options.agents, vec!["pi".to_string(), "codex".to_string()]);
     }
 }

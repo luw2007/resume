@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added `resume setup` and `~/.resume/settings.json` agent selection. First use chooses which integrations scan; `-a/--agent` and configured TOML `agents` still override it. New integrations are announced once after an upgrade but are never enabled without rerunning `resume setup`.
+
 ## 0.3.0 - 2026-08-12
 
 ### Added

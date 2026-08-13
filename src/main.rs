@@ -17,6 +17,13 @@ fn main() {
         Some(Command::Config(config)) => match config.command {
             ConfigCommand::Example => print!("{}", resume::cli::config_example()),
         },
+        Some(Command::Setup) => match resume::settings::run_setup() {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("resume: {error}");
+                std::process::exit(2);
+            }
+        },
         Some(Command::Completions { shell }) => {
             let mut command = resume::cli::command();
             let name = command.get_name().to_owned();

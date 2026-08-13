@@ -12,4 +12,5 @@ pub mod proc;
 pub mod runtime;
 pub mod scope;
 pub mod session;
+pub mod settings;
 pub mod time;
