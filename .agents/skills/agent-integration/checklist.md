@@ -24,3 +24,4 @@ Status is exactly one of:
 
 | Agent | Status |
 |---|---|
+| opencode | verified |

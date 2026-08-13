@@ -18,7 +18,7 @@ use crate::{
     cli::Cli,
     config::{Config, PreviewMode, PreviewPosition},
     diagnostics::{redact_path, redact_text},
-    integration::{claude, codex, omp, pi},
+    integration::{claude, codex, omp, opencode, pi},
     launch::{self, LaunchEvidence},
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
     preview::jsonl::Bounds,
@@ -145,7 +145,7 @@ fn effective_options(cli: &Cli, config: Config) -> Result<EffectiveOptions, Stri
             .unwrap_or_else(|| vec!["codex".into(), "claude".into(), "pi".into(), "omp".into()])
     };
     for agent in &agents {
-        if !matches!(agent.as_str(), "pi" | "claude" | "codex" | "omp") {
+        if !matches!(agent.as_str(), "pi" | "claude" | "codex" | "omp" | "opencode") {
             return Err(format!("unknown agent {agent:?}"));
         }
     }
@@ -502,6 +502,7 @@ fn discover_agent(
         "claude" => discover_claude(scope),
         "codex" => discover_codex(scope, &ctx.codex_activity),
         "omp" => discover_omp(scope, ctx),
+        "opencode" => discover_opencode(scope),
         _ => AgentDiscovery::failed("unknown_agent"),
     };
     if let Some(cutoff) = since_cutoff {
@@ -745,6 +746,39 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
         }
     }
     AgentDiscovery::ok(records, errors)
+}
+
+fn discover_opencode(scope: &Scope) -> AgentDiscovery {
+    let Some(root) = opencode::roots::effective_root() else {
+        return AgentDiscovery::failed("opencode_root_unavailable");
+    };
+    match opencode::discover(&root) {
+        Ok(Some(outcome)) => {
+            let errors = count_errors("opencode_skipped", outcome.skipped_rows);
+            let home_dir = home();
+            let records = outcome
+                .parsed
+                .into_iter()
+                .filter(|parsed| scope.contains_workspace(&parsed.directory))
+                .filter_map(|parsed| {
+                    let mut session = parsed.clone().into_session(&root, home_dir.as_deref());
+                    normalize_availability(&mut session);
+                    let spec = opencode::resume_spec(&parsed).ok()?;
+                    let transcript = opencode::transcript_path(&root);
+                    let evidence =
+                        LaunchEvidence::capture_with_transcript(&session, transcript).ok();
+                    Some(CandidateRecord {
+                        session,
+                        spec: Some(spec),
+                        evidence,
+                    })
+                })
+                .collect();
+            AgentDiscovery::ok(records, errors)
+        }
+        Ok(None) => AgentDiscovery::failed("opencode_root_unavailable"),
+        Err(_) => AgentDiscovery::failed("opencode_discovery_failed"),
+    }
 }
 
 fn codex_transcript_path(session: &Session) -> Option<PathBuf> {

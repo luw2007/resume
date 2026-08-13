@@ -36,10 +36,16 @@ unicode-width = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 
 [features]
-# Default features keep SQLite enrichment off so a plain `cargo build` never
-# links SQLite. Enable with `--features codex-sqlite`.
+# Default features keep SQLite consumers off so a plain `cargo build` never
+# links SQLite. Enable with `--features codex-sqlite` or `--features opencode`.
 default = []
 codex-sqlite = ["dep:rusqlite"]
+# OpenCode persists sessions only in a SQLite database (no JSONL/plain-file
+# fallback exists), so this feature is required for `-a opencode` discovery
+# to do anything; without it the integration degrades to a single diagnostic
+# and returns no Sessions, matching every other integration's "read-only,
+# never-blocks-the-others" contract.
+opencode = ["dep:rusqlite"]
 
 # skim-tuikit 0.6.6 omits xterm's `CSI 1;3{C,D}` Alt-arrow mappings. The
 # picker uses those keys for tab navigation; retain the upstream API and patch

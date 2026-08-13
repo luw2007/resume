@@ -139,6 +139,7 @@ After selection, `resume` restores the terminal, looks up the structured Session
 | Codex | `codex -C <workspace> resume <uuid>` | nondefault `CODEX_HOME` |
 | OMP default profile | `omp --resume <id>` | config/root environment and custom `--session-dir` |
 | OMP named profile | `omp --profile <name> --resume <id>` | profile, config/root environment, and custom `--session-dir` |
+| OpenCode | `opencode --session <id>` | none (OpenCode has no profile/isolation concept) |
 
 The recorded Workspace is the child working directory. Missing or changed Workspaces and other risky evidence prevent or confirm Resume as appropriate. These are exact launcher contracts tested by fake native executables; they are not claims that `resume` reproduces each agent's native title-ranking behavior.
 
@@ -146,12 +147,15 @@ The recorded Workspace is the child working directory. Missing or changed Worksp
 
 “Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi, so Pi Sessions remain `Unknown`. Claude Sessions also report `Unknown`. Codex Sessions report `Active` only when one process-wide `lsof` probe finds a live Codex process holding the exact rollout file open. OMP correlates one read-only process snapshot with its per-profile terminal breadcrumbs.
 
+OpenCode support is compiled in only with `cargo build --features opencode` (it depends on SQLite, unlike every other integration); a plain `cargo build` runs without it and `-a opencode` reports `opencode_root_unavailable`.
+
 | Agent | Discovery | Preview parsing | Exact Resume | Profiles | Active Detection |
 |---|---|---|---|---|---|
 | Pi | Supported | Supported | Supported | Not applicable | Conditional: validated ID + Session path evidence; Unknown by default |
 | Claude Code | Supported | Supported | Supported | Not applicable | Unknown (no proven correlation) |
 | Codex | Supported | Supported | Supported | Not applicable | Supported: one `lsof` probe per run; exact rollout path or confirmed device/inode evidence; Unknown otherwise |
 | OMP | Supported | Supported | Supported | Supported | Supported: live OMP process + resolved TTY + matching existing per-profile breadcrumb |
+| OpenCode | Supported (requires `--features opencode`) | Title only (no message-content extraction) | Supported | Not applicable | Unknown (no proven correlation) |
 
 Preview parsing here means read-only extraction and terminal-safe normalization are covered by integration/foundation tests. It does not promise native title precedence or a full transcript in the current production picker. Set `RESUME_DISABLE_PROC_PROBE` to any value to disable process probing and force positive-evidence activity detection to fall back to `Unknown`.
 
