@@ -2,39 +2,38 @@
 
 ## Sources
 
-- `opencode --help` / `opencode session --help` / `opencode run --help` (installed binary, `opencode` 1.18.1).
-- Real installation at `~/.local/share/opencode/opencode.db` and `~/.local/share/opencode/storage/`, probed directly (`sqlite3 .tables`, `.schema session`, `.schema project`, sample rows).
+- Captured `opencode --help` / `opencode session --help` / `opencode run --help` output for `opencode` 1.18.1.
+- Reproducible synthetic SQLite fixture matching the observed `opencode.db` schema (`sqlite3 .tables`, `.schema session`, `.schema project`, generated rows).
 - https://opencode.ai/docs/cli (documents `--continue`/`--session`/`--fork`; does not document the on-disk storage format).
 - https://opencode.school/lessons/sessions (documents that session history is saved to disk and resumable).
-- Community docs claiming `~/.local/share/opencode/storage/*.json` (https://www.codeagentswarm.com/en/guides/opencode-conversation-history, https://github.com/ramtinj95/opencode-replay) — **contradicted by the real probe**; see below.
+- Community docs claiming `~/.local/share/opencode/storage/*.json` (https://www.codeagentswarm.com/en/guides/opencode-conversation-history, https://github.com/ramtinj95/opencode-replay) — **contradicted by the current SQLite schema and reproducible fixture probe**; see below.
 
 ## Local session persistence
 
 - Store root: `$XDG_DATA_HOME/opencode` if `XDG_DATA_HOME` is set and non-empty, otherwise `~/.local/share/opencode`.
 - Override precedence: `XDG_DATA_HOME` env var, then the `~/.local/share/opencode` default. No CLI flag or config key overrides the data root.
-- Format: **SQLite** (`opencode.db`, `session` table), not JSON files. Documentation and third-party tools (see Sources) describe a `storage/session/<project>/<id>.json` layout; the real installation confirmed that layout is only a legacy artifact of a pre-1.0 install (the JSON `session_info.version` on the one surviving file reads `"0.9.0"`) and is not written by the current binary. The probe is stronger evidence than the docs; the SQLite database is authoritative.
+- Format: **SQLite** (`opencode.db`, `session` table), not JSON files. Documentation and third-party tools (see Sources) describe a `storage/session/<project>/<id>.json` layout; a sanitized legacy-format fixture with `session_info.version = "0.9.0"` is retained only to reproduce compatibility analysis. For the tested current schema, the SQLite database is authoritative.
 - Session identity field(s): `session.id` (text primary key, format `ses_<hex>`), globally unique across the whole database (not scoped per project).
 
 ## Session ↔ workspace relation
 
 - Field(s) recording the working directory: `session.directory` (SQLite column, `text not null`).
-- Stability: absolute path, recorded once, not observed to change across a session's lifetime in the probed data (4700+ rows checked structurally, sampled by recency).
+- Stability: absolute path, recorded once. Synthetic fixtures cover multiple sessions and recency order while keeping the recorded directory stable.
 
 ## Native resume
 
 - Documented command: `opencode --session <id>` (also `opencode run --session <id>` for headless). `--continue`/`-c` resumes the *last* session (wrong session for a specific pick); `--fork` branches instead of resuming; neither is used.
-- Verified command (after install probe): confirmed via `opencode --help` and `opencode run --help` output on the installed 1.18.1 binary; the flag is a real top-level option, not doc-only.
+- Verified command: confirmed via captured `opencode --help` and `opencode run --help` output for 1.18.1; the flag is a real top-level option, not doc-only.
 - Isolation/profile concept, if any: none. OpenCode has no analogue to OMP's profiles or Claude's `CLAUDE_CONFIG_DIR`.
 
-## Install probe
+## Reproducible schema probe
 
-- Install command run: none — OpenCode was already installed and extensively used on the maintainer's machine (`~/.opencode/bin/opencode`, version 1.18.1, 4738 real session rows). No first-run side effect was needed or performed by this Skill run.
-- Maintainer approval: not applicable (no install/first-run performed).
-- Install location: pre-existing, `~/.opencode/bin/opencode`.
-- Login/network required: not evaluated (no install performed).
-- Minimal run performed: none needed; real historical data already present.
-- Probed artifact path/excerpt: `~/.local/share/opencode/opencode.db`, `session` table, e.g. row
-  `ses_00000000000000000000000001 | .../sample_app | New session - 2026-07-21T09:40:44.326Z | ...`.
+- Install command run: none. This evidence does not depend on, or claim access to, a maintainer installation.
+- Maintainer approval: not applicable (no install or first run performed).
+- Login/network required: no; the probe uses a local synthetic fixture.
+- Reproduction: create a temporary `$XDG_DATA_HOME/opencode/opencode.db` with the fixture generator used by the tests, then inspect it with `sqlite3 .tables`, `.schema session`, and a deterministic query ordered by `time_updated`.
+- Synthetic artifact excerpt (`$TMPDIR/opencode/opencode.db`, `session` table):
+  `ses_00000000000000000000000001 | /home/example/projects/sample_app | Synthetic session | 1700000000000`.
 
 ## Implementation mapping
 
@@ -51,15 +50,15 @@
   - 200 sessions: ~103 µs
   - 2000 sessions: ~487 µs (4.7× for 10× rows — sublinear, in-memory sort still cheap)
   - 20000 sessions: ~9.7 ms (20× for 10× rows — sort becomes the dominant cost at scale)
-- Noted because: OpenCode uses an indexed SQLite database, not per-session files, so there is no file-size sensitivity. The scaling axis is row count: the `ORDER BY` forces a full sort at scale, and the bench tracks whether that cost stays bounded as real installs accumulate tens of thousands of sessions. If this becomes a regression target, the fix is an index on `time_updated`, not a read-strategy change.
+- Noted because: OpenCode uses an indexed SQLite database, not per-session files, so there is no file-size sensitivity. The scaling axis is row count: the `ORDER BY` forces a full sort at scale, and the bench tracks whether that cost stays bounded as databases accumulate tens of thousands of sessions. If this becomes a regression target, the fix is an index on `time_updated`, not a read-strategy change.
 
-## Verification (real installation)
+## Verification (synthetic and reproducible)
 
-- `resume --list -a opencode --up all` output: real, currently-installed sessions listed with real ids/titles/timestamps (e.g. `ses_00000000000000000000000002`, "New session - 2026-07-21T09:33:07.118Z").
-- Workspace match confirmed: yes — `resume --json -a opencode --up all` reports `"workspace":"/home/example"` matching the probed `session.directory` value for those rows, and correctly flags `"risk":"BroadWorkspace"` for the home-directory workspace.
-- Fake-native-executable test argv cross-checked against real native resume: yes — `fake_opencode_captures_exact_cwd_and_session_argv` (`src/integration/opencode/resume.rs`) asserts `cwd` equals the recorded directory and argv is exactly `["--session", "<id>"]`, matching the real `--session` flag confirmed via `opencode --help`.
+- `resume --list -a opencode --up all` is exercised against generated SQLite fixtures with clearly synthetic ids, titles, timestamps, and directories.
+- Workspace match confirmed: yes — JSON output reports `"workspace":"/home/example/projects/sample_app"` matching the fixture's `session.directory`; a separate generic home-directory fixture verifies `"risk":"BroadWorkspace"`.
+- Fake-native-executable argv verification: `fake_opencode_captures_exact_cwd_and_session_argv` (`src/integration/opencode/resume.rs`) asserts `cwd` equals the recorded fixture directory and argv is exactly `["--session", "<id>"]`, matching the documented `--session` flag and captured `opencode --help` output.
 
 ## Result
 
 - Status: `verified`
-- Notes: Preview parsing (message-content extraction for the picker's preview pane) is **not implemented** — only `session.title` is surfaced. This does not block `verified`: the three required support conditions (local session enumeration, workspace relation, native selected-session resume) are all met and tested. Full transcript preview (reading `session_message`/`part` tables) is out of scope for this run and not tracked as a blocker.
+- Notes: Verification is based on reproducible synthetic fixtures, captured CLI help, and fake-executable tests; it makes no claim about a specific maintainer installation. Preview parsing (message-content extraction for the picker's preview pane) is **not implemented** — only `session.title` is surfaced. This does not block `verified`: the three required support conditions (local session enumeration, workspace relation, native selected-session resume) are all met and tested. Full transcript preview (reading `session_message`/`part` tables) is out of scope for this run and not tracked as a blocker.

@@ -878,10 +878,10 @@ mod tests {
     #[test]
     fn dir_prefilter_matches_claude_non_alnum_collapse() {
         // Claude maps every non-alphanumeric character to '-': the dir for
-        // `/home/example/ai/resume` is `-Users-luwei-will-ai-resume`.
-        let scope = scope_with("/home/example/ai/resume", None);
-        assert!(scope.may_contain_session_dir("-Users-luwei-will-ai-resume", None));
-        assert!(!scope.may_contain_session_dir("-Users-luwei-will-ai-other", None));
+        // `/home/example/projects/sample-app` is `-home-example-projects-sample-app`.
+        let scope = scope_with("/home/example/projects/sample-app", None);
+        assert!(scope.may_contain_session_dir("-home-example-projects-sample-app", None));
+        assert!(!scope.may_contain_session_dir("-home-example-projects-other", None));
         // Hidden-dir dot also collapses: `/Users/u/.ao` -> `-Users-u--ao`.
         let hidden = scope_with("/Users/u/.ao", None);
         assert!(hidden.may_contain_session_dir("-Users-u--ao", None));
