@@ -4,9 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-14
+
 ### Added
 
 - Added `resume setup` and `~/.resume/settings.json` agent selection. First use chooses which integrations scan; `-a/--agent` and configured TOML `agents` still override it. New integrations are announced once after an upgrade but are never enabled without rerunning `resume setup`.
+
+### Fixed
+
+- Replaced maintainer-specific integration evidence and test paths with synthetic data.
+
+### Changed
+
+- Bundled the MIT license and provenance notice for the patched `skim-tuikit` 0.6.6 source.
 
 ## 0.3.0 - 2026-08-12
 

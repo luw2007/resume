@@ -4,7 +4,7 @@
 
 `resume` discovers local Pi, Claude Code, Codex, and OMP Sessions in a directory-derived Scope, lets you inspect and fuzzy-filter them in a Skim picker, and then replaces itself with the selected agent's native Resume command. Discovery and Preview are read-only. It never performs a machine-wide scan.
 
-> v0.1.0 targets macOS and Linux terminals. Windows support is not claimed.
+> v0.3.1 targets macOS and Linux terminals. Windows support is not claimed.
 
 ## Install
 
@@ -14,7 +14,7 @@ Rust 1.91 or newer is required:
 cargo install --git https://github.com/luw2007/resume
 ```
 
-The `resume` crate is **not published to crates.io for v0.1.0**.
+The `resume` crate is not currently published to crates.io; install from Git or a release artifact.
 
 ## Quick start
 

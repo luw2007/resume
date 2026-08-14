@@ -272,6 +272,33 @@ fn first_run_without_tty_prints_setup_hint_before_scanning() {
 }
 
 #[test]
+fn first_run_list_and_json_require_setup_without_scanning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let pi_root = tmp.path().join("pi-root");
+    fs::create_dir_all(&pi_root).unwrap();
+
+    for mode in ["--list", "--json"] {
+        let output = run_with_env_and_settings(
+            tmp.path(),
+            &ws,
+            &[mode],
+            &[("PI_CODING_AGENT_DIR", pi_root.as_path())],
+            false,
+        );
+        assert_eq!(output.status.code(), Some(2), "{mode}: {output:?}");
+        assert!(output.stdout.is_empty(), "{mode}: stdout must remain empty");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("resume setup"), "{mode}: {stderr:?}");
+        assert!(
+            !stderr.contains("scanned") && !stderr.contains("root_unavailable"),
+            "{mode}: discovery ran before setup gate: {stderr:?}"
+        );
+    }
+}
+
+#[test]
 fn json_discovers_all_four_and_stdout_is_only_schema() {
     let (tmp, ws) = fixtures();
     let output = run(tmp.path(), &ws, &["--json"]);

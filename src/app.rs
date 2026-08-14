@@ -102,7 +102,16 @@ pub fn run(cli: Cli) -> i32 {
             return crate::errors::E1004.report_with(error).emit();
         }
     };
-    let (settings, new_agents) = if cli.agent.is_empty() && config.agents.is_none() {
+    let settings_required = cli.agent.is_empty() && config.agents.is_none();
+    let (settings, new_agents) = if settings_required && (cli.list || cli.json) {
+        match settings::load_or_require_setup() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("resume: {error}");
+                return EXIT_USAGE;
+            }
+        }
+    } else if settings_required {
         match settings::load_or_setup() {
             Ok(value) => value,
             Err(error) => {

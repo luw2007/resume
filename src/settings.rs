@@ -41,6 +41,8 @@ pub enum SettingsError {
     Write { path: PathBuf, source: io::Error },
     #[error("no controlling terminal available; run `resume setup` in an interactive terminal")]
     NoTerminal,
+    #[error("run `resume setup` in an interactive terminal before using --list or --json")]
+    SetupRequired,
     #[error("invalid agent selection {0:?}; use comma-separated numbers, `all`, or `none`")]
     InvalidSelection(String),
 }
@@ -258,6 +260,14 @@ pub fn load_or_setup() -> Result<(Settings, Vec<&'static str>), SettingsError> {
     match load(&home)? {
         Some(settings) => refresh_known_agents(&home, settings),
         None => Ok((run_setup()?, Vec::new())),
+    }
+}
+
+pub fn load_or_require_setup() -> Result<(Settings, Vec<&'static str>), SettingsError> {
+    let home = home_dir()?;
+    match load(&home)? {
+        Some(settings) => refresh_known_agents(&home, settings),
+        None => Err(SettingsError::SetupRequired),
     }
 }
 
