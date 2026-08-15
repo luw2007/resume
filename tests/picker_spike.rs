@@ -497,9 +497,16 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     assert!(pi_tab.contains("[pi]"), "expected the pi tab: {pi_tab:?}");
     sess.write(b"\x1b[1;3C"); // pi -> omp
     let omp_tab = wait_for(&mut sess, "[omp]", Duration::from_millis(2000));
-    assert!(omp_tab.contains("[omp]"), "expected the omp tab: {omp_tab:?}");
+    assert!(
+        omp_tab.contains("[omp]"),
+        "expected the omp tab: {omp_tab:?}"
+    );
     sess.write(b"\x1b[1;3C"); // omp -> codex
-    let codex_tab = wait_for(&mut sess, "codex-candidate-004", Duration::from_millis(4000));
+    let codex_tab = wait_for(
+        &mut sess,
+        "codex-candidate-004",
+        Duration::from_millis(4000),
+    );
     assert!(
         codex_tab.contains("[codex]") && !codex_tab.contains("still scanning"),
         "expected the codex tab with its pending hint cleared: {codex_tab:?}"

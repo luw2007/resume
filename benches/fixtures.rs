@@ -268,9 +268,7 @@ fn write_big_claude_transcript(path: &Path, uuid: &str, cwd: &str, target_mb: us
 pub fn opencode_db(root: &Path, sessions: usize) {
     use rusqlite::Connection;
 
-    let workspaces: Vec<PathBuf> = (0..20)
-        .map(|i| root.join(format!("ws{i}")))
-        .collect();
+    let workspaces: Vec<PathBuf> = (0..20).map(|i| root.join(format!("ws{i}"))).collect();
     for ws in &workspaces {
         std::fs::create_dir_all(ws).unwrap();
     }
@@ -289,7 +287,9 @@ pub fn opencode_db(root: &Path, sessions: usize) {
     let tx = conn.transaction().expect("begin transaction");
     {
         let mut stmt = tx
-            .prepare("insert into session (id, directory, title, time_updated) values (?1, ?2, ?3, ?4)")
+            .prepare(
+                "insert into session (id, directory, title, time_updated) values (?1, ?2, ?3, ?4)",
+            )
             .expect("prepare insert");
         for i in 0..sessions {
             let ws = &workspaces[i % workspaces.len()];

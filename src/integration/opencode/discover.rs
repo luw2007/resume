@@ -27,7 +27,11 @@ pub struct ParsedSession {
 }
 
 impl ParsedSession {
-    pub fn into_session(self, effective_root: &std::path::Path, home: Option<&std::path::Path>) -> Session {
+    pub fn into_session(
+        self,
+        effective_root: &std::path::Path,
+        home: Option<&std::path::Path>,
+    ) -> Session {
         let workspace = WorkspaceEvidence::Recorded {
             workspace: self.directory,
             historical_git_identity: None,
@@ -78,8 +82,9 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
     }
     let conn = open_readonly(&path)?;
     let mut outcome = DiscoverOutcome::default();
-    let mut stmt =
-        conn.prepare("select id, directory, title, time_updated from session order by time_updated desc")?;
+    let mut stmt = conn.prepare(
+        "select id, directory, title, time_updated from session order by time_updated desc",
+    )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
