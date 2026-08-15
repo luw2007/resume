@@ -364,15 +364,15 @@ enum NavExit {
 }
 
 fn classify_nav(outcome: Option<SkimOutput>) -> NavExit {
-    if let Some(o) = &outcome {
-        if !o.is_abort {
-            match o.final_key {
-                SkimKey::Alt('p') => return NavExit::OlderPage,
-                SkimKey::Alt('n') => return NavExit::NewerPage,
-                SkimKey::AltLeft | SkimKey::Left | SkimKey::BackTab => return NavExit::PrevTab,
-                SkimKey::AltRight | SkimKey::Right | SkimKey::Tab => return NavExit::NextTab,
-                _ => {}
-            }
+    if let Some(o) = &outcome
+        && !o.is_abort
+    {
+        match o.final_key {
+            SkimKey::Alt('p') => return NavExit::OlderPage,
+            SkimKey::Alt('n') => return NavExit::NewerPage,
+            SkimKey::AltLeft | SkimKey::Left | SkimKey::BackTab => return NavExit::PrevTab,
+            SkimKey::AltRight | SkimKey::Right | SkimKey::Tab => return NavExit::NextTab,
+            _ => {}
         }
     }
     NavExit::Terminal(classify(outcome))
@@ -500,17 +500,17 @@ pub fn run_tabbed_picker(
             .filter(|bg| bg.pending.load(Ordering::Relaxed))
             .map(|bg| bg.label.as_str());
 
-        match run_single_view(
-            &store,
-            &tab_candidates[start..end],
+        match run_single_view(SingleView {
+            store: &store,
+            page: &tab_candidates[start..end],
             tab_index,
-            &agent_tabs,
+            agent_tabs: &agent_tabs,
             page_index,
             total_pages,
             preview_mode,
             preview_position,
             pending_label,
-        ) {
+        }) {
             NavExit::OlderPage if page_index > 0 => page_index -= 1,
             NavExit::NewerPage if page_index + 1 < total_pages => page_index += 1,
             NavExit::OlderPage | NavExit::NewerPage => {}
@@ -549,36 +549,38 @@ fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str
     (position, visibility)
 }
 
-fn run_single_view(
-    store: &Arc<PreviewStore>,
-    page: &[&PickerCandidate],
+struct SingleView<'a> {
+    store: &'a Arc<PreviewStore>,
+    page: &'a [&'a PickerCandidate],
     tab_index: usize,
-    agent_tabs: &[&str],
+    agent_tabs: &'a [&'a str],
     page_index: usize,
     total_pages: usize,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
-    pending_label: Option<&str>,
-) -> NavExit {
-    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(page.len().max(1));
-    for candidate in page {
+    pending_label: Option<&'a str>,
+}
+
+fn run_single_view(view: SingleView<'_>) -> NavExit {
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(view.page.len().max(1));
+    for candidate in view.page {
         let item = Arc::new(SpikeItem {
             key: candidate.key.clone(),
             display: candidate.display.clone(),
             search_text: candidate.search_text.clone(),
-            preview_store: store.clone(),
+            preview_store: view.store.clone(),
         }) as Arc<dyn SkimItem>;
         let _ = tx.send(item);
     }
     drop(tx);
     let options = build_tabbed_options(
-        tab_index,
-        agent_tabs,
-        page_index,
-        total_pages,
-        preview_mode,
-        preview_position,
-        pending_label,
+        view.tab_index,
+        view.agent_tabs,
+        view.page_index,
+        view.total_pages,
+        view.preview_mode,
+        view.preview_position,
+        view.pending_label,
     );
     classify_nav(run_skim_with_options(&options, rx))
 }

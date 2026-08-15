@@ -575,7 +575,7 @@ mod tests {
 
         // Run 2: only `a` is seen (the true current file list under `root`).
         let cache2 = DiscoveryCache::load(Some(path.clone()));
-        cache2.save(root, &[rollout_a.clone()]);
+        cache2.save(root, std::slice::from_ref(&rollout_a));
 
         let cache3 = DiscoveryCache::load(Some(path));
         assert!(
@@ -610,7 +610,7 @@ mod tests {
             meta_x.modified().unwrap(),
             Some(&sample_parsed(rollout_x.clone())),
         );
-        cache.save(&root_x, &[rollout_x.clone()]);
+        cache.save(&root_x, std::slice::from_ref(&rollout_x));
 
         // Run 2: a *different* CODEX_HOME (`root_y`) is scanned; `root_x`'s
         // rollout is never seen (or even known about) this run.

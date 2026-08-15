@@ -132,8 +132,9 @@ fn down_scope_includes_descendant_workspaces() {
 #[test]
 fn duplicate_files_under_same_root_are_deduped() {
     let fx = Fixture::new();
+    let encoded_ws = fx.encoded_ws();
     let path = fx.write_grouped(
-        &fx.encoded_ws(),
+        &encoded_ws,
         "dup.jsonl",
         &[
             header_v3("dup-id", &fx.workspace, 1700000000),
@@ -143,10 +144,7 @@ fn duplicate_files_under_same_root_are_deduped() {
     // Symlink the same file to a second path; canonical locator is identical.
     #[cfg(unix)]
     {
-        let link = fx
-            .session_root
-            .join(&fx.encoded_ws())
-            .join("dup-link.jsonl");
+        let link = fx.session_root.join(fx.encoded_ws()).join("dup-link.jsonl");
         std::os::unix::fs::symlink(&path, &link).unwrap();
     }
     let outcome = fx.discover_default();
@@ -171,7 +169,7 @@ fn symlinked_session_inside_effective_root_is_read() {
             user_message_string("followed safely", 1700000010),
         ],
     );
-    let link_dir = fx.session_root.join(&fx.encoded_ws());
+    let link_dir = fx.session_root.join(fx.encoded_ws());
     fs::create_dir_all(&link_dir).unwrap();
     std::os::unix::fs::symlink(&target, link_dir.join("inside.jsonl")).unwrap();
 
@@ -194,7 +192,7 @@ fn symlinked_session_outside_effective_root_is_rejected_with_diagnostic_count() 
             user_message_string("must not leak", 1700000010),
         ],
     );
-    let link_dir = fx.session_root.join(&fx.encoded_ws());
+    let link_dir = fx.session_root.join(fx.encoded_ws());
     fs::create_dir_all(&link_dir).unwrap();
     std::os::unix::fs::symlink(&target, link_dir.join("outside.jsonl")).unwrap();
 
@@ -306,7 +304,7 @@ fn activity_time_prefers_message_then_header_then_mtime() {
 #[test]
 fn malformed_middle_record_does_not_abort_discovery() {
     let fx = Fixture::new();
-    let path = fx.session_root.join(&fx.encoded_ws()).join("mid.jsonl");
+    let path = fx.session_root.join(fx.encoded_ws()).join("mid.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(
@@ -332,7 +330,7 @@ fn malformed_middle_record_does_not_abort_discovery() {
 #[test]
 fn truncated_tail_is_incomplete_but_keeps_valid_records() {
     let fx = Fixture::new();
-    let path = fx.session_root.join(&fx.encoded_ws()).join("trunc.jsonl");
+    let path = fx.session_root.join(fx.encoded_ws()).join("trunc.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = fs::File::create(&path).unwrap();
     writeln!(

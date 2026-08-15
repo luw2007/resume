@@ -130,9 +130,8 @@ fn run_tabbed_async_demo() -> PickerOutcome {
         let pending = pending.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(900));
-            let mut next_id = 1000u64;
             let mut codex_candidates = Vec::new();
-            for i in 0..5 {
+            for (next_id, i) in (1000u64..).zip(0..5) {
                 codex_candidates.push(PickerCandidate {
                     key: CandidateKey(next_id),
                     display: format!("codex-candidate-{i:03}"),
@@ -141,7 +140,6 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                     rank: Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
                     agent: "codex".to_string(),
                 });
-                next_id += 1;
             }
             candidates.lock().unwrap().extend(codex_candidates);
             pending.store(false, std::sync::atomic::Ordering::SeqCst);
