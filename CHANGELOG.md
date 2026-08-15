@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.2 - 2026-08-16
+
+### Fixed
+
+- Codex `state_5.sqlite` enrichment degraded to `codex_sqlite_degraded: query_failed` on every discovery run against a modern Codex install, because `threads.updated_at` is stored as an `INTEGER` Unix timestamp while the query decoded it as `Option<String>`, and any type-mismatch aborted the whole enrichment query. Activity-time decoding now accepts ISO-8601 text, integer epoch seconds, integer epoch milliseconds, and floating-point seconds, so native Codex activity timestamps enrich normally again.
+
+### Changed
+
+- Cleared the Clippy warnings `make ci`'s lint gate was not yet enforcing (a manual loop counter, a redundant single-element slice clone, unneeded borrows, a collapsible nested `if let`, and a function with too many arguments) across `examples/resume-spike.rs`, `src/integration/codex/cache.rs`, `src/integration/pi/tests/discover.rs`, and `src/picker.rs`. No behavior change.
+
 ## 0.3.1 - 2026-08-14
 
 ### Added
