@@ -49,14 +49,14 @@ where
     R: Send,
 {
     if items.len() < PARALLEL_THRESHOLD {
-        return items.iter().map(|item| f(item)).collect();
+        return items.iter().map(&f).collect();
     }
     let workers = MAX_DISCOVERY_WORKERS.min(items.len());
     let chunk_size = items.len().div_ceil(workers);
     std::thread::scope(|scope| {
         items
             .chunks(chunk_size)
-            .map(|chunk| scope.spawn(|| chunk.iter().map(|item| f(item)).collect::<Vec<R>>()))
+            .map(|chunk| scope.spawn(|| chunk.iter().map(&f).collect::<Vec<R>>()))
             .collect::<Vec<_>>()
             .into_iter()
             .flat_map(|handle| handle.join().expect("discovery worker thread panicked"))
@@ -439,10 +439,10 @@ pub struct ParsedSession {
     /// checks. Never overrides a JSONL-derived identity. `None` when the
     /// `codex-sqlite` feature is off, the DB is absent, or no row matched.
     pub sqlite_title: Option<String>,
-    /// Optional activity-time hint sourced from `state_5.sqlite` (Step 8).
+    /// Optional activity-time hint sourced from `state_5.sqlite`.
     /// Additive metadata only; never used as identity or to mark a session
     /// Inactive.
-    pub sqlite_activity_time: Option<String>,
+    pub sqlite_activity_time: Option<std::time::SystemTime>,
     /// Optional archived hint sourced from `state_5.sqlite` (Step 8). May not
     /// override a filesystem-derived `archived` value. Informational only.
     pub sqlite_archived_hint: Option<bool>,
@@ -500,7 +500,7 @@ const DISCOVERY_EARLY_READ_BYTES: u64 = 64 * 1024;
 /// record that is not `session_meta`, is malformed, or exceeds the byte
 /// budget simply falls through to the normal ladder below -- the gate never
 /// trades correctness, only skips work for files it can already rule out.
-
+///
 /// [`parse_rollout_file`] with an optional early Workspace gate (see
 /// [`WorkspaceGate`]).
 ///
@@ -723,8 +723,6 @@ pub fn build_session(parsed: ParsedSession) -> Session {
         workspace,
         updated_at: parsed
             .sqlite_activity_time
-            .as_deref()
-            .and_then(crate::time::parse_iso8601)
             .or_else(|| {
                 parsed
                     .timestamp

@@ -50,7 +50,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -421,8 +421,8 @@ struct EnrichRow {
     cwd: Option<String>,
     /// Derived title.
     title: Option<String>,
-    /// Activity/updated timestamp string.
-    activity_time: Option<String>,
+    /// Activity/updated timestamp.
+    activity_time: Option<SystemTime>,
     /// Archived flag (truthy if present and non-zero/non-"false").
     archived: Option<bool>,
 }
@@ -461,6 +461,9 @@ fn read_rows(conn: &Connection, schema: &Schema) -> Result<Vec<EnrichRow>, ReadE
     let mut stmt = conn.prepare(&sql).map_err(|e| read_err(&e))?;
     let rows = stmt
         .query_map([], |row| {
+            let activity_time = row
+                .get::<_, Option<rusqlite::types::Value>>(4)?
+                .and_then(activity_time_from_value);
             let archived_raw: Option<rusqlite::types::Value> = row.get(5)?;
             let archived = match archived_raw {
                 Some(rusqlite::types::Value::Integer(i)) => Some(i != 0),
@@ -474,7 +477,7 @@ fn read_rows(conn: &Connection, schema: &Schema) -> Result<Vec<EnrichRow>, ReadE
                 id: row.get::<_, Option<String>>(1)?,
                 cwd: row.get::<_, Option<String>>(2)?,
                 title: row.get::<_, Option<String>>(3)?,
-                activity_time: row.get::<_, Option<String>>(4)?,
+                activity_time,
                 archived,
             })
         })
@@ -484,6 +487,29 @@ fn read_rows(conn: &Connection, schema: &Schema) -> Result<Vec<EnrichRow>, ReadE
         out.push(row.map_err(|e| read_err(&e))?);
     }
     Ok(out)
+}
+
+/// Decode the heterogeneous timestamp encodings used by Codex state DB
+/// revisions. Unrecognised values are optional metadata, so omit only that
+/// field rather than discarding all usable rows.
+fn activity_time_from_value(value: rusqlite::types::Value) -> Option<SystemTime> {
+    match value {
+        rusqlite::types::Value::Text(value) => crate::time::parse_iso8601(&value),
+        rusqlite::types::Value::Integer(value) => epoch_time(value as f64),
+        rusqlite::types::Value::Real(value) => epoch_time(value),
+        rusqlite::types::Value::Null | rusqlite::types::Value::Blob(_) => None,
+    }
+}
+
+fn epoch_time(value: f64) -> Option<SystemTime> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value >= 1e12 {
+        UNIX_EPOCH.checked_add(Duration::from_millis(value as u64))
+    } else {
+        UNIX_EPOCH.checked_add(Duration::from_secs_f64(value))
+    }
 }
 
 fn read_err(e: &rusqlite::Error) -> ReadError {
@@ -561,12 +587,8 @@ fn apply_rows(sessions: &mut [ParsedSession], rows: &[EnrichRow]) -> SqliteOutco
 
         // Enrich-only: activity time (JSONL currently has no reliable activity
         // time, so this is additive metadata, surfaced as a badge only).
-        if let Some(t) = row
-            .activity_time
-            .as_deref()
-            .filter(|t| !t.trim().is_empty())
-        {
-            session.sqlite_activity_time = Some(t.to_string());
+        if let Some(time) = row.activity_time {
+            session.sqlite_activity_time = Some(time);
             did_enrich = true;
         }
 

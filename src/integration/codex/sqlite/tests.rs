@@ -502,6 +502,87 @@ fn new_schema_with_extra_columns_is_supported() {
     assert_eq!(sessions[0].title.as_deref(), Some("title from new schema"));
 }
 
+#[test]
+fn integer_updated_at_enriches_without_query_degradation() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let id = next_id("integer-updated-at");
+    let rollout_path = write_rollout_no_user_messages(
+        home.path(),
+        &format!("sessions/2026/08/07/rollout-{id}.jsonl"),
+        &id,
+        &workspace.canonicalize().unwrap(),
+    );
+    let updated_at = 1_757_922_979_i64;
+
+    create_state_db(home.path(), |conn| {
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                title TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, title, updated_at, archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![
+                &id,
+                rollout_path.to_str().unwrap(),
+                workspace.canonicalize().unwrap().to_str().unwrap(),
+                "title from integer timestamp",
+                updated_at,
+            ],
+        )
+        .unwrap();
+    });
+
+    let (sessions, outcome) = discover_enriched(home.path());
+    assert!(
+        !outcome.is_degraded(),
+        "integer timestamps must not degrade enrichment: {outcome:?}"
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].title.as_deref(),
+        Some("title from integer timestamp")
+    );
+    assert_eq!(
+        sessions[0].updated_at.as_ref().unwrap().at,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(updated_at as u64)
+    );
+}
+
+#[test]
+fn activity_timestamp_decoder_accepts_epoch_millis_and_real_seconds() {
+    let millis =
+        super::activity_time_from_value(rusqlite::types::Value::Integer(1_757_922_979_000));
+    assert_eq!(
+        millis,
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_757_922_979_000))
+    );
+
+    let real = super::activity_time_from_value(rusqlite::types::Value::Real(1_757_922_979.5));
+    assert_eq!(
+        real,
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_757_922_979)
+                + std::time::Duration::from_millis(500)
+        )
+    );
+    assert_eq!(
+        super::activity_time_from_value(rusqlite::types::Value::Integer(-1)),
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stale row (DB row whose rollout_path no longer matches any session)
 // ---------------------------------------------------------------------------
