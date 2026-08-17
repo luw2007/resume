@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose an outcome that would improve resume.
+title: "[Feature]: "
+labels: ["type:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include session transcripts, credentials, tokens, private keys, or sensitive remote URLs. Security vulnerabilities must be reported privately at https://github.com/luw2007/resume/security/advisories/new.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or limitation should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe the user-visible result you want, rather than a required implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: State what is in scope and explicitly what should remain out of scope.
+    validations:
+      required: true
