@@ -1,0 +1,23 @@
+name: Question
+description: Ask for help using or understanding resume.
+title: "[Question]: "
+labels: ["type:question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here; report them privately at https://github.com/luw2007/resume/security/advisories/new. Do not include session transcripts, credentials, tokens, private keys, or sensitive remote URLs.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Explain what you are trying to do and the safe, relevant setup details.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior or outcome
+      description: What result do you expect or need help understanding?
+    validations:
+      required: true
