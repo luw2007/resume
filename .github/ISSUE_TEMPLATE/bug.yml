@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem with resume.
+title: "[Bug]: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve resume. Do not include session transcripts, credentials, tokens, private keys, or sensitive remote URLs. Report security vulnerabilities privately at https://github.com/luw2007/resume/security/advisories/new.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Which released version, build, or commit are you using?
+      placeholder: "e.g. v1.2.3 or abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest safe set of steps, commands, and inputs that reproduces the problem. Redact any sensitive values.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include safe error output if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, installation method, and relevant runtime/tool versions.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive information
+      description: Confirm that this report contains no session transcripts, credentials, tokens, private keys, or sensitive remote URLs.
+      options:
+        - label: I have removed all sensitive information from this report.
+          required: true
