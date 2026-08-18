@@ -2,64 +2,117 @@
 
 ## Outcome
 
-Add one deletion-friendly GitHub workflow that creates or updates a triage Issue for a failed trusted `main` CI run. It must not repair code, create a PR, or retain state outside Issues and two labels.
+Implement one report-only workflow: a failed trusted `main` CI run opens one fixed-format Issue for its commit or adds one fixed-format run-attempt comment to that Issue. A human decides whether and how to repair. The experiment expires after fourteen days.
 
-## Owned files
+## Scope limit
 
-- `.github/workflows/ci-failure-issue.yml`
-- `.github/ISSUE_TEMPLATE/ci-failure.md` if a fixed Issue body cannot be inline and stay readable
-- `.github/labels.yml` only if the repository already manages labels declaratively; otherwise create the two labels manually before enabling the workflow
+One new file:
 
-Do not add Rust modules, a database, a ledger, a new action, or a reusable automation framework.
+```text
+.github/workflows/ci-failure-issue.yml
+```
 
-## Steps
+Two labels are created manually before activation:
 
-### 1. Define the exact workflow trigger and permission envelope
+```text
+automation:ci-failure
+needs-human-triage
+```
 
-- Use `workflow_run` for completed `CI` workflow runs.
-- Return immediately unless `conclusion == failure` and the run head branch is `main`.
-- Grant exactly `contents: read` and `issues: write`.
-- Add manual dispatch with a supplied run ID only if required to validate safely; do not make it a general log processor.
+Do not add Rust code, an action, template, label manifest, ledger, database, script, artifact, checkout, repair agent, branch, or PR workflow.
 
-**Verify:** inspect rendered workflow permissions and event filters. Confirm it has no checkout, secrets, artifact download, `pull_request_target`, PR, release, or workflow-write authority.
+## Implementation steps
 
-### 2. Produce a bounded metadata-only fingerprint
+### 1. Create labels and pilot controls outside the repository
 
-- Fetch only workflow-run jobs metadata through GitHub API.
-- Select the first failed job and failed step using explicit fields.
-- Compose `ci:<head_sha>:<job_name>:<step_name>` after normalizing whitespace and bounding each field.
-- Do not fetch or parse log text.
+Before merging the workflow, a maintainer creates the two labels manually and records outside the repository:
 
-**Verify:** fixture/pure-shell test with two identical metadata payloads yields the same fingerprint; a changed failed step yields a different one. Confirm strings cannot become shell input.
+- pilot owner;
+- start and mandatory deletion date, fourteen days later;
+- maximum Issue/comment budget;
+- every pilot-created Issue URL;
+- acceptance that Issues/comments/notifications may persist after removal.
 
-### 3. Deduplicate through GitHub Issue search
+**Verify:** labels exist before activation; no workflow can create missing labels.
 
-- Search open Issues for the exact fingerprint marker in a fixed title prefix.
-- If found, add a fixed-format comment containing only the new run URL and immutable SHA.
-- Otherwise create an Issue with labels `automation:ci-failure` and `needs-human-triage`, fixed reproduction text `make ci`, and the bounded metadata body.
+### 2. Add one metadata-only `workflow_run` notifier
 
-**Verify:** controlled dispatch against the same run twice creates one Issue and one follow-up comment. Inspect both bodies for absence of raw CI log data and runner/private paths.
+**File:** `.github/workflows/ci-failure-issue.yml`.
 
-### 4. Run in report-only mode for two scheduled cycles
+- Trigger only on completed runs of the exact existing `CI` workflow.
+- Do not add `workflow_dispatch`; arbitrary run-ID replay would add an Actions API and trust path.
+- Set exact top-level permissions:
 
-- Keep the workflow limited to Issue creation/comments.
-- Review all generated Issues for usefulness, duplicate suppression, and privacy.
-- Do not add repair PR automation during this experiment.
+  ```yaml
+  permissions:
+    contents: read
+    issues: write
+  ```
 
-**Verify:** record each cycle's result in the Issue itself. At the end, explicitly choose retain or delete.
+- Use one Ubuntu job and one job-level guard. Require failed conclusion, `head_branch == main`, payload repository and head repository both equal the current repository, and upstream event in `{push, schedule}`.
+- Add workflow-level concurrency keyed by validated repository ID plus head SHA with `cancel-in-progress: false`.
+- Do not checkout, restore cache, download artifact, call Actions jobs/logs/artifacts APIs, invoke repository scripts, expose secrets, invoke an agent, or reference third-party actions.
 
-## Automated quality boundary
+**Verify:** YAML review proves no event other than `workflow_run`, no `pull_request_target`, no checkout/actions/artifacts/cache, and no scope beyond `contents: read` plus `issues: write`.
 
-The existing `CI` workflow and `make ci` remain the quality contract. This experiment consumes a CI result but does not rerun or replace checks. A human reproduces the failure before any repair.
+### 3. Build only the fixed run-level marker
 
-## Manual review checklist
+- Validate head SHA as exactly 40 lowercase hex characters.
+- Validate numeric run ID and attempt before constructing a URL.
+- Build marker `ci-pilot:<head_sha>`.
+- Construct the run URL from fixed repository identity and numeric run ID.
+- Do not fetch job/step names: that would need an Actions API read and add arbitrary text to the Issue.
 
-- Action references are immutable SHAs or no third-party action is used.
-- No source checkout occurs.
-- No raw logs/artifacts/issue body are sent to shell commands.
-- The workflow cannot create branches, PRs, releases, tags, or commits.
-- Deleting the workflow and two labels removes the experiment completely.
+**Verify:** pure fixture values prove same SHA produces the same marker and a malformed identifier is a no-op. No payload field is interpolated into shell source, command text, filename, or YAML expression that evaluates as code.
 
-## Out of scope
+### 4. Deduplicate strictly within the pilot's honest boundary
 
-Automated code repair, agents, ledgers, custom Rust binaries, dependency/security repair, release repair, and non-`main` CI failures.
+- List at most 100 Issues with the manually-created `automation:ci-failure` label, including open and closed results.
+- Compare exact marker text in title/body using fixed-string matching; exclude pull requests returned by the Issues endpoint.
+- If no marker exists, create one Issue with both labels.
+- If the marker exists, compare a fixed `ci-pilot-run:<run_id>:<attempt>` comment marker; post one fixed comment only when absent.
+- Never reopen, close, assign, mention, project-link, milestone, or otherwise modify an Issue.
+- If the labeled Issue set reaches 100 or any API result is malformed, fail closed without writing.
+
+**Verify:** controlled fixture/review covers new marker, repeated delivery, rerun attempt, closed marker, malformed response, and bounded-list overflow. The expected unit is one Issue per failed head SHA; no cross-commit root-cause deduplication is claimed.
+
+### 5. Use a fixed-format body
+
+Issue body contains only the marker, validated SHA, numeric run ID/attempt, constructed run URL, and:
+
+```text
+Maintainer starting point: make ci; reproduction not yet confirmed.
+```
+
+A comment contains only its run-attempt marker and constructed run URL. Raw logs remain in Actions. No job/step names, logs, artifacts, paths, environment data, URLs from payloads, actor names, commit messages, source content, or user Issue content enters either write.
+
+**Verify:** inspect generated request payloads before enabling. Confirm no raw CI text can reach GitHub Issues.
+
+### 6. Run and delete the pilot
+
+- Observe only two weekly cycles.
+- Stop immediately on duplicate, privacy incident, unexpected downstream Issue automation, budget breach, request for broader capability, or other untrusted-content exposure.
+- At deadline, delete the workflow and two labels. Remove pilot Issues/comments where policy permits; otherwise close each with a fixed pilot-removal note and retain the external pilot URL list.
+- Retain only after explicit human review finds at least one generated Issue useful enough to guide a maintainer to the linked CI run.
+
+**Verify:** deletion plan is scheduled before activation. No useful human-triaged Issue by the deadline means delete.
+
+## Current-workflow alignment
+
+- `.github/workflows/ci.yml` is named `CI`, runs on `main` pushes and weekly schedule, and already defines the `make ci`-equivalent quality checks.
+- `.github/workflows/release.yml` and `release-builds.yml` are excluded: they have release/artifact responsibilities outside this pilot.
+- Existing Issue forms use manually maintained labels; no declarative label infrastructure exists, so adding it would violate the disposable scope.
+
+## Planning review reconciliation
+
+The workflow-planning worker proposed a job/step fingerprint by calling the
+Actions jobs endpoint. The adversarial review rejected that path: it expands
+the data/permission surface and places arbitrary workflow display text into
+Issues. This plan intentionally retains only the run-level SHA marker,
+excludes manual dispatch, and treats one failing commit—not an inferred root
+cause—as the deduplication unit. The experiment is **no-go** if that reduced
+metadata cannot support human triage.
+
+## Explicitly deferred
+
+Automated repair, draft PRs, agents, custom source modules, durable ledgers, cross-commit root-cause deduplication, user-Issue ingestion, dependency/security/release repair, flaky PTY diagnosis, and external-agent format compatibility repair.
