@@ -8,5 +8,5 @@ Plan only. The experiment is one metadata-only `workflow_run` notifier for faile
 
 | Node | Role / model | Isolation | Attempt | Worker surface | Output | Done signal |
 |---|---|---|---|---|---|---|
-| MinimalWorkflowMap | architecture / claude_sub2api/claude-opus-5 | `../resume-plan-workflow` worktree | `workflow-a1` | pending | `MINIMAL_WORKFLOW_MAP.md`; exact GitHub workflow design and acceptance cases | `.done/workflow-a1` |
-| DeletionRiskReview | adversarial / codex_gpt/gpt-5.6-sol | `../resume-plan-risk` worktree | `risk-a1` | pending | `DELETION_RISK_REVIEW.md`; reject accidental durable machinery or privilege expansion | `.done/risk-a1` |
+| MinimalWorkflowMap | architecture / claude_sub2api/claude-opus-5 | `../resume-plan-workflow` worktree | `workflow-a1` | `surface:269` | `MINIMAL_WORKFLOW_MAP.md`; exact GitHub workflow design and acceptance cases | `.done/workflow-a1` |
+| DeletionRiskReview | adversarial / codex_gpt/gpt-5.6-sol | `../resume-plan-risk` worktree | `risk-a1` | `surface:270` | `DELETION_RISK_REVIEW.md`; reject accidental durable machinery or privilege expansion | `.done/risk-a1` |
