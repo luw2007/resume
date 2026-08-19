@@ -15,10 +15,14 @@ Status is exactly one of:
   with fixture/fake-native tests passing **and** a `<agent>_discovery`
   benchmark group in `benches/discovery.rs` (plus its fixture generator in
   `benches/fixtures.rs`); performance characterization recorded in
-  `evidence/<agent>/research.md`.
-- `verified` — real local discovery, workspace relation, and exact-resume
-  behavior confirmed against the maintainer's actual installation;
-  README/docs updated; changes committed. **Terminal.**
+  `evidence/<agent>/research.md`. This does not claim a real installation
+  was probed.
+- `verified` — a real local session artifact, its workspace relation, and
+  exact-resume behavior are recorded from the maintainer's actual
+  installation after an explicit side-effect confirmation, or a documented
+  read-only probe of an already-installed artifact; README/docs are updated
+  and changes committed. Fixtures, fake executables, documentation, and
+  captured CLI help alone cannot establish this status. **Terminal.**
 - `unsupported` — reproducible evidence shows the candidate cannot meet the
   three support conditions; reason recorded in `evidence/<agent>/`.
   **Terminal.**

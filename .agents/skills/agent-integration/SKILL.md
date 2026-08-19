@@ -32,10 +32,11 @@ Skill never installs, runs, or judges a candidate the maintainer did not name.
   integration found SQLite where all documentation described JSON files.
   When docs and probe disagree, correct `research.md` and proceed on the
   probe.
-- **Closed loop, always.** The run ends in exactly one terminal
-  `checklist.md` status: `verified` or `unsupported`. Never leave a run at
-  `researched` or `implemented` without continuing to a terminal state or
-  explicitly stopping and saying why.
+- **Closed loop, always.** A completed run ends in exactly one terminal
+  `checklist.md` status: `verified` or `unsupported`. `implemented` is a
+  non-terminal handoff state only when the remaining real-installation probe
+  awaits the maintainer's separately confirmed side effect; record that
+  blocker and present the exact command before resuming.
 
 ## Procedure
 
@@ -137,18 +138,23 @@ or `omp`) for shape parity.
   for the pattern). Record the performance characterization in
   `evidence/<agent>/research.md`.
 5. Set `checklist.md` status to `implemented`.
-6. Run the real, maintainer-installed agent end to end: `resume --list -a
-   <agent>` must show the real session probed in step 2; confirm the
-   `Session`'s workspace matches; confirm the fake-native-executable test's
-   asserted argv matches what the real native resume actually needs (cross-
-   check against the agent's own resume docs/`--help`, not just the fixture).
+6. Run the real, maintainer-installed agent end to end after separately
+   displaying and receiving approval for any install or first execution:
+   `resume --list -a <agent>` must show the real session probed in step 2;
+   record its artifact path, stable session identity, and workspace field;
+   confirm the `Session`'s workspace matches; confirm the
+   fake-native-executable test's asserted argv matches what the real native
+   resume actually needs (cross-check against the agent's own resume
+   docs/`--help`, not just the fixture). Synthetic fixtures and captured CLI
+   help can establish `implemented`; they never establish `verified`.
 7. Update `README.md`'s **Native Resume boundary** table (native
    invocation + isolation preserved) and **Support list** table
    (Discovery/Preview/Resume/Profiles/Active capabilities), plus any
    config docs, to include the new agent.
 8. Commit the source, tests, docs, and checklist/evidence changes for this
    one agent (see repo git rules — explicit paths, no `git add -A`).
-9. Set `checklist.md` status to `verified`.
+9. Set `checklist.md` status to `verified` only after the real-installation
+   evidence is recorded.
 
 ### 5. Any step → unsupported
 

@@ -48,11 +48,14 @@
 
 ## Verification (real installation)
 
-- `resume --list -a <agent>` output: `<summary or confirmation>`
-- Workspace match confirmed: `<yes/no + detail>`
-- Fake-native-executable test argv cross-checked against real native resume: `<yes/no + detail>`
+- Side-effect confirmation: `<dated maintainer approval for install/first run, or "not needed" only when an existing artifact is probed>`
+- Probed artifact: `<actual path, session identity, and workspace field; or "not yet probed">`
+- `resume --list -a <agent>` output: `<summary from the real installation; or "not run">`
+- Workspace match confirmed: `<yes/no + actual-artifact detail; or "not yet probed">`
+- Fake-native-executable test argv cross-checked against real native resume: `<yes/no + comparison; or "not yet probed">`
 
 ## Result
 
 - Status: `<researched | skill-defined | implemented | verified | unsupported | blocked>`
+- If `implemented`: `<remaining confirmed side effect or real-installation probe required before verified>`
 - If `unsupported`/`blocked`: `<which of the three support conditions failed, or what is blocking, with evidence>`
