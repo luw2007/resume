@@ -467,6 +467,7 @@ pub(crate) fn handoff_cmux_workspace(spec: &ResumeSpec) -> Result<(), CmuxHandof
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn handoff_then_run_with<F, G>(spec: &ResumeSpec, handoff: F, run: G) -> Result<(), io::Error>
 where
     F: FnOnce(&ResumeSpec) -> Result<(), CmuxHandoffError>,
@@ -478,10 +479,16 @@ where
 }
 
 #[cfg(unix)]
-pub(crate) fn handoff_then_exec(spec: &ResumeSpec) -> io::Error {
-    match handoff_then_run_with(spec, handoff_cmux_workspace, |_| Err(exec(spec))) {
-        Ok(()) => io::Error::other("native exec unexpectedly returned"),
-        Err(error) => error,
+pub(crate) enum HandoffThenExecError {
+    Handoff(CmuxHandoffError),
+    Exec(io::Error),
+}
+
+#[cfg(unix)]
+pub(crate) fn handoff_then_exec(spec: &ResumeSpec) -> HandoffThenExecError {
+    match handoff_cmux_workspace(spec) {
+        Err(error) => HandoffThenExecError::Handoff(error),
+        Ok(()) => HandoffThenExecError::Exec(exec(spec)),
     }
 }
 
@@ -939,10 +946,6 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
             std::fs::read_to_string(&marker).unwrap().trim(),
             target.canonicalize().unwrap().display().to_string()
         );
-        let count = std::fs::read_to_string(&log)
-            .unwrap()
-            .matches("rpc")
-            .count();
         std::fs::remove_file(&marker).unwrap();
         std::fs::write(&state, origin.canonicalize().unwrap().display().to_string()).unwrap();
         unsafe {
@@ -954,12 +957,7 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
                 .status()
                 .map(|_| ())
         });
-        assert!(
-            failed_report
-                .unwrap_err()
-                .to_string()
-                .contains("cmux workspace handoff failed")
-        );
+        assert!(failed_report.is_err());
         assert!(!marker.exists());
         unsafe {
             std::env::remove_var("FAIL_REPORT");
@@ -981,13 +979,14 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
                 .status()
                 .map(|_| ())
         });
-        assert!(
-            !failed_exec
-                .unwrap_err()
-                .to_string()
-                .contains("cmux workspace handoff failed")
+        assert!(failed_exec.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .matches("rpc")
+                .count(),
+            before + 1
         );
-        assert_eq!(before, count + 1);
         std::env::set_current_dir(old_cwd).unwrap();
         restore_env("PATH", old_path);
         restore_env("CMUX_WORKSPACE_ID", old_w);
