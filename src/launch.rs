@@ -876,6 +876,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fake_cmux_and_native_agent_prove_order_and_fail_closed_exec() {
+        if std::env::var_os("RESUME_CMUX_CHILD_TEST").is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("launch::tests::fake_cmux_and_native_agent_prove_order_and_fail_closed_exec")
+                .arg("--nocapture")
+                .env("RESUME_CMUX_CHILD_TEST", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -996,6 +1007,17 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
     #[cfg(unix)]
     #[test]
     fn production_entry_rejects_missing_cmux_cli() {
+        if std::env::var_os("RESUME_CMUX_CHILD_TEST").is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("launch::tests::production_entry_rejects_missing_cmux_cli")
+                .arg("--nocapture")
+                .env("RESUME_CMUX_CHILD_TEST", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let old_path = std::env::var_os("PATH");
         let old_w = std::env::var_os("CMUX_WORKSPACE_ID");
         let old_s = std::env::var_os("CMUX_SURFACE_ID");
