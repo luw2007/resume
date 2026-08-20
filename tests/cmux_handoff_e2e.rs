@@ -38,10 +38,19 @@ fn wait_for(
     }
     false
 }
-fn run_e2e(report_failure: bool) -> (u32, Vec<u8>, PathBuf) {
+struct E2eResult {
+    _root: tempfile::TempDir,
+    status: u32,
+    log: PathBuf,
+    state: PathBuf,
+    marker: PathBuf,
+    target: PathBuf,
+}
+
+fn run_e2e(report_failure: bool) -> E2eResult {
     let root = tempfile::tempdir().unwrap();
     let a = root.path().join("A");
-    let b = root.path().join("B");
+    let b = a.join("B");
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
     Command::new("git")
@@ -75,7 +84,7 @@ fn run_e2e(report_failure: bool) -> (u32, Vec<u8>, PathBuf) {
     fs::create_dir_all(home.join(".pi/agent")).unwrap();
     let session_dir = home.join(".pi/agent/sessions");
     fs::create_dir_all(&session_dir).unwrap();
-    let grouped = session_dir.clone();
+    let grouped = session_dir.join(format!("-{}-", b.display().to_string().replace('/', "-")));
     fs::create_dir_all(&grouped).unwrap();
     fs::write(grouped.join("session.jsonl"), format!("{{\"type\":\"session\",\"v\":3,\"id\":\"e2e\",\"cwd\":\"{}\",\"timestamp\":1700000000}}\n{{\"type\":\"session_info\",\"name\":\"e2e candidate\"}}\n",b.display())).unwrap();
     let bin = root.path().join("bin");
@@ -106,9 +115,8 @@ elif [ "$1" = rpc ]; then if [ "{}" = 1 ]; then exit 1; fi; printf '%s' '{}' > '
     executable(
         &pi,
         &format!(
-            "#!/bin/sh\nif [ \"$(cat '{}' )\" = '{}' ]; then printf '%s\\n' \"$PWD\" > '{}'; fi\nsleep 1\n",
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$(cat '{}')\" > '{}'\nsleep 1\n",
             state.display(),
-            b.canonicalize().unwrap().display(),
             marker.display()
         ),
     );
@@ -125,8 +133,7 @@ elif [ "$1" = rpc ]; then if [ "{}" = 1 ]; then exit 1; fi; printf '%s' '{}' > '
     cmd.env("TERM", "xterm-256color");
     cmd.env("RESUME_DISABLE_PROC_PROBE", "1");
     cmd.env("PI_CODING_AGENT_DIR", home.join(".pi/agent"));
-    cmd.env("PI_CODING_AGENT_SESSION_DIR", &session_dir);
-    cmd.env("PI_CODING_AGENT_SESSION_DIR", &session_dir);
+
     cmd.env("XDG_CONFIG_HOME", home.join("xdg/config"));
     cmd.env("XDG_DATA_HOME", home.join("xdg/data"));
     cmd.env("XDG_STATE_HOME", home.join("xdg/state"));
@@ -183,25 +190,77 @@ elif [ "$1" = rpc ]; then if [ "{}" = 1 ]; then exit 1; fi; printf '%s' '{}' > '
         thread::sleep(Duration::from_millis(50));
     }
     thread::sleep(Duration::from_millis(50));
-    (status, seen, log)
+    E2eResult {
+        _root: root,
+        status,
+        log,
+        state,
+        marker,
+        target: b.canonicalize().unwrap(),
+    }
 }
 #[test]
 fn cmux_resume_real_pty_handoff_success_and_report_failure() {
     if !std::env::var("SPIKE_PTY_TESTS")
         .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
+        .unwrap_or(true)
     {
         eprintln!("skipping: PTY E2E tests disabled");
         return;
     }
-    let (status, _, log) = run_e2e(false);
-    assert_eq!(status, 0);
-    let calls = fs::read_to_string(log).unwrap();
-    assert!(
-        calls.contains("identify")
-            && calls.contains("workspace list")
-            && calls.contains("rpc surface.report_pwd")
+    let success = run_e2e(false);
+    assert_eq!(success.status, 0);
+    let marker = fs::read_to_string(&success.marker).unwrap();
+    let mut marker_parts = marker.trim().split('|');
+    assert_eq!(marker_parts.next(), Some(success.target.to_str().unwrap()));
+    assert_eq!(marker_parts.next(), Some(success.target.to_str().unwrap()));
+    let calls_text = fs::read_to_string(&success.log).unwrap();
+    let calls: Vec<Vec<&str>> = calls_text
+        .lines()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls[0][..6],
+        [
+            "identify",
+            "--json",
+            "--id-format",
+            "uuids",
+            "--workspace",
+            "W"
+        ]
     );
-    let (status, _, _) = run_e2e(true);
-    assert_ne!(status, 0);
+    assert_eq!(calls[0][6], "--surface");
+    assert_eq!(calls[0][7], "S");
+    assert_eq!(
+        calls[1],
+        ["workspace", "list", "--json", "--id-format", "uuids"]
+    );
+    assert_eq!(calls[2][..2], ["rpc", "surface.report_pwd"]);
+    let params: serde_json::Value = serde_json::from_str(&calls[2][2..].join(" ")).unwrap();
+    assert_eq!(
+        params,
+        serde_json::json!({"workspace_id":"W","surface_id":"S","path":success.target})
+    );
+    assert_eq!(calls[3], calls[1]);
+    assert_eq!(
+        fs::read_to_string(&success.state).unwrap().trim(),
+        success.target.to_str().unwrap()
+    );
+    let failed = run_e2e(true);
+    assert_ne!(failed.status, 0);
+    assert!(!failed.marker.exists());
+    assert_eq!(
+        fs::read_to_string(&failed.state).unwrap().trim(),
+        failed
+            .state
+            .parent()
+            .unwrap()
+            .join("A")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
 }
