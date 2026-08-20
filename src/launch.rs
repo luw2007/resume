@@ -194,47 +194,24 @@ pub fn confirm<R: BufRead, W: Write>(
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) enum CmuxHandoffError {
-    IncompleteEnv(&'static str),
-    OriginUnavailable(io::Error),
+    IncompleteEnv(String),
+    OriginUnavailable(String),
     CliUnavailable,
-    CliPathUnavailable,
-    IdentifySpawn(io::Error),
-    IdentifyStatus {
-        status: std::process::ExitStatus,
-        stderr: String,
-    },
-    IdentifyJson(&'static str),
+    CliPathUnavailable(String),
+    IdentifySpawn(String),
+    IdentifyStatus { status: String, stderr: String },
+    IdentifyJson(String),
     CallerMismatch,
-    ListSpawn(io::Error),
-    ListStatus {
-        status: std::process::ExitStatus,
-        stderr: String,
-    },
-    ListJson(&'static str),
-    WorkspaceNotUnique {
-        count: usize,
-    },
-    PreStateMismatch {
-        expected: PathBuf,
-        actual: String,
-    },
-    TargetUnavailable(io::Error),
+    ListSpawn(String),
+    ListStatus { status: String, stderr: String },
+    ListJson(String),
+    WorkspaceNotUnique { count: usize },
+    PreStateMismatch { expected: String, actual: String },
+    TargetUnavailable(String),
     NonUtf8Target,
-    ReportSpawn(io::Error),
-    ReportStatus {
-        status: std::process::ExitStatus,
-        stderr: String,
-    },
-    ReadbackSpawn(io::Error),
-    ReadbackStatus {
-        status: std::process::ExitStatus,
-        stderr: String,
-    },
-    ReadbackJson(&'static str),
-    ReadbackMismatch {
-        expected: String,
-        actual: String,
-    },
+    ReportSpawn(String),
+    ReportStatus { status: String, stderr: String },
+    ReadbackMismatch { expected: String, actual: String },
 }
 
 #[cfg(unix)]
@@ -242,27 +219,38 @@ impl std::fmt::Display for CmuxHandoffError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use CmuxHandoffError::*;
         match self {
-            IncompleteEnv(_) => f.write_str("incomplete cmux provenance"),
-            OriginUnavailable(_) => f.write_str("current directory unavailable"),
+            IncompleteEnv(reason) => write!(f, "incomplete cmux provenance: {reason}"),
+            OriginUnavailable(reason) => write!(f, "current directory unavailable: {reason}"),
             CliUnavailable => f.write_str("cmux CLI unavailable"),
-            CliPathUnavailable => f.write_str("cmux CLI path unavailable"),
-            IdentifySpawn(_) => f.write_str("cmux identify could not start"),
-            IdentifyStatus { .. } => f.write_str("cmux identify failed"),
-            IdentifyJson(_) => f.write_str("invalid cmux identify response"),
+            CliPathUnavailable(reason) => write!(f, "cmux CLI path unavailable: {reason}"),
+            IdentifySpawn(reason) => write!(f, "cmux identify could not start: {reason}"),
+            IdentifyStatus { status, stderr } => {
+                write!(f, "cmux identify failed ({status}): {stderr}")
+            }
+            IdentifyJson(reason) => write!(f, "invalid cmux identify response: {reason}"),
             CallerMismatch => f.write_str("cmux caller mismatch"),
-            ListSpawn(_) => f.write_str("cmux workspace list could not start"),
-            ListStatus { .. } => f.write_str("cmux workspace list failed"),
-            ListJson(_) => f.write_str("invalid cmux workspace list response"),
-            WorkspaceNotUnique { .. } => f.write_str("cmux caller workspace is not unique"),
-            PreStateMismatch { .. } => f.write_str("cmux caller workspace directory mismatch"),
-            TargetUnavailable(_) => f.write_str("target Workspace unavailable"),
+            ListSpawn(reason) => write!(f, "cmux workspace list could not start: {reason}"),
+            ListStatus { status, stderr } => {
+                write!(f, "cmux workspace list failed ({status}): {stderr}")
+            }
+            ListJson(reason) => write!(f, "invalid cmux workspace list response: {reason}"),
+            WorkspaceNotUnique { count } => {
+                write!(f, "cmux caller workspace is not unique ({count} matches)")
+            }
+            PreStateMismatch { expected, actual } => write!(
+                f,
+                "cmux caller workspace directory mismatch: expected {expected}, got {actual}"
+            ),
+            TargetUnavailable(reason) => write!(f, "target Workspace unavailable: {reason}"),
             NonUtf8Target => f.write_str("target Workspace is not valid UTF-8"),
-            ReportSpawn(_) => f.write_str("cmux workspace report could not start"),
-            ReportStatus { .. } => f.write_str("cmux workspace report failed"),
-            ReadbackSpawn(_) => f.write_str("cmux workspace read-back could not start"),
-            ReadbackStatus { .. } => f.write_str("cmux workspace read-back failed"),
-            ReadbackJson(_) => f.write_str("invalid cmux read-back response"),
-            ReadbackMismatch { .. } => f.write_str("cmux workspace read-back mismatch"),
+            ReportSpawn(reason) => write!(f, "cmux workspace report could not start: {reason}"),
+            ReportStatus { status, stderr } => {
+                write!(f, "cmux workspace report failed ({status}): {stderr}")
+            }
+            ReadbackMismatch { expected, actual } => write!(
+                f,
+                "cmux workspace read-back mismatch: expected {expected}, got {actual}"
+            ),
         }
     }
 }
@@ -295,16 +283,20 @@ fn handoff_with(
         return if workspace.is_none() && surface.is_none() {
             Ok(())
         } else {
-            Err(CmuxHandoffError::IncompleteEnv("missing ID"))
+            Err(CmuxHandoffError::IncompleteEnv("missing ID".into()))
         };
     };
     if w.is_empty() || s.is_empty() {
-        return Err(CmuxHandoffError::IncompleteEnv("empty ID"));
+        return Err(CmuxHandoffError::IncompleteEnv("empty ID".into()));
     }
     let (Some(w), Some(s)) = (w.to_str(), s.to_str()) else {
-        return Err(CmuxHandoffError::IncompleteEnv("non-UTF-8 ID"));
+        return Err(CmuxHandoffError::IncompleteEnv("non-UTF-8 ID".into()));
     };
-    let origin = std::fs::canonicalize(origin).map_err(CmuxHandoffError::OriginUnavailable)?;
+    if !command_available(OsStr::new("cmux")) {
+        return Err(CmuxHandoffError::CliUnavailable);
+    }
+    let origin = std::fs::canonicalize(origin)
+        .map_err(|e| CmuxHandoffError::OriginUnavailable(e.to_string()))?;
     let identify = runner
         .run(
             None,
@@ -319,15 +311,15 @@ fn handoff_with(
                 OsStr::new(s),
             ],
         )
-        .map_err(CmuxHandoffError::IdentifySpawn)?;
+        .map_err(|e| CmuxHandoffError::IdentifySpawn(e.to_string()))?;
     if !identify.status.success() {
         return Err(CmuxHandoffError::IdentifyStatus {
-            status: identify.status,
+            status: identify.status.to_string(),
             stderr: bounded_stderr(&identify.stderr),
         });
     }
     let value: serde_json::Value = serde_json::from_slice(&identify.stdout)
-        .map_err(|_| CmuxHandoffError::IdentifyJson("json"))?;
+        .map_err(|_| CmuxHandoffError::IdentifyJson("json".into()))?;
     let caller = value
         .get("caller")
         .and_then(|v| v.as_object())
@@ -340,24 +332,29 @@ fn handoff_with(
         .and_then(|v| v.as_str())
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .ok_or(CmuxHandoffError::CliPathUnavailable)?;
+        .ok_or(CmuxHandoffError::CliPathUnavailable(
+            "missing app_cli_path".into(),
+        ))?;
     if !executable(&cli) {
-        return Err(CmuxHandoffError::CliPathUnavailable);
+        return Err(CmuxHandoffError::CliPathUnavailable(
+            cli.display().to_string(),
+        ));
     }
     let pre = list_workspaces(&cli, runner).map_err(|e| e.0)?;
     let actual = one_workspace(&pre, w)?;
     let actual_path =
         std::fs::canonicalize(actual).map_err(|_| CmuxHandoffError::PreStateMismatch {
-            expected: origin.clone(),
+            expected: origin.display().to_string(),
             actual: actual.to_string(),
         })?;
     if actual_path != origin {
         return Err(CmuxHandoffError::PreStateMismatch {
-            expected: origin,
+            expected: origin.display().to_string(),
             actual: actual.to_string(),
         });
     }
-    let target = std::fs::canonicalize(target).map_err(CmuxHandoffError::TargetUnavailable)?;
+    let target = std::fs::canonicalize(target)
+        .map_err(|e| CmuxHandoffError::TargetUnavailable(e.to_string()))?;
     let target = target
         .to_str()
         .ok_or(CmuxHandoffError::NonUtf8Target)?
@@ -372,10 +369,10 @@ fn handoff_with(
                 OsStr::new(&params.to_string()),
             ],
         )
-        .map_err(CmuxHandoffError::ReportSpawn)?;
+        .map_err(|e| CmuxHandoffError::ReportSpawn(e.to_string()))?;
     if !report.status.success() {
         return Err(CmuxHandoffError::ReportStatus {
-            status: report.status,
+            status: report.status.to_string(),
             stderr: bounded_stderr(&report.stderr),
         });
     }
@@ -418,24 +415,24 @@ fn list_workspaces(
                 OsStr::new("uuids"),
             ],
         )
-        .map_err(|e| (CmuxHandoffError::ListSpawn(e), ()))?;
+        .map_err(|e| (CmuxHandoffError::ListSpawn(e.to_string()), ()))?;
     if !out.status.success() {
         return Err((
             CmuxHandoffError::ListStatus {
-                status: out.status,
+                status: out.status.to_string(),
                 stderr: bounded_stderr(&out.stderr),
             },
             (),
         ));
     }
-    serde_json::from_slice(&out.stdout).map_err(|_| (CmuxHandoffError::ListJson("json"), ()))
+    serde_json::from_slice(&out.stdout).map_err(|_| (CmuxHandoffError::ListJson("json".into()), ()))
 }
 #[cfg(unix)]
 fn one_workspace<'a>(value: &'a serde_json::Value, id: &str) -> Result<&'a str, CmuxHandoffError> {
     let entries = value
         .get("workspaces")
         .and_then(|v| v.as_array())
-        .ok_or(CmuxHandoffError::ListJson("workspaces"))?;
+        .ok_or(CmuxHandoffError::ListJson("workspaces".into()))?;
     let matches: Vec<&serde_json::Value> =
         entries.iter().filter(|v| eq_id(v.get("id"), id)).collect();
     if matches.len() != 1 {
@@ -446,7 +443,7 @@ fn one_workspace<'a>(value: &'a serde_json::Value, id: &str) -> Result<&'a str, 
     matches[0]
         .get("current_directory")
         .and_then(|v| v.as_str())
-        .ok_or(CmuxHandoffError::ListJson("current_directory"))
+        .ok_or(CmuxHandoffError::ListJson("current_directory".into()))
 }
 
 #[cfg(unix)]
@@ -455,7 +452,7 @@ pub(crate) fn handoff_cmux_workspace(spec: &ResumeSpec) -> Result<(), CmuxHandof
     handoff_with(
         std::env::var_os("CMUX_WORKSPACE_ID").as_deref(),
         std::env::var_os("CMUX_SURFACE_ID").as_deref(),
-        &std::env::current_dir().map_err(CmuxHandoffError::OriginUnavailable)?,
+        &std::env::current_dir().map_err(|e| CmuxHandoffError::OriginUnavailable(e.to_string()))?,
         &spec.cwd,
         &runner,
     )
@@ -497,6 +494,72 @@ mod tests {
         }
     }
     #[cfg(unix)]
+    struct MockRunner {
+        outputs: std::sync::Mutex<Vec<std::process::Output>>,
+        calls: std::sync::Mutex<Vec<(Option<PathBuf>, Vec<String>)>>,
+    }
+    #[cfg(unix)]
+    impl MockRunner {
+        fn new(outputs: Vec<std::process::Output>) -> Self {
+            Self {
+                outputs: std::sync::Mutex::new(outputs),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    #[cfg(unix)]
+    impl CmuxRunner for MockRunner {
+        fn run(&self, program: Option<&Path>, args: &[&OsStr]) -> io::Result<std::process::Output> {
+            self.calls.lock().unwrap().push((
+                program.map(Path::to_path_buf),
+                args.iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            ));
+            self.outputs
+                .lock()
+                .unwrap()
+                .pop()
+                .ok_or_else(|| io::Error::other("no fixture"))
+        }
+    }
+    #[cfg(unix)]
+    fn output(json: &str, success: bool) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 }),
+            stdout: json.as_bytes().to_vec(),
+            stderr: b"fixture failure".to_vec(),
+        }
+    }
+    #[cfg(unix)]
+    fn fixtures(
+        origin: &Path,
+        _target: &Path,
+        identify: &str,
+        report_ok: bool,
+        readback: &str,
+    ) -> Vec<std::process::Output> {
+        vec![
+            output(
+                &format!(
+                    r#"{{"workspaces":[{{"id":"W","current_directory":"{}"}}]}}"#,
+                    readback
+                ),
+                true,
+            ),
+            output("{}", report_ok),
+            output(
+                &format!(
+                    r#"{{"workspaces":[{{"id":"W","current_directory":"{}"}}]}}"#,
+                    origin.display()
+                ),
+                true,
+            ),
+            output(identify, true),
+        ]
+    }
+    #[cfg(unix)]
     #[test]
     fn no_cmux_env_is_noop() {
         struct NoRunner;
@@ -517,6 +580,117 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cmux_handoff_protocol_regression_matrix() {
+        let origin = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let identify = format!(
+            r#"{{"caller":{{"workspace_id":"w","surface_id":"s"}},"app_cli_path":"{}"}}"#,
+            std::env::current_exe().unwrap().display()
+        );
+        let runner = MockRunner::new(fixtures(
+            origin.path(),
+            target.path(),
+            &identify,
+            true,
+            &target.path().canonicalize().unwrap().display().to_string(),
+        ));
+        assert!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                origin.path(),
+                target.path(),
+                &runner
+            )
+            .is_ok()
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].1[0], "identify");
+        assert_eq!(calls[1].1[..2], ["workspace", "list"]);
+        assert_eq!(calls[2].1[..2], ["rpc", "surface.report_pwd"]);
+        assert!(calls[2].1[2].contains("path"));
+        assert_eq!(calls[3].1[..2], ["workspace", "list"]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cmux_handoff_rejects_incomplete_and_malformed_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(vec![]);
+        assert!(matches!(
+            handoff_with(Some(OsStr::new("W")), None, dir.path(), dir.path(), &runner),
+            Err(CmuxHandoffError::IncompleteEnv(_))
+        ));
+        let bad = MockRunner::new(vec![output("not json", true)]);
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                dir.path(),
+                dir.path(),
+                &bad
+            ),
+            Err(CmuxHandoffError::IdentifyJson(_))
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cmux_handoff_rejects_mismatch_duplicate_and_failures() {
+        let origin = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let path = std::env::current_exe().unwrap();
+        let id = format!(
+            r#"{{"caller":{{"workspace_id":"W","surface_id":"S"}},"app_cli_path":"{}"}}"#,
+            path.display()
+        );
+        let mismatch = MockRunner::new(vec![output(&id, true)]);
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                origin.path(),
+                target.path(),
+                &mismatch
+            ),
+            Err(CmuxHandoffError::ListSpawn(_))
+        ));
+        let report = MockRunner::new(fixtures(
+            origin.path(),
+            target.path(),
+            &id,
+            false,
+            &target.path().display().to_string(),
+        ));
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                origin.path(),
+                target.path(),
+                &report
+            ),
+            Err(CmuxHandoffError::ReportStatus { .. })
+        ));
+        let readback = MockRunner::new(fixtures(
+            origin.path(),
+            target.path(),
+            &id,
+            true,
+            origin.path().to_str().unwrap(),
+        ));
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                origin.path(),
+                target.path(),
+                &readback
+            ),
+            Err(CmuxHandoffError::ReadbackMismatch { .. })
+        ));
+    }
     #[test]
     fn no_confirm_never_bypasses_risk() {
         assert!(should_confirm(
