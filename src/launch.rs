@@ -350,6 +350,9 @@ fn handoff_with(
             actual: actual.to_string(),
         });
     }
+    if target.to_str().is_none() {
+        return Err(CmuxHandoffError::NonUtf8Target);
+    }
     let target = std::fs::canonicalize(target)
         .map_err(|e| CmuxHandoffError::TargetUnavailable(e.to_string()))?;
     let target = target
@@ -478,6 +481,7 @@ pub fn exec(spec: &ResumeSpec) -> io::Error {
 mod tests {
     use super::*;
     use crate::session::*;
+    use std::ffi::OsString;
     fn session(risk: RiskStatus, activity: ActivityStatus) -> Session {
         Session {
             key: SessionKey {
@@ -537,7 +541,6 @@ mod tests {
             stderr: b"fixture failure".to_vec(),
         }
     }
-    #[cfg(unix)]
     #[cfg(unix)]
     #[test]
     fn no_cmux_env_is_noop() {
@@ -739,6 +742,91 @@ mod tests {
             Err(CmuxHandoffError::ReadbackMismatch { .. })
         ));
         assert_eq!(readback.calls.lock().unwrap().len(), 4);
+        let canonical = target.path().canonicalize().unwrap().display().to_string();
+        let trailing = valid_runner(
+            &path,
+            origin.path(),
+            target.path(),
+            true,
+            &(canonical + "/"),
+        );
+        assert!(matches!(
+            invoke(&trailing, origin.path(), target.path()),
+            Err(CmuxHandoffError::ReadbackMismatch { .. })
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn production_entry_rejects_missing_cmux_cli() {
+        let old_path = std::env::var_os("PATH");
+        let old_w = std::env::var_os("CMUX_WORKSPACE_ID");
+        let old_s = std::env::var_os("CMUX_SURFACE_ID");
+        unsafe {
+            std::env::set_var("PATH", tempfile::tempdir().unwrap().path());
+            std::env::set_var("CMUX_WORKSPACE_ID", "W");
+            std::env::set_var("CMUX_SURFACE_ID", "S");
+        }
+        let spec = ResumeSpec {
+            program: OsString::from("agent"),
+            argv: vec![],
+            cwd: PathBuf::from("/"),
+            env: vec![],
+        };
+        assert!(matches!(
+            handoff_cmux_workspace(&spec),
+            Err(CmuxHandoffError::CliUnavailable)
+        ));
+        restore_env("PATH", old_path);
+        restore_env("CMUX_WORKSPACE_ID", old_w);
+        restore_env("CMUX_SURFACE_ID", old_s);
+    }
+    #[cfg(unix)]
+    fn restore_env(key: &str, value: Option<OsString>) {
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cmux_handoff_covers_target_and_symlink_guards() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&real, &alias).unwrap();
+        let cli = std::env::current_exe().unwrap();
+        let runner = valid_runner(
+            &cli,
+            &real,
+            &target,
+            true,
+            &target.canonicalize().unwrap().display().to_string(),
+        );
+        assert!(invoke(&runner, &alias, &target).is_ok());
+        let bad_target = root.path().join(OsString::from_vec(b"bad-\xff".to_vec()));
+        let pre = MockRunner::new(vec![
+            output(&list_json("W", &real.display().to_string()), true),
+            output(&identify_json(&cli, "W", "S"), true),
+        ]);
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                &real,
+                &bad_target,
+                &pre
+            ),
+            Err(CmuxHandoffError::NonUtf8Target)
+        ));
+        assert_eq!(pre.calls.lock().unwrap().len(), 2);
     }
     #[test]
     fn no_confirm_never_bypasses_risk() {
