@@ -10,3 +10,7 @@ Plan only. The experiment is one metadata-only `workflow_run` notifier for faile
 |---|---|---|---|---|---|---|
 | MinimalWorkflowMap | architecture / claude_sub2api/claude-opus-5 | `../resume-plan-workflow` worktree | `workflow-a1` | `surface:269` | Accepted with adversarial narrowing: `5163125688c7e001961cfae99445326af9f98fdd`; its job/step/API/manual-dispatch proposal was rejected | `.done/workflow-a1` observed |
 | DeletionRiskReview | adversarial / codex_gpt/gpt-5.6-sol | `../resume-plan-risk` worktree | `risk-a1` | `surface:270` | Accepted: `414d735e3087c7a6bd5c45cef7dc4d34f879ccfc`; reduced metadata-only pilot adopted | `.done/risk-a1` observed |
+
+| CmuxResumeHandoffPlan | planner / codex_gpt/gpt-5.6-sol | `../resume` shared planning tree | `cmux-handoff-plan-a1` | pending | frozen task `.dispatch/CmuxResumeHandoffPlan-TASK.md` | `.done/cmux-handoff-plan-a1` |
+| CmuxResumeHandoffDetails | change-detail / claude_sub2api/claude-opus-5 | `../resume` shared planning tree | `cmux-handoff-details-a1` | blocked on plan | frozen task `.dispatch/CmuxResumeHandoffDesign-TASK.md` | `.done/cmux-handoff-details-a1` |
+| CmuxResumeHandoffImplement | implementation / codex_gpt/gpt-5.6-luna:max | isolated implementation worktree | `cmux-handoff-implement-a1` | blocked on details | frozen task `.dispatch/CmuxResumeHandoffImplement-TASK.md` | `.done/cmux-handoff-implement-a1` |
