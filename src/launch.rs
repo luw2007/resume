@@ -292,9 +292,6 @@ fn handoff_with(
     let (Some(w), Some(s)) = (w.to_str(), s.to_str()) else {
         return Err(CmuxHandoffError::IncompleteEnv("non-UTF-8 ID".into()));
     };
-    if !command_available(OsStr::new("cmux")) {
-        return Err(CmuxHandoffError::CliUnavailable);
-    }
     let origin = std::fs::canonicalize(origin)
         .map_err(|e| CmuxHandoffError::OriginUnavailable(e.to_string()))?;
     let identify = runner
@@ -449,6 +446,9 @@ fn one_workspace<'a>(value: &'a serde_json::Value, id: &str) -> Result<&'a str, 
 #[cfg(unix)]
 pub(crate) fn handoff_cmux_workspace(spec: &ResumeSpec) -> Result<(), CmuxHandoffError> {
     let runner = ProcessCmuxRunner;
+    if !command_available(OsStr::new("cmux")) {
+        return Err(CmuxHandoffError::CliUnavailable);
+    }
     handoff_with(
         std::env::var_os("CMUX_WORKSPACE_ID").as_deref(),
         std::env::var_os("CMUX_SURFACE_ID").as_deref(),
@@ -533,32 +533,6 @@ mod tests {
         }
     }
     #[cfg(unix)]
-    fn fixtures(
-        origin: &Path,
-        _target: &Path,
-        identify: &str,
-        report_ok: bool,
-        readback: &str,
-    ) -> Vec<std::process::Output> {
-        vec![
-            output(
-                &format!(
-                    r#"{{"workspaces":[{{"id":"W","current_directory":"{}"}}]}}"#,
-                    readback
-                ),
-                true,
-            ),
-            output("{}", report_ok),
-            output(
-                &format!(
-                    r#"{{"workspaces":[{{"id":"W","current_directory":"{}"}}]}}"#,
-                    origin.display()
-                ),
-                true,
-            ),
-            output(identify, true),
-        ]
-    }
     #[cfg(unix)]
     #[test]
     fn no_cmux_env_is_noop() {
@@ -581,21 +555,52 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn identify_json(path: &Path, w: &str, s: &str) -> String {
+        format!(
+            r#"{{"caller":{{"workspace_id":"{w}","surface_id":"{s}"}},"focused":{{"workspace_id":"{w}","surface_id":"{s}"}},"app_cli_path":"{}"}}"#,
+            path.display()
+        )
+    }
+    #[cfg(unix)]
+    fn list_json(id: &str, cwd: &str) -> String {
+        format!(r#"{{"workspaces":[{{"id":"{id}","current_directory":"{cwd}"}}]}}"#)
+    }
+    #[cfg(unix)]
+    fn valid_runner(
+        path: &Path,
+        origin: &Path,
+        _target: &Path,
+        report_ok: bool,
+        readback: &str,
+    ) -> MockRunner {
+        MockRunner::new(vec![
+            output(&list_json("W", readback), true),
+            output("{}", report_ok),
+            output(
+                &list_json("W", &origin.canonicalize().unwrap().display().to_string()),
+                true,
+            ),
+            output(&identify_json(path, "W", "S"), true),
+        ])
+    }
+    #[cfg(unix)]
+    fn invoke(runner: &MockRunner, origin: &Path, target: &Path) -> Result<(), CmuxHandoffError> {
+        handoff_with(
+            Some(OsStr::new("W")),
+            Some(OsStr::new("S")),
+            origin,
+            target,
+            runner,
+        )
+    }
+    #[cfg(unix)]
     #[test]
     fn cmux_handoff_protocol_regression_matrix() {
         let origin = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
-        let identify = format!(
-            r#"{{"caller":{{"workspace_id":"w","surface_id":"s"}},"app_cli_path":"{}"}}"#,
-            std::env::current_exe().unwrap().display()
-        );
-        let runner = MockRunner::new(fixtures(
-            origin.path(),
-            target.path(),
-            &identify,
-            true,
-            &target.path().canonicalize().unwrap().display().to_string(),
-        ));
+        let cli = std::env::current_exe().unwrap();
+        let target_canonical = target.path().canonicalize().unwrap().display().to_string();
+        let runner = valid_runner(&cli, origin.path(), target.path(), true, &target_canonical);
         assert!(
             handoff_with(
                 Some(OsStr::new("W")),
@@ -608,11 +613,16 @@ mod tests {
         );
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].0, None);
         assert_eq!(calls[0].1[0], "identify");
-        assert_eq!(calls[1].1[..2], ["workspace", "list"]);
+        assert_eq!(calls[1].0.as_deref(), Some(cli.as_path()));
+        assert_eq!(calls[2].0.as_deref(), Some(cli.as_path()));
+        assert_eq!(calls[3].0.as_deref(), Some(cli.as_path()));
         assert_eq!(calls[2].1[..2], ["rpc", "surface.report_pwd"]);
-        assert!(calls[2].1[2].contains("path"));
-        assert_eq!(calls[3].1[..2], ["workspace", "list"]);
+        let params: serde_json::Value = serde_json::from_str(&calls[2].1[2]).unwrap();
+        assert_eq!(params["workspace_id"], "W");
+        assert_eq!(params["surface_id"], "S");
+        assert_eq!(params["path"], target_canonical);
     }
     #[cfg(unix)]
     #[test]
@@ -641,28 +651,40 @@ mod tests {
         let origin = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let path = std::env::current_exe().unwrap();
-        let id = format!(
-            r#"{{"caller":{{"workspace_id":"W","surface_id":"S"}},"app_cli_path":"{}"}}"#,
-            path.display()
-        );
-        let mismatch = MockRunner::new(vec![output(&id, true)]);
+        let mismatch = MockRunner::new(vec![output(&identify_json(&path, "OTHER", "S"), true)]);
         assert!(matches!(
-            handoff_with(
-                Some(OsStr::new("W")),
-                Some(OsStr::new("S")),
-                origin.path(),
-                target.path(),
-                &mismatch
-            ),
-            Err(CmuxHandoffError::ListSpawn(_))
+            invoke(&mismatch, origin.path(), target.path()),
+            Err(CmuxHandoffError::CallerMismatch)
         ));
-        let report = MockRunner::new(fixtures(
-            origin.path(),
-            target.path(),
-            &id,
-            false,
-            &target.path().display().to_string(),
+        for workspaces in [
+            r#"{"workspaces":[]}"#,
+            r#"{"workspaces":[{"id":"W","current_directory":"/x"},{"id":"W","current_directory":"/x"}]}"#,
+        ] {
+            let runner = MockRunner::new(vec![
+                output(workspaces, true),
+                output(&identify_json(&path, "W", "S"), true),
+            ]);
+            assert!(matches!(
+                invoke(&runner, origin.path(), target.path()),
+                Err(CmuxHandoffError::WorkspaceNotUnique { .. })
+            ));
+            assert_eq!(runner.calls.lock().unwrap().len(), 2);
+        }
+        let pre = MockRunner::new(vec![
+            output(&list_json("W", "/different"), true),
+            output(&identify_json(&path, "W", "S"), true),
+        ]);
+        assert!(matches!(
+            invoke(&pre, origin.path(), target.path()),
+            Err(CmuxHandoffError::PreStateMismatch { .. })
         ));
+        assert_eq!(pre.calls.lock().unwrap().len(), 2);
+        let id = identify_json(&path, "W", "S");
+        let report = MockRunner::new(vec![
+            output("{}", false),
+            output(&list_json("W", &origin.path().display().to_string()), true),
+            output(&id, true),
+        ]);
         assert!(matches!(
             handoff_with(
                 Some(OsStr::new("W")),
@@ -673,23 +695,19 @@ mod tests {
             ),
             Err(CmuxHandoffError::ReportStatus { .. })
         ));
-        let readback = MockRunner::new(fixtures(
+        assert_eq!(report.calls.lock().unwrap().len(), 3);
+        let readback = valid_runner(
+            &path,
             origin.path(),
             target.path(),
-            &id,
             true,
-            origin.path().to_str().unwrap(),
-        ));
+            &origin.path().display().to_string(),
+        );
         assert!(matches!(
-            handoff_with(
-                Some(OsStr::new("W")),
-                Some(OsStr::new("S")),
-                origin.path(),
-                target.path(),
-                &readback
-            ),
+            invoke(&readback, origin.path(), target.path()),
             Err(CmuxHandoffError::ReadbackMismatch { .. })
         ));
+        assert_eq!(readback.calls.lock().unwrap().len(), 4);
     }
     #[test]
     fn no_confirm_never_bypasses_risk() {
