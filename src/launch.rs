@@ -226,6 +226,14 @@ mod tests {
             risk,
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn no_cmux_env_is_noop() {
+        let runner = TestRunner::default();
+        assert!(handoff_with(None, None, Path::new("/origin"), Path::new("/target"), &runner).is_ok());
+        assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn no_confirm_never_bypasses_risk() {
         assert!(should_confirm(
