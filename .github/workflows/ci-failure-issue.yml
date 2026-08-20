@@ -1,0 +1,107 @@
+name: CI failure issue
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ci-failure-issue-${{ github.repository_id }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: Open or update CI failure issue
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.workflow_id == 330337970 &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.id == github.repository_id &&
+      github.event.workflow_run.head_repository.id == github.repository_id &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Create or update metadata-only triage issue
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 0
+          [[ "$RUN_ATTEMPT" =~ ^[0-9]+$ ]] || exit 0
+
+          labels="$(gh api "repos/$REPOSITORY/labels?per_page=100" --jq '[.[].name]')"
+          jq -e '
+            index("automation:ci-failure") != null and
+            index("needs-human-triage") != null
+          ' <<<"$labels" >/dev/null || {
+            echo "required pilot labels are missing" >&2
+            exit 1
+          }
+
+          marker="ci-pilot:$HEAD_SHA"
+          attempt_marker="ci-pilot-run:$RUN_ID:$RUN_ATTEMPT"
+          run_url="https://github.com/$REPOSITORY/actions/runs/$RUN_ID"
+
+          issues="$(gh api "repos/$REPOSITORY/issues?state=all&labels=automation%3Aci-failure&per_page=100")"
+          issue_count="$(jq 'length' <<<"$issues")"
+          [[ "$issue_count" =~ ^[0-9]+$ ]] || exit 1
+          (( issue_count < 100 )) || {
+            echo "pilot issue limit reached" >&2
+            exit 1
+          }
+
+          issue_number="$(jq -er --arg marker "$marker" '
+            [ .[]
+              | select(.pull_request | not)
+              | select(.title == "CI failure [" + $marker + "]")
+              | .number
+            ]
+            | if length == 0 then "none"
+              elif length == 1 and (.[0] | type == "number") then (.[0] | tostring)
+              else error("duplicate pilot issue marker")
+              end
+          ' <<<"$issues")"
+
+          if [[ "$issue_number" == "none" ]]; then
+            body="$(printf '%s\n\n%s\n%s\n%s\n\n%s\n' \
+              "[$marker]" \
+              "Commit: $HEAD_SHA" \
+              "Run: $RUN_ID (attempt $RUN_ATTEMPT)" \
+              "Actions run: $run_url" \
+              'Maintainer starting point: `make ci`; reproduction not yet confirmed.')"
+            gh issue create \
+              --repo "$REPOSITORY" \
+              --title "CI failure [$marker]" \
+              --label automation:ci-failure \
+              --label needs-human-triage \
+              --body "$body"
+            exit 0
+          fi
+
+          [[ "$issue_number" =~ ^[0-9]+$ ]] || exit 1
+          comments="$(gh api "repos/$REPOSITORY/issues/$issue_number/comments?per_page=100")"
+          comment_count="$(jq 'length' <<<"$comments")"
+          [[ "$comment_count" =~ ^[0-9]+$ ]] || exit 1
+          (( comment_count < 100 )) || {
+            echo "pilot comment limit reached" >&2
+            exit 1
+          }
+
+          jq -e --arg marker "$attempt_marker" --arg run_url "$run_url" '
+            any(.[]; .body == $marker + "\n" + "Actions run: " + $run_url)
+          ' <<<"$comments" >/dev/null && exit 0
+
+          gh issue comment "$issue_number" \
+            --repo "$REPOSITORY" \
+            --body "$(printf '%s\n%s\n' "$attempt_marker" "Actions run: $run_url")"
