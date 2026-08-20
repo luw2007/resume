@@ -757,6 +757,148 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    fn cmux_handoff_rejects_missing_and_nonexecutable_app_cli_path() {
+        let origin = tempfile::tempdir().unwrap();
+        let missing = MockRunner::new(vec![output(
+            r#"{"caller":{"workspace_id":"W","surface_id":"S"}}"#,
+            true,
+        )]);
+        assert!(matches!(
+            invoke(&missing, origin.path(), origin.path()),
+            Err(CmuxHandoffError::CliPathUnavailable(_))
+        ));
+        assert_eq!(missing.calls.lock().unwrap().len(), 1);
+        let file = origin.path().join("not-executable");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        let json = format!(
+            r#"{{"caller":{{"workspace_id":"W","surface_id":"S"}},"app_cli_path":"{}"}}"#,
+            file.display()
+        );
+        let nonexec = MockRunner::new(vec![output(&json, true)]);
+        assert!(matches!(
+            invoke(&nonexec, origin.path(), origin.path()),
+            Err(CmuxHandoffError::CliPathUnavailable(_))
+        ));
+        assert_eq!(nonexec.calls.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_cmux_and_native_agent_prove_order_and_fail_closed_exec() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let state = root.path().join("state");
+        let log = root.path().join("log");
+        std::fs::write(&state, origin.canonicalize().unwrap().display().to_string()).unwrap();
+        let cmux = root.path().join("cmux");
+        let script = format!(
+            r##"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+if [ "$1" = identify ]; then printf '{{"caller":{{"workspace_id":"W","surface_id":"S"}},"app_cli_path":"{}"}}\n'
+elif [ "$1" = workspace ]; then current=$(<{}); printf '%s' "{{\"workspaces\":[{{\"id\":\"W\",\"current_directory\":\"$current\"}}]}}"
+elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; printf '%s' "{}" > '{}'; fi
+"##,
+            log.display(),
+            cmux.display(),
+            state.display(),
+            target.canonicalize().unwrap().display(),
+            state.display()
+        );
+        std::fs::write(&cmux, script).unwrap();
+        let mut p = std::fs::metadata(&cmux).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&cmux, p).unwrap();
+        let agent = root.path().join("agent");
+        let marker = root.path().join("marker");
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"{}\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut p = std::fs::metadata(&agent).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&agent, p).unwrap();
+        let old_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", root.path());
+        }
+        let runner = ProcessCmuxRunner;
+        let first = handoff_with(
+            Some(OsStr::new("W")),
+            Some(OsStr::new("S")),
+            &origin,
+            &target,
+            &runner,
+        );
+        assert!(first.is_ok(), "first handoff failed: {first:?}");
+        assert!(
+            Command::new(&agent)
+                .current_dir(&target)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().trim(),
+            target.canonicalize().unwrap().display().to_string()
+        );
+        let count = std::fs::read_to_string(&log)
+            .unwrap()
+            .matches("rpc")
+            .count();
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(&state, origin.canonicalize().unwrap().display().to_string()).unwrap();
+        unsafe {
+            std::env::set_var("FAIL_REPORT", "1");
+        }
+        assert!(matches!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                &origin,
+                &target,
+                &runner
+            ),
+            Err(CmuxHandoffError::ReportStatus { .. })
+        ));
+        assert!(!marker.exists());
+        unsafe {
+            std::env::remove_var("FAIL_REPORT");
+        }
+        std::fs::write(&state, origin.display().to_string()).unwrap();
+        assert!(
+            handoff_with(
+                Some(OsStr::new("W")),
+                Some(OsStr::new("S")),
+                &origin,
+                &target,
+                &runner
+            )
+            .is_ok()
+        );
+        let before = std::fs::read_to_string(&log)
+            .unwrap()
+            .matches("rpc")
+            .count();
+        assert!(
+            Command::new(root.path().join("missing-agent"))
+                .current_dir(&target)
+                .status()
+                .is_err()
+        );
+        assert_eq!(before, count + 2);
+        restore_env("PATH", old_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn production_entry_rejects_missing_cmux_cli() {
         let old_path = std::env::var_os("PATH");
         let old_w = std::env::var_os("CMUX_WORKSPACE_ID");
