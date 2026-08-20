@@ -628,11 +628,19 @@ mod tests {
     #[test]
     fn cmux_handoff_rejects_incomplete_and_malformed_states() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(vec![]);
-        assert!(matches!(
-            handoff_with(Some(OsStr::new("W")), None, dir.path(), dir.path(), &runner),
-            Err(CmuxHandoffError::IncompleteEnv(_))
-        ));
+        for (workspace, surface) in [
+            (Some(OsStr::new("W")), None),
+            (None, Some(OsStr::new("S"))),
+            (Some(OsStr::new("")), Some(OsStr::new("S"))),
+            (Some(OsStr::new("W")), Some(OsStr::new(""))),
+        ] {
+            let runner = MockRunner::new(vec![]);
+            assert!(matches!(
+                handoff_with(workspace, surface, dir.path(), dir.path(), &runner),
+                Err(CmuxHandoffError::IncompleteEnv(_))
+            ));
+            assert_eq!(runner.calls.lock().unwrap().len(), 0);
+        }
         let bad = MockRunner::new(vec![output("not json", true)]);
         assert!(matches!(
             handoff_with(
@@ -644,6 +652,18 @@ mod tests {
             ),
             Err(CmuxHandoffError::IdentifyJson(_))
         ));
+        let path = std::env::current_exe().unwrap();
+        for list in ["not json", r#"{"unexpected":[]}"#] {
+            let runner = MockRunner::new(vec![
+                output(list, true),
+                output(&identify_json(&path, "W", "S"), true),
+            ]);
+            assert!(matches!(
+                invoke(&runner, dir.path(), dir.path()),
+                Err(CmuxHandoffError::ListJson(_))
+            ));
+            assert_eq!(runner.calls.lock().unwrap().len(), 2);
+        }
     }
     #[cfg(unix)]
     #[test]
@@ -651,11 +671,17 @@ mod tests {
         let origin = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
         let path = std::env::current_exe().unwrap();
-        let mismatch = MockRunner::new(vec![output(&identify_json(&path, "OTHER", "S"), true)]);
-        assert!(matches!(
-            invoke(&mismatch, origin.path(), target.path()),
-            Err(CmuxHandoffError::CallerMismatch)
-        ));
+        for identify in [
+            identify_json(&path, "OTHER", "S"),
+            identify_json(&path, "W", "OTHER"),
+        ] {
+            let mismatch = MockRunner::new(vec![output(&identify, true)]);
+            assert!(matches!(
+                invoke(&mismatch, origin.path(), target.path()),
+                Err(CmuxHandoffError::CallerMismatch)
+            ));
+            assert_eq!(mismatch.calls.lock().unwrap().len(), 1);
+        }
         for workspaces in [
             r#"{"workspaces":[]}"#,
             r#"{"workspaces":[{"id":"W","current_directory":"/x"},{"id":"W","current_directory":"/x"}]}"#,
