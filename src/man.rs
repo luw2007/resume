@@ -316,10 +316,11 @@ PICKER KEYS
     (see PROGRESS below), with an `All` tab plus one tab per agent that
     has produced a Session so far. Each tab holds every Session for its
     scope, sorted oldest-first with the most recently updated Session
-    last, split into pages of 50; the Picker opens on the newest page of
-    the `All` tab. Paging or switching tabs relaunches a small, fresh view
-    over the target tab/page; it never reorders or drops a Session
-    already discovered.
+    last, split into pages of 50. The Picker opens on a full newest page of
+    the `All` tab; when older Sessions remain, its header states their count
+    and `Alt-P`. Paging or switching tabs relaunches a small, fresh view over
+    the target tab/page; it never reorders or drops a Session already
+    discovered.
 
     When Codex is configured alongside at least one other agent, it
     discovers in the background instead of holding the Picker closed: its

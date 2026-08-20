@@ -334,12 +334,12 @@ fn skim_streamed_path_still_selects() {
 }
 
 /// `run_tabbed_picker` (the path `app::run_interactive` uses once discovery
-/// fully completes): default view is the "All" tab's last (newest) page;
-/// Alt+P/Alt+N move pages within a tab; Alt+Left/Alt+Right cycle tabs
-/// (wrapping) and reset to that tab's last page; Enter still resolves the
-/// correct opaque key. Fixture: pi=70 (2 pages), claude=10, omp=5 (1 page
-/// each), so "All" (85 total) and "pi" both exercise pagination while
-/// Alt+Left/Alt+Right cycles all 4 tabs (All, pi, claude, omp).
+/// fully completes): default view is the "All" tab's newest full page;
+/// `Alt+P`/`Alt+N` move to older/newer pages within a tab; Alt+Left/Alt+Right
+/// cycle tabs (wrapping) and reset to each tab's newest page; Enter still
+/// resolves the correct opaque key. Fixture: pi=70 (2 pages), claude=10,
+/// omp=5 (1 page each), so "All" (85 total) and "pi" both exercise
+/// pagination while Alt+Left/Alt+Right cycles all 4 tabs (All, pi, claude, omp).
 #[test]
 fn tabbed_picker_paginates_and_switches_tabs() {
     if !pty_available() {
@@ -347,25 +347,27 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     }
     let mut sess = spawn("tabbed", 100, 30);
 
-    // Default: "All" tab, last (newest) page — 2/2, holding pi 051-069,
-    // claude, and omp (ids 51-85), never the first-page-only pi items.
-    let all_page2 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    // Default: All's newest full page — 1/2, holding pi 035-069, Claude,
+    // and OMP (ids 36-85). The header makes its 35 older sessions discoverable.
+    let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_page2.contains("[All]") && all_page2.contains("PAGE 2/2"),
-        "expected All tab page 2/2: {all_page2:?}"
+        all_page1.contains("[All]")
+            && all_page1.contains("PAGE 1/2")
+            && all_page1.contains("35 older sessions: Alt-P"),
+        "expected newest All page with continuation: {all_page1:?}"
     );
     assert!(
-        !all_page2.contains("pi-candidate-000"),
-        "first-page-only pi candidate leaked onto All page 2: {all_page2:?}"
+        !all_page1.contains("pi-candidate-000"),
+        "older-page pi candidate leaked onto newest All page: {all_page1:?}"
     );
 
-    // Alt+P: older page of "All" (1/2) — pure first-50 pi candidates.
+    // Alt+P: older page of All (2/2) — the 35 oldest pi candidates.
     sess.write(b"\x1bp");
-    let all_page1 = wait_for(&mut sess, "pi-candidate-000", Duration::from_millis(4000));
-    assert!(all_page1.contains("PAGE 1/2"), "page header: {all_page1:?}");
+    let all_page2 = wait_for(&mut sess, "pi-candidate-000", Duration::from_millis(4000));
+    assert!(all_page2.contains("PAGE 2/2"), "page header: {all_page2:?}");
     assert!(
-        !all_page1.contains("omp-candidate"),
-        "omp leaked onto All page 1: {all_page1:?}"
+        !all_page2.contains("omp-candidate"),
+        "omp leaked onto older All page: {all_page2:?}"
     );
 
     // macOS terminals emit the xterm modifier form for Option+Left.
@@ -382,8 +384,8 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     sess.write(b"\x1b[1;3C");
     let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 2/2"),
-        "expected pi tab page 2/2: {pi_tab:?}"
+        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 1/2"),
+        "expected pi tab newest page: {pi_tab:?}"
     );
     assert!(
         !pi_tab.contains("claude-candidate") && !pi_tab.contains("omp-candidate"),
@@ -409,19 +411,19 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
     }
     let mut sess = spawn("tabbed", 100, 30);
 
-    // Default: "All" tab, last page (2/2).
-    let all_page2 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    // Default: All's newest full page (1/2).
+    let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_page2.contains("[All]") && all_page2.contains("PAGE 2/2"),
-        "expected All tab page 2/2: {all_page2:?}"
+        all_page1.contains("[All]") && all_page1.contains("PAGE 1/2"),
+        "expected All tab newest page: {all_page1:?}"
     );
 
-    // Plain Right (no Alt modifier): next tab -> pi, its last page (2/2).
+    // Plain Right (no Alt modifier): next tab -> pi, its newest full page (1/2).
     sess.write(b"\x1b[C");
     let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 2/2"),
-        "expected pi tab page 2/2: {pi_tab:?}"
+        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 1/2"),
+        "expected pi tab newest page: {pi_tab:?}"
     );
 
     // Tab: next tab -> claude, its only page (1/1).
@@ -436,20 +438,20 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
         "expected claude tab page 1/1: {claude_tab:?}"
     );
 
-    // Plain Left (no Alt modifier): previous tab -> back to pi, last page.
+    // Plain Left (no Alt modifier): previous tab -> back to pi, newest page.
     sess.write(b"\x1b[D");
     let pi_tab_again = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab_again.contains("[pi]") && pi_tab_again.contains("PAGE 2/2"),
-        "expected pi tab page 2/2 again: {pi_tab_again:?}"
+        pi_tab_again.contains("[pi]") && pi_tab_again.contains("PAGE 1/2"),
+        "expected pi tab newest page again: {pi_tab_again:?}"
     );
 
-    // Shift-Tab (CSI Z, standard backtab): previous tab -> back to All, last page.
+    // Shift-Tab (CSI Z, standard backtab): previous tab -> back to All, newest page.
     sess.write(b"\x1b[Z");
     let all_again = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_again.contains("[All]") && all_again.contains("PAGE 2/2"),
-        "expected All tab page 2/2 again: {all_again:?}"
+        all_again.contains("[All]") && all_again.contains("PAGE 1/2"),
+        "expected All tab newest page again: {all_again:?}"
     );
 
     // Enter selects the highlighted candidate from the current view.

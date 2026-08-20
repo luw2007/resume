@@ -403,12 +403,11 @@ pub struct BackgroundAgent {
 
 /// Run the full production picker: an "All" tab plus one tab per distinct
 /// agent present in `candidates`, each sorted ascending by `rank` and
-/// paginated at [`PAGE_SIZE`]. Starts on the "All" tab's last (newest) page.
-/// `Alt+P`/`Alt+N` move between pages of the current tab; `Alt+Left`/
+/// paginated at [`PAGE_SIZE`]. Starts on the newest page of the "All" tab,
+/// which is always filled before an older remainder page. `Alt+P`/`Alt+N`
+/// move between older and newer pages of the current tab; `Alt+Left`/
 /// `Alt+Right`, `Left`/`Right`, and `Tab`/`Shift+Tab` all switch tabs
-/// (wrapping), resetting to that tab's last page.
-/// Every page turn or tab switch relaunches a fresh, small Skim instance,
-/// since Skim has no API to reorder or replace an already-open list.
+/// (wrapping), resetting to that tab's newest page.
 ///
 /// `candidates` is shared and may keep growing after this call starts: a
 /// `background` agent (see [`BackgroundAgent`]) can still be discovering
@@ -456,8 +455,7 @@ pub fn run_tabbed_picker(
     // by name (not index) so tab-list growth between renders never
     // retargets the user at the wrong position.
     let mut current_tab: Option<String> = None;
-    let mut page_index = 0usize;
-    let mut page_initialized = false;
+    let mut page_index = 0usize; // zero is the newest page
     loop {
         let mut snapshot = candidates.lock().unwrap().clone();
         snapshot.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
@@ -487,14 +485,8 @@ pub fn run_tabbed_picker(
                 .collect()
         };
         let total_pages = tab_candidates.len().div_ceil(PAGE_SIZE).max(1);
-        page_index = if page_initialized {
-            page_index.min(total_pages - 1)
-        } else {
-            page_initialized = true;
-            total_pages - 1 // newest page of this tab
-        };
-        let start = page_index * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(tab_candidates.len());
+        page_index = page_index.min(total_pages - 1);
+        let page = page_bounds(tab_candidates.len(), page_index);
         let pending_label = background
             .as_ref()
             .filter(|bg| bg.pending.load(Ordering::Relaxed))
@@ -502,31 +494,40 @@ pub fn run_tabbed_picker(
 
         match run_single_view(SingleView {
             store: &store,
-            page: &tab_candidates[start..end],
+            candidates: &tab_candidates[page],
             tab_index,
             agent_tabs: &agent_tabs,
-            page_index,
-            total_pages,
+            page: PageInfo {
+                index: page_index,
+                total: total_pages,
+                candidates: tab_candidates.len(),
+            },
             preview_mode,
             preview_position,
             pending_label,
         }) {
-            NavExit::OlderPage if page_index > 0 => page_index -= 1,
-            NavExit::NewerPage if page_index + 1 < total_pages => page_index += 1,
+            NavExit::OlderPage if page_index + 1 < total_pages => page_index += 1,
+            NavExit::NewerPage if page_index > 0 => page_index -= 1,
             NavExit::OlderPage | NavExit::NewerPage => {}
             NavExit::PrevTab => {
                 let new_index = (tab_index + total_tabs - 1) % total_tabs;
                 current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
-                page_initialized = false;
+                page_index = 0;
             }
             NavExit::NextTab => {
                 let new_index = (tab_index + 1) % total_tabs;
                 current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
-                page_initialized = false;
+                page_index = 0;
             }
             NavExit::Terminal(outcome) => return outcome,
         }
     }
+}
+
+fn page_bounds(total_candidates: usize, page_index: usize) -> std::ops::Range<usize> {
+    let end = total_candidates - page_index * PAGE_SIZE;
+    let start = end.saturating_sub(PAGE_SIZE);
+    start..end
 }
 
 fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str, &'static str) {
@@ -549,21 +550,26 @@ fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str
     (position, visibility)
 }
 
+struct PageInfo {
+    index: usize,
+    total: usize,
+    candidates: usize,
+}
+
 struct SingleView<'a> {
     store: &'a Arc<PreviewStore>,
-    page: &'a [&'a PickerCandidate],
+    candidates: &'a [&'a PickerCandidate],
     tab_index: usize,
     agent_tabs: &'a [&'a str],
-    page_index: usize,
-    total_pages: usize,
+    page: PageInfo,
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
     pending_label: Option<&'a str>,
 }
 
 fn run_single_view(view: SingleView<'_>) -> NavExit {
-    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(view.page.len().max(1));
-    for candidate in view.page {
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(view.candidates.len().max(1));
+    for candidate in view.candidates {
         let item = Arc::new(SpikeItem {
             key: candidate.key.clone(),
             display: candidate.display.clone(),
@@ -576,8 +582,7 @@ fn run_single_view(view: SingleView<'_>) -> NavExit {
     let options = build_tabbed_options(
         view.tab_index,
         view.agent_tabs,
-        view.page_index,
-        view.total_pages,
+        view.page,
         view.preview_mode,
         view.preview_position,
         view.pending_label,
@@ -588,8 +593,7 @@ fn run_single_view(view: SingleView<'_>) -> NavExit {
 fn build_tabbed_options(
     tab_index: usize,
     agent_tabs: &[&str],
-    page_index: usize,
-    total_pages: usize,
+    page: PageInfo,
     mode: PreviewMode,
     position: PreviewPosition,
     pending_label: Option<&str>,
@@ -601,10 +605,10 @@ fn build_tabbed_options(
         String::from("enter:accept"),
         String::from("esc:abort"),
     ];
-    if page_index > 0 {
+    if page.index + 1 < page.total {
         binds.push(String::from("alt-p:accept")); // older page
     }
-    if page_index + 1 < total_pages {
+    if page.index > 0 {
         binds.push(String::from("alt-n:accept")); // newer page
     }
     // "All" plus one tab per agent is always >= 2 tabs whenever there is any
@@ -634,15 +638,24 @@ fn build_tabbed_options(
         .map(|label| format!("  ({label} still scanning)"))
         .unwrap_or_default();
 
+    let older_count = page_bounds(page.candidates, page.index).start;
+    let older_note = (older_count > 0).then(|| {
+        format!(
+            "  {older_count} older session{}: Alt-P",
+            if older_count == 1 { "" } else { "s" }
+        )
+    });
+
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .no_sort(true)
         .tac(true)
         .multi(false)
         .header(Some(format!(
-            "{tabs}{pending_note}  PAGE {}/{}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
-            page_index + 1,
-            total_pages
+            "{tabs}{pending_note}  PAGE {}/{}{older_note}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            page.index + 1,
+            page.total,
+            older_note = older_note.unwrap_or_default(),
         )))
         .preview(Some(String::new()))
         .preview_window(format!("{position}:60%{visibility}"))
@@ -1014,12 +1027,21 @@ mod tests {
     }
 
     #[test]
+    fn newest_page_is_full_before_older_remainder() {
+        assert_eq!(page_bounds(PAGE_SIZE + 3, 0), 3..PAGE_SIZE + 3);
+        assert_eq!(page_bounds(PAGE_SIZE + 3, 1), 0..3);
+    }
+
+    #[test]
     fn tabbed_picker_preserves_chronological_row_order() {
         let options = build_tabbed_options(
             0,
             &["omp"],
-            0,
-            1,
+            PageInfo {
+                index: 0,
+                total: 1,
+                candidates: 1,
+            },
             PreviewMode::Hidden,
             PreviewPosition::Auto,
             None,
@@ -1029,12 +1051,38 @@ mod tests {
     }
 
     #[test]
+    fn tabbed_picker_header_advertises_older_remainder() {
+        let options = build_tabbed_options(
+            0,
+            &["pi"],
+            PageInfo {
+                index: 0,
+                total: 2,
+                candidates: PAGE_SIZE + 3,
+            },
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            None,
+        );
+        assert!(
+            options
+                .header
+                .as_deref()
+                .is_some_and(|h| h.contains("PAGE 1/2  3 older sessions: Alt-P")),
+            "header={:?}",
+            options.header
+        );
+    }
+    #[test]
     fn tabbed_picker_header_includes_session_columns() {
         let options = build_tabbed_options(
             0,
             &["pi"],
-            0,
-            1,
+            PageInfo {
+                index: 0,
+                total: 1,
+                candidates: 1,
+            },
             PreviewMode::Hidden,
             PreviewPosition::Auto,
             None,
@@ -1054,8 +1102,11 @@ mod tests {
         let without = build_tabbed_options(
             0,
             &["pi"],
-            0,
-            1,
+            PageInfo {
+                index: 0,
+                total: 1,
+                candidates: 1,
+            },
             PreviewMode::Hidden,
             PreviewPosition::Auto,
             None,
@@ -1064,8 +1115,11 @@ mod tests {
         let with = build_tabbed_options(
             0,
             &["pi"],
-            0,
-            1,
+            PageInfo {
+                index: 0,
+                total: 1,
+                candidates: 1,
+            },
             PreviewMode::Hidden,
             PreviewPosition::Auto,
             Some("codex"),
