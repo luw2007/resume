@@ -369,7 +369,8 @@ Before handoff:
 3. Revalidate native Session identity, transcript/source existence, Workspace, agent executable, support status, and known risk evidence.
 4. Enter the recorded Workspace.
 5. Apply only integration-required environment overrides.
-6. Call Unix `exec` so the agent owns the terminal, signals, and eventual exit status.
+6. When both cmux caller IDs are present, verify the caller workspace, synchronously report the selected Workspace directory to that exact workspace, and read it back before continuing. Incomplete or mismatched provenance, mutation failure, or read-back mismatch exits 1 before `exec`; no workspace, surface, pane, or tab is selected or focused. Ordinary non-cmux invocation is unchanged and does not require cmux.
+7. Call Unix `exec` so the agent owns the terminal, signals, and eventual exit status. If `exec` fails after a confirmed cmux update, the update is not rolled back; the error is surfaced and the next shell prompt naturally reports the shell's directory.
 
 If final revalidation fails, do not reopen the Picker or choose a replacement; print the exact reason and exit 1.
 

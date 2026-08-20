@@ -486,6 +486,11 @@ fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {
             }
         }
     }
+    #[cfg(unix)]
+    if let Err(error) = launch::handoff_cmux_workspace(spec) {
+        eprintln!("resume: cmux workspace handoff failed: {error}");
+        return EXIT_ERROR;
+    }
     let error = launch::exec(spec);
     eprintln!("resume: unable to launch {:?}: {error}", spec.program);
     EXIT_ERROR
