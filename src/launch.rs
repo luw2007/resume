@@ -445,13 +445,18 @@ fn one_workspace<'a>(value: &'a serde_json::Value, id: &str) -> Result<&'a str, 
 
 #[cfg(unix)]
 pub(crate) fn handoff_cmux_workspace(spec: &ResumeSpec) -> Result<(), CmuxHandoffError> {
-    let runner = ProcessCmuxRunner;
+    let workspace = std::env::var_os("CMUX_WORKSPACE_ID");
+    let surface = std::env::var_os("CMUX_SURFACE_ID");
+    if workspace.is_none() && surface.is_none() {
+        return Ok(());
+    }
     if !command_available(OsStr::new("cmux")) {
         return Err(CmuxHandoffError::CliUnavailable);
     }
+    let runner = ProcessCmuxRunner;
     handoff_with(
-        std::env::var_os("CMUX_WORKSPACE_ID").as_deref(),
-        std::env::var_os("CMUX_SURFACE_ID").as_deref(),
+        workspace.as_deref(),
+        surface.as_deref(),
         &std::env::current_dir().map_err(|e| CmuxHandoffError::OriginUnavailable(e.to_string()))?,
         &spec.cwd,
         &runner,
