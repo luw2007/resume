@@ -467,6 +467,25 @@ pub(crate) fn handoff_cmux_workspace(spec: &ResumeSpec) -> Result<(), CmuxHandof
 }
 
 #[cfg(unix)]
+fn handoff_then_run_with<F, G>(spec: &ResumeSpec, handoff: F, run: G) -> Result<(), io::Error>
+where
+    F: FnOnce(&ResumeSpec) -> Result<(), CmuxHandoffError>,
+    G: FnOnce(&ResumeSpec) -> Result<(), io::Error>,
+{
+    handoff(spec)
+        .map_err(|error| io::Error::other(format!("cmux workspace handoff failed: {error}")))?;
+    run(spec)
+}
+
+#[cfg(unix)]
+pub(crate) fn handoff_then_exec(spec: &ResumeSpec) -> io::Error {
+    match handoff_then_run_with(spec, handoff_cmux_workspace, |_| Err(exec(spec))) {
+        Ok(()) => io::Error::other("native exec unexpectedly returned"),
+        Err(error) => error,
+    }
+}
+
+#[cfg(unix)]
 pub fn exec(spec: &ResumeSpec) -> io::Error {
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(&spec.program);
@@ -541,6 +560,71 @@ mod tests {
             stderr: b"fixture failure".to_vec(),
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn production_entry_both_absent_is_noop() {
+        let old_w = std::env::var_os("CMUX_WORKSPACE_ID");
+        let old_s = std::env::var_os("CMUX_SURFACE_ID");
+        restore_env("CMUX_WORKSPACE_ID", None);
+        restore_env("CMUX_SURFACE_ID", None);
+        let spec = ResumeSpec {
+            program: OsString::from("missing-agent"),
+            argv: vec![],
+            cwd: PathBuf::from("/"),
+            env: vec![],
+        };
+        assert!(handoff_cmux_workspace(&spec).is_ok());
+        restore_env("CMUX_WORKSPACE_ID", old_w);
+        restore_env("CMUX_SURFACE_ID", old_s);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_then_exec_short_circuits_and_orders() {
+        let spec = ResumeSpec {
+            program: OsString::from("agent"),
+            argv: vec![],
+            cwd: PathBuf::from("/target"),
+            env: vec![],
+        };
+        let order = std::sync::Mutex::new(Vec::new());
+        let error = handoff_then_run_with(
+            &spec,
+            |_spec| {
+                order.lock().unwrap().push("handoff");
+                Ok(())
+            },
+            |_spec| {
+                order.lock().unwrap().push("exec");
+                Err(io::Error::other("agent failed"))
+            },
+        );
+        assert_eq!(error.unwrap_err().to_string(), "agent failed");
+        assert_eq!(*order.lock().unwrap(), vec!["handoff", "exec"]);
+        let order = std::sync::Mutex::new(Vec::new());
+        let error = handoff_then_run_with(
+            &spec,
+            |_spec| {
+                order.lock().unwrap().push("handoff");
+                Err(CmuxHandoffError::ReportStatus {
+                    status: "1".into(),
+                    stderr: "failed".into(),
+                })
+            },
+            |_spec| {
+                order.lock().unwrap().push("exec");
+                Err(io::Error::other("must not run"))
+            },
+        );
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .contains("cmux workspace handoff failed")
+        );
+        assert_eq!(*order.lock().unwrap(), vec!["handoff"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn no_cmux_env_is_noop() {
@@ -826,24 +910,30 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
         p.set_mode(0o755);
         std::fs::set_permissions(&agent, p).unwrap();
         let old_path = std::env::var_os("PATH");
+        let old_w = std::env::var_os("CMUX_WORKSPACE_ID");
+        let old_s = std::env::var_os("CMUX_SURFACE_ID");
+        let old_cwd = std::env::current_dir().unwrap();
         unsafe {
             std::env::set_var("PATH", root.path());
+            std::env::set_var("CMUX_WORKSPACE_ID", "W");
+            std::env::set_var("CMUX_SURFACE_ID", "S");
         }
-        let runner = ProcessCmuxRunner;
-        let first = handoff_with(
-            Some(OsStr::new("W")),
-            Some(OsStr::new("S")),
-            &origin,
-            &target,
-            &runner,
-        );
-        assert!(first.is_ok(), "first handoff failed: {first:?}");
-        assert!(
-            Command::new(&agent)
-                .current_dir(&target)
+        std::env::set_current_dir(&origin).unwrap();
+        let spec = ResumeSpec {
+            program: agent.clone().into_os_string(),
+            argv: vec![],
+            cwd: target.clone(),
+            env: vec![],
+        };
+        let success = handoff_then_run_with(&spec, handoff_cmux_workspace, |spec| {
+            Command::new(&spec.program)
+                .current_dir(&spec.cwd)
                 .status()
-                .unwrap()
-                .success()
+                .map(|_| ())
+        });
+        assert!(
+            success.is_ok(),
+            "production handoff/exec failed: {success:?}"
         );
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap().trim(),
@@ -858,43 +948,50 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
         unsafe {
             std::env::set_var("FAIL_REPORT", "1");
         }
-        assert!(matches!(
-            handoff_with(
-                Some(OsStr::new("W")),
-                Some(OsStr::new("S")),
-                &origin,
-                &target,
-                &runner
-            ),
-            Err(CmuxHandoffError::ReportStatus { .. })
-        ));
+        let failed_report = handoff_then_run_with(&spec, handoff_cmux_workspace, |spec| {
+            Command::new(&spec.program)
+                .current_dir(&spec.cwd)
+                .status()
+                .map(|_| ())
+        });
+        assert!(
+            failed_report
+                .unwrap_err()
+                .to_string()
+                .contains("cmux workspace handoff failed")
+        );
         assert!(!marker.exists());
         unsafe {
             std::env::remove_var("FAIL_REPORT");
         }
         std::fs::write(&state, origin.display().to_string()).unwrap();
-        assert!(
-            handoff_with(
-                Some(OsStr::new("W")),
-                Some(OsStr::new("S")),
-                &origin,
-                &target,
-                &runner
-            )
-            .is_ok()
-        );
+        let spec_bad = ResumeSpec {
+            program: root.path().join("missing-agent").into_os_string(),
+            argv: vec![],
+            cwd: target.clone(),
+            env: vec![],
+        };
         let before = std::fs::read_to_string(&log)
             .unwrap()
             .matches("rpc")
             .count();
-        assert!(
-            Command::new(root.path().join("missing-agent"))
-                .current_dir(&target)
+        let failed_exec = handoff_then_run_with(&spec_bad, handoff_cmux_workspace, |spec| {
+            Command::new(&spec.program)
+                .current_dir(&spec.cwd)
                 .status()
-                .is_err()
+                .map(|_| ())
+        });
+        assert!(
+            !failed_exec
+                .unwrap_err()
+                .to_string()
+                .contains("cmux workspace handoff failed")
         );
-        assert_eq!(before, count + 2);
+        assert_eq!(before, count + 1);
+        std::env::set_current_dir(old_cwd).unwrap();
         restore_env("PATH", old_path);
+        restore_env("CMUX_WORKSPACE_ID", old_w);
+        restore_env("CMUX_SURFACE_ID", old_s);
     }
 
     #[cfg(unix)]
