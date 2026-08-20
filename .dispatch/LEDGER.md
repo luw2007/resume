@@ -18,3 +18,5 @@ Plan only. The experiment is one metadata-only `workflow_run` notifier for faile
 | CmuxResumeHandoffReview | review / claude_sub2api/claude-sonnet-5 | `../resume` shared review tree | `cmux-handoff-review-a1` | `90E058ED-5CF0-4D4C-B15E-806A8E39C19E`, `λ ⠋ resume` | frozen task `.dispatch/CmuxResumeHandoffReview-TASK.md` | `.done/cmux-handoff-review-a1` |
 
 | CmuxResumeHandoffReviewFix | implementation / codex_gpt/gpt-5.6-luna:max | `../resume-cmux-handoff` worktree | `cmux-handoff-review-fix-a1` | `EC530FEF-F5D0-4CD7-878F-A20E538069C2`, `λ ⠹ resume` | Accepted corrections: environment-mutating tests isolated in child processes; full suite 515 passed | `.done/cmux-handoff-review-fix-a1` observed |
+
+| CmuxResumeHandoffE2E | implementation / codex_gpt/gpt-5.6-luna:max | `../resume-cmux-handoff` worktree | `cmux-handoff-e2e-a1` | pending | frozen task `.dispatch/CmuxResumeHandoffE2E-TASK.md`; full picker-to-native-agent regression | `.done/cmux-handoff-e2e-a1` |
