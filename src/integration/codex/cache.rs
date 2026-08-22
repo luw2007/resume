@@ -192,7 +192,13 @@ impl DiscoveryCache {
     /// Records this run's parse outcome for `rollout_path` (from a full,
     /// ungated parse -- see the module doc). `size`/`mtime` are read once
     /// by the caller alongside the parse itself, avoiding a second stat.
-    pub fn record(&self, rollout_path: &Path, size: u64, mtime: SystemTime, parsed: Option<&ParsedSession>) {
+    pub fn record(
+        &self,
+        rollout_path: &Path,
+        size: u64,
+        mtime: SystemTime,
+        parsed: Option<&ParsedSession>,
+    ) {
         let Some(mtime_unix_nanos) = duration_nanos(mtime) else {
             return;
         };
@@ -301,7 +307,11 @@ fn from_cached(rollout_path: PathBuf, cached: CachedParsedSession) -> ParsedSess
         model_provider: cached.model_provider,
         // Also always overwritten by the caller from the scan root's kind.
         archived: false,
-        user_messages: cached.user_messages.into_iter().map(from_cached_message).collect(),
+        user_messages: cached
+            .user_messages
+            .into_iter()
+            .map(from_cached_message)
+            .collect(),
         outcome: from_cached_file_outcome(cached.file_outcome),
         malformed_middle: cached.malformed_middle,
         import: cached.import.map(|import| ImportMeta {
@@ -325,7 +335,11 @@ fn cache_message(message: &UserMessage) -> CachedUserMessage {
 fn from_cached_message(cached: CachedUserMessage) -> UserMessage {
     UserMessage {
         text: cached.text,
-        attachments: cached.attachments.into_iter().map(from_cached_attachment).collect(),
+        attachments: cached
+            .attachments
+            .into_iter()
+            .map(from_cached_attachment)
+            .collect(),
     }
 }
 
@@ -473,7 +487,12 @@ mod tests {
         let metadata = fs::metadata(&rollout).unwrap();
         let mtime = metadata.modified().unwrap();
         let cache = DiscoveryCache::load(None);
-        cache.record(&rollout, metadata.len(), mtime, Some(&sample_parsed(rollout.clone())));
+        cache.record(
+            &rollout,
+            metadata.len(),
+            mtime,
+            Some(&sample_parsed(rollout.clone())),
+        );
         assert!(cache.lookup(&rollout).is_some());
 
         // Simulate a still-growing active session: content and mtime change.
@@ -510,7 +529,10 @@ mod tests {
         cache.save(root, &seen);
 
         let cache2 = DiscoveryCache::load(Some(path.clone()));
-        assert!(cache2.lookup(&rollout_a).is_some(), "a must survive a reload");
+        assert!(
+            cache2.lookup(&rollout_a).is_some(),
+            "a must survive a reload"
+        );
         assert!(
             matches!(cache2.lookup(&rollout_b), Some(None)),
             "b must survive a reload"

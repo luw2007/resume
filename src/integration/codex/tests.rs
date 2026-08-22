@@ -1609,12 +1609,19 @@ fn cached_and_uncached_discovery_produce_identical_sessions() {
 
     let cold_cache = cache::DiscoveryCache::load(Some(cache_path.clone()));
     let cold = discover_all(&cold_cache);
-    assert_eq!(cold.len(), 2, "exactly the two real sessions, not the empty rollout");
+    assert_eq!(
+        cold.len(),
+        2,
+        "exactly the two real sessions, not the empty rollout"
+    );
 
     // A second, independently loaded cache over the same now-populated
     // file: every rollout must be an all-hits cache lookup, never a re-read.
     let warm_cache = cache::DiscoveryCache::load(Some(cache_path));
     let warm = discover_all(&warm_cache);
 
-    assert_eq!(cold, warm, "cached discovery must be byte-identical to uncached");
+    assert_eq!(
+        cold, warm,
+        "cached discovery must be byte-identical to uncached"
+    );
 }
