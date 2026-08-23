@@ -17,6 +17,8 @@ Usage:
 Without --write it reports only. With --write it records status and
 error_notes back into the inventory.
 """
+import contextlib
+import csv
 import fcntl
 import json
 import os
@@ -329,10 +331,20 @@ class Pty:
         return os.waitpid(self.pid, os.WNOHANG) == (0, 0)
 
     def close(self):
+        """Kill the child and reap it, draining the master meanwhile.
+
+        A process blocked writing into a full pty buffer stays unreapable
+        until someone reads that buffer, so a plain `waitpid` here can wait
+        forever on a picker that painted more than we bothered to read.
+        """
         if self.status is None:
             try:
                 os.kill(self.pid, signal.SIGKILL)
-                os.waitpid(self.pid, 0)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if os.waitpid(self.pid, os.WNOHANG) != (0, 0):
+                        break
+                    self._drain(0.1)
             except OSError:
                 pass
         os.close(self.fd)
@@ -3389,6 +3401,69 @@ def _(fx, ctx):
     )
 
 
+PREVIEW_MARKER = "# normalized (terminal-safe)"
+
+
+def _preview_column(fx, cols=120, settle=4.0):
+    """Where the preview section begins, or None when no pane is showing.
+
+    A right-hand pane starts beside the rows; a bottom pane starts at column
+    0. That offset is the only way to read the layout back off the screen.
+    A visible pane squeezes the header, so `PAGE n/m` can be off the right
+    edge and cannot be the readiness signal here.
+    """
+    pty = Pty(fx, cols=cols)
+    try:
+        pty.expect(r"UPDATED\s+AGENT")
+        deadline, line = time.monotonic() + settle, None
+        while time.monotonic() < deadline:
+            pty._drain(0.3)
+            line = next((l for l in pty.lines if PREVIEW_MARKER in l), None)
+            if line is not None:
+                pty._drain(1.0)   # let the pane finish painting before measuring
+                line = next((l for l in pty.lines if PREVIEW_MARKER in l), line)
+                break
+        return None if line is None else line.index("#")
+    finally:
+        pty.close()
+
+
+@check("config-preview-field")
+def _(fx, ctx):
+    """`preview = "visible"` opens the pane with the picker; with no setting
+    the pane stays hidden until Ctrl+O asks for it."""
+    config = fx.home / "xdg/config/resume/config.toml"
+    default = _preview_column(fx)
+    _write_config(config, 'preview = "visible"\n')
+    configured = _preview_column(fx)
+    _write_config(config, 'preview = "hidden"\n')
+    explicit_hidden = _preview_column(fx)
+    return expect(
+        default is None and explicit_hidden is None and configured is not None,
+        f"preview section column with no setting {default}, with "
+        f'preview = "visible" {configured}, with preview = "hidden" '
+        f"{explicit_hidden} (None means no pane on screen)",
+    )
+
+
+@check("config-preview-position-field")
+def _(fx, ctx):
+    """The position setting overrides the width heuristic in both
+    directions: bottom stays bottom on a wide terminal, right stays right on
+    a narrow one."""
+    config = fx.home / "xdg/config/resume/config.toml"
+    _write_config(config, 'preview = "visible"\npreview_position = "bottom"\n')
+    wide_bottom = _preview_column(fx, cols=120)
+    _write_config(config, 'preview = "visible"\npreview_position = "right"\n')
+    narrow_right = _preview_column(fx, cols=80)
+    return expect(
+        wide_bottom == 0 and narrow_right is not None and narrow_right > 0,
+        f'preview_position = "bottom" on 120 columns began at {wide_bottom} '
+        f'(want 0); preview_position = "right" on 80 columns began at '
+        f"{narrow_right} (want a column beside the rows)",
+    )
+
+
 @check("picker-ctrl-r-noop", "picker-ctrl-r-ignored")
 def _(fx, ctx):
     """Ctrl+R is bound to `ignore`, so it must not reload, exit, or disturb
@@ -3724,6 +3799,863 @@ def _(fx, ctx):
         len(rows) == 1 and "title 003" in rows[0]
         and any("bulk003/bulk003.jsonl" in line for line in launched),
         f"filtered rows {rows}; the fake agent was invoked as {launched}",
+    )
+
+
+# ------------------------------------------------------------------- launch
+CONFIRM = r"Continue\? \[y/N\]"
+
+
+def _resume(fx, query=None, *args, answer=None, before_enter=None, env=None,
+            timeout=25, wait=20):
+    """Drive one resume through the picker and return (exit code, screen).
+
+    There is no non-interactive resume path, so every launch row goes this
+    way: filter to a single row, press Enter, and answer the confirmation
+    prompt if one is printed. `before_enter` runs with the row already on
+    screen, which is where a revalidation race has to be staged.
+    """
+    with _picker(fx, *args, env=env, timeout=timeout) as pty:
+        if query:
+            pty.send(query, settle=1.0)
+        _settled(pty, lambda: _rows(pty))
+        if before_enter is not None:
+            before_enter(pty)
+        _key(pty, "enter", settle=1.0)
+        if answer is not None:
+            pty.expect(CONFIRM, timeout=15)
+            pty.send(answer + "\r", settle=0.5)
+        code = pty.wait(timeout=wait)
+    return code, pty.screen
+
+
+def _launched(fx):
+    """(argv, cwd) for every fake agent the fixture executed, in order."""
+    calls = []
+    for line in fx.cmux_log():
+        if line.startswith("agent "):
+            calls.append([line[len("agent "):].strip(), None])
+        elif line.startswith("pwd ") and calls:
+            calls[-1][1] = line[len("pwd "):].strip()
+    return [tuple(call) for call in calls]
+
+
+def _real(path):
+    """The path as the launched process reports it: `pwd` and cmux both
+    resolve symlinks, and a fixture HOME under /var is one on macOS."""
+    return str(pathlib.Path(path).resolve())
+
+
+def _dump_env(fx, agent):
+    """Reinstall a fake agent so it also writes its environment to a file.
+
+    The fixture PATH holds nothing but the fake agents, so `env` has to be
+    put there too -- reading the child's own environment is the only way to
+    see what `exec` actually applied.
+    """
+    shutil.copy(shutil.which("env") or "/usr/bin/env", fx.home / "bin/env")
+    path = fx.home / "bin" / agent
+    dump = fx.home / f"{agent}.env"
+    path.write_text(
+        "#!/bin/sh\n"
+        f'printf "agent {agent} %s\\n" "$*" >>"{fx.home}/cmux.log"\n'
+        f'printf "pwd %s\\n" "$(pwd)" >>"{fx.home}/cmux.log"\n'
+        f'env >"{dump}"\nexit 0\n'
+    )
+    path.chmod(0o755)
+    return dump
+
+
+def _read_env(dump):
+    if not dump.is_file():
+        return None
+    return dict(line.split("=", 1) for line in dump.read_text().splitlines()
+                if "=" in line)
+
+
+@check("pi-resume-spec-exact", "launch-exec-native-argv")
+def _(fx, ctx):
+    """Resume execs the agent with exactly the documented argv, in the
+    Session's recorded workspace -- and `exec` really does replace the
+    process image, so the agent inherits resume's own PID rather than
+    running as its child."""
+    pid_file = fx.home / "pi.pid"
+    agent = fx.home / "bin/pi"
+    agent.write_text(
+        "#!/bin/sh\n"
+        f'printf "agent pi %s\\n" "$*" >>"{fx.home}/cmux.log"\n'
+        f'printf "pwd %s\\n" "$(pwd)" >>"{fx.home}/cmux.log"\n'
+        f'printf "%s" "$$" >"{pid_file}"\nexit 0\n')
+    agent.chmod(0o755)
+    transcript = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    with _picker(fx, "--agent", "pi") as pty:
+        _settled(pty, lambda: _rows(pty))
+        _key(pty, "enter", settle=1.0)
+        code = pty.wait()
+        resume_pid = pty.pid
+    launched_pid = int(pid_file.read_text()) if pid_file.is_file() else None
+    return expect(
+        _launched(fx) == [(f"pi --session {transcript}", _real(fx.workspace))]
+        and launched_pid == resume_pid,
+        f"exit {code}; launched {_launched(fx)}; want "
+        f"pi --session {transcript} in {_real(fx.workspace)}; agent pid "
+        f"{launched_pid} vs resume pid {resume_pid}",
+    )
+
+
+@check("claude-resume-spec-exact", "claude-resume-env-preservation",
+       "launch-exec-env-preservation")
+def _(fx, ctx):
+    """Claude resumes by id and carries its nondefault root along: every
+    `spec.env` pair is applied to the process `exec` replaces."""
+    dump = _dump_env(fx, "claude")
+    uuid = "11111111-1111-1111-1111-111111111111"
+    code, screen = _resume(fx, None, "--agent", "claude")
+    child = _read_env(dump) or {}
+    return expect(
+        _launched(fx) == [(f"claude --resume {uuid}", _real(fx.workspace))]
+        and child.get("CLAUDE_CONFIG_DIR") == str(fx.home / ".claude"),
+        f"exit {code}; launched {_launched(fx)}; child CLAUDE_CONFIG_DIR "
+        f"{child.get('CLAUDE_CONFIG_DIR')!r}; tail {screen[-200:]!r}",
+    )
+
+
+@check("codex-resume-spec-exact")
+def _(fx, ctx):
+    """Codex resumes as `-C <workspace> resume <id>`."""
+    code, screen = _resume(fx, None, "--agent", "codex")
+    want = f"codex -C {_real(fx.workspace)} resume codex-id"
+    return expect(
+        _launched(fx) == [(want, _real(fx.workspace))],
+        f"exit {code}; launched {_launched(fx)}; want {want!r}; "
+        f"tail {screen[-200:]!r}",
+    )
+
+
+@check("codex-resume-env-preservation-provenance-based")
+def _(fx, ctx):
+    """The override is the root discovery actually walked, canonicalized when
+    it was walked -- not a re-read of CODEX_HOME. Reaching a root through a
+    symlink makes the two answers differ, which is the only way to tell them
+    apart from outside: the parent's variable says `custom-link`, and only a
+    provenance-derived override can name the directory behind it.
+
+    The row's own recipe -- change CODEX_HOME between selection and resume --
+    is not runnable end to end: discovery and resume are one process, and
+    nothing outside it can rewrite that process's environment.
+    """
+    dump = _dump_env(fx, "codex")
+    custom = fx.home / "custom-codex"
+    _rollout(fx, "custom-id", fx.workspace, root="custom-codex")
+    custom_link = fx.home / "custom-link"
+    custom_link.symlink_to(custom)
+    _resume(fx, None, "--agent", "codex", env=fx.env(CODEX_HOME=str(custom_link)))
+    nondefault = (_read_env(dump) or {}).get("CODEX_HOME")
+
+    # The same indirection onto the default root: recognised as default, so
+    # the child keeps the parent's string untouched rather than gaining one.
+    default_link = fx.home / "codex-link"
+    default_link.symlink_to(fx.home / ".codex")
+    _resume(fx, None, "--agent", "codex",
+            env=fx.env(CODEX_HOME=str(default_link)))
+    via_link = (_read_env(dump) or {}).get("CODEX_HOME")
+
+    _resume(fx, None, "--agent", "codex", env=fx.env(CODEX_HOME=None))
+    unset = (_read_env(dump) or {}).get("CODEX_HOME")
+    return expect(
+        nondefault == _real(custom) and via_link == str(default_link)
+        and unset is None,
+        f"nondefault root via {custom_link} gave child CODEX_HOME "
+        f"{nondefault!r} (want {_real(custom)}); default root via "
+        f"{default_link} gave {via_link!r} (want the parent's own string); "
+        f"unset gave {unset!r}",
+    )
+
+
+def _row(ctx, feature_id):
+    with open(ctx["root"] / "docs/qa/feature-inventory.csv", newline="") as f:
+        for row in csv.DictReader(f):
+            if row["feature_id"] == feature_id:
+                return row
+    return {}
+
+
+@check("doccheck-omp-vs-claude-codex-env-propagation-asymmetry")
+def _(fx, ctx):
+    """The asymmetry this row was opened for is closed: all three
+    integrations propagate their root variable only for a nondefault root,
+    so an unset variable must reach the child unset in every case."""
+    dumps = {a: _dump_env(fx, a) for a in ("claude", "codex", "omp")}
+    seen = {}
+    for agent, var in (("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME"),
+                       ("omp", "PI_CONFIG_DIR")):
+        _resume(fx, None, "--agent", agent, env=fx.env(**{var: None}))
+        seen[var] = (_read_env(dumps[agent]) or {}).get(var)
+    stale = "PI_CONFIG_DIR is present in its environment" in _row(
+        ctx, "doccheck-omp-vs-claude-codex-env-propagation-asymmetry")["how_to_test"]
+    return expect(
+        not any(seen.values()) and not stale,
+        f"child environments with the variable unset: {seen}"
+        + ("; this row's how_to_test still describes the pre-fix behaviour "
+           "(PI_CONFIG_DIR present for a never-set default root), which "
+           "contradicts its own expected_behaviour" if stale else ""),
+    )
+
+
+@check("omp-resume-spec-default-profile", "omp-resume-spec-named-profile",
+       "omp-resume-env-config-dir-propagated-only-when-overridden")
+def _(fx, ctx):
+    """OMP names its profile on the command line only when one is selected,
+    and carries PI_CONFIG_DIR only when that variable was set."""
+    dump = _dump_env(fx, "omp")
+    # Distinct, non-overlapping titles: Skim filters fuzzily, so two titles
+    # that share letters in order would both survive the query.
+    _pi_session(fx, "zebra", "zebra-id", fx.workspace, title="zebra")
+    _omp(fx, ".omp/profiles/work/agent", _omp_key(fx, fx.workspace), "work",
+         [_omp_header("wombat-id", fx.workspace, title="wombat")])
+    # The unprofiled root follows PI_CODING_AGENT_DIR when it is set, so the
+    # default-profile Sessions here are the pi fixture's -- see the caveat at
+    # the top of fixtures.sh.
+    code, screen = _resume(fx, "zebra", "--agent", "omp", "-U", "all")
+    default_calls = _launched(fx)
+    (fx.home / "cmux.log").unlink()
+    _resume(fx, "wombat", "--agent", "omp", "-U", "all")
+    named_calls = _launched(fx)
+    # No PI_CONFIG_DIR at all: the plain ~/.omp default was used, so nothing
+    # may be injected. With the variable set, injection and plain inheritance
+    # produce the same string, so only the unset direction is observable.
+    (fx.home / "cmux.log").unlink()
+    _resume(fx, "zebra", "--agent", "omp", "-U", "all",
+            env=fx.env(PI_CONFIG_DIR=None))
+    unset = _read_env(dump) or {}
+    failed = _cargo_tests(
+        ctx,
+        "integration::omp::tests::resume::resume_spec_omits_default_config_root_env",
+        "integration::omp::tests::resume::resume_spec_preserves_explicit_config_root_env",
+    )
+    return expect(
+        default_calls == [("omp --resume zebra-id", _real(fx.workspace))]
+        and named_calls == [("omp --profile work --resume wombat-id",
+                             _real(fx.workspace))]
+        and "PI_CONFIG_DIR" not in unset and failed is None,
+        f"exit {code}; default profile {default_calls}; named profile "
+        f"{named_calls}; PI_CONFIG_DIR with the variable unset="
+        f"{unset.get('PI_CONFIG_DIR')!r}; designated tests: {failed}; "
+        f"tail {screen[-200:]!r}",
+    )
+
+
+@check("opencode-resume-exact-session", "opencode-resume-cwd-is-workspace")
+def _(fx, ctx):
+    """OpenCode resumes by id, in the directory the database recorded --
+    which is not the directory the picker was started from."""
+    if not ctx["opencode_feature"]:
+        return "SKIPPED: this binary was built without the opencode feature"
+    elsewhere = fx.workspace / "elsewhere"
+    elsewhere.mkdir()
+    db = fx.home / "xdg/data/opencode/opencode.db"
+    subprocess.run(["sqlite3", str(db),
+                    "insert into session values "
+                    f"('other-id', '{elsewhere}', 'other title', 1600000000000);"],
+                   check=True, capture_output=True)
+    code, screen = _resume(fx, "other title", "--agent", "opencode", "-D", "all")
+    return expect(
+        _launched(fx) == [("opencode --session other-id", _real(elsewhere))],
+        f"exit {code}; launched {_launched(fx)}; want opencode --session "
+        f"other-id in {_real(elsewhere)}; tail {screen[-200:]!r}",
+    )
+
+
+@check("launch-confirm-prompt-format", "launch-confirm-refusal-exit0",
+       "cli-confirm-always-flag", "launch-confirm-always-forces-prompt")
+def _(fx, ctx):
+    """--confirm-always turns a no-risk Session into a prompted one; the
+    prompt refuses by default and only `y`/`yes` proceeds."""
+    code, screen = _resume(fx, None, "--agent", "pi", "--confirm-always",
+                           answer="")
+    refused = (code, _launched(fx))
+    lines = [l for l in screen.splitlines() if l.strip()][-3:]
+    (fx.home / "cmux.log").write_text("")
+    accepted_code, _ = _resume(fx, None, "--agent", "pi", "--confirm-always",
+                               answer="y")
+    return expect(
+        refused == (0, [])
+        and lines[0] == f'Resume "pi-id" in {fx.workspace}?'
+        and lines[1] == "Risk: confirmation requested"
+        and lines[2].startswith("Continue? [y/N]")
+        and accepted_code == 0 and len(_launched(fx)) == 1,
+        f"pressing Enter gave exit {refused[0]} and launched {refused[1]}; "
+        f"prompt {lines}; answering y gave exit {accepted_code} and launched "
+        f"{_launched(fx)}",
+    )
+
+
+@check("config-confirm-always-field")
+def _(fx, ctx):
+    """The same prompt is reachable from config.toml, with no flag."""
+    _write_config(fx.home / "xdg/config/resume/config.toml",
+                  "confirm_always = true\n")
+    code, screen = _resume(fx, None, "--agent", "pi", answer="y")
+    return expect(
+        "Risk: confirmation requested" in screen and code == 0
+        and len(_launched(fx)) == 1,
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-risk-broad-workspace", "cli-no-confirm-flag")
+def _(fx, ctx):
+    """A Session whose workspace is $HOME is risky, and risk confirmation is
+    mandatory: --no-confirm suppresses ordinary prompts, never a risk one."""
+    _pi_session(fx, "broad", "broad-id", fx.home, title="broad title")
+    code, screen = _resume(fx, "broad", "--agent", "pi", "--no-confirm",
+                           "-U", "all", answer="y")
+    prompted = "Risk: Workspace is broad" in screen
+    (fx.home / "cmux.log").write_text("")
+    quiet_code, quiet = _resume(fx, "pi title", "--agent", "pi", "--no-confirm",
+                                "-U", "all")
+    return expect(
+        prompted and code == 0 and len(_launched(fx)) == 1
+        and "Continue?" not in quiet and quiet_code == 0,
+        f"broad workspace: exit {code}, prompt seen {prompted}; normal-risk "
+        f"session under --no-confirm: exit {quiet_code}, prompted "
+        f"{'Continue?' in quiet}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-risk-workspace-changed", "launch-risk-conflicting-metadata")
+def _(fx, ctx):
+    """Two RiskStatus values exist and are rendered, but no discovery path
+    constructs either: they are reachable only from test code."""
+    sources = [p for p in (ctx["root"] / "src").rglob("*.rs")]
+    built = {"WorkspaceChanged": [], "ConflictingMetadata": []}
+    for path in sources:
+        text = path.read_text()
+        # Ignore the enum itself, the renderer, and every #[cfg(test)] block's
+        # file: what matters is a *discovery* path assigning the value.
+        if path.name in ("session.rs", "launch.rs") or "/tests/" in str(path):
+            continue
+        for name in built:
+            if f"RiskStatus::{name}" in text:
+                built[name].append(str(path.relative_to(ctx["root"])))
+    rendered = (ctx["root"] / "src/launch.rs").read_text()
+    return expect(
+        not built["WorkspaceChanged"] and not built["ConflictingMetadata"]
+        and '"Workspace changed"' in rendered and '"metadata conflicts"' in rendered,
+        f"discovery paths constructing these risks: {built}",
+    )
+
+
+@check("launch-revalidate-cli-unavailable", "launch-revalidate-before-confirm")
+def _(fx, ctx):
+    """Revalidation runs before the confirmation prompt, so a CLI that
+    disappears while the picker is open aborts without ever asking."""
+    def remove_cli(pty):
+        (fx.home / "bin/pi").unlink()
+
+    code, screen = _resume(fx, None, "--agent", "pi", "--confirm-always",
+                           before_enter=remove_cli)
+    return expect(
+        code == 1 and "agent CLI is no longer available" in screen
+        and "Continue?" not in screen and not _launched(fx),
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-revalidate-transcript-changed")
+def _(fx, ctx):
+    """The transcript's identity is captured at selection time and rechecked
+    before exec."""
+    transcript = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+
+    def rewrite(pty):
+        transcript.write_text(transcript.read_text() + json.dumps(
+            {"type": "message", "message": {"role": "user", "content": "more"}}) + "\n")
+
+    code, screen = _resume(fx, None, "--agent", "pi", before_enter=rewrite)
+    return expect(
+        code == 1 and "transcript identity changed after selection" in screen
+        and not _launched(fx),
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-revalidate-workspace-unavailable")
+def _(fx, ctx):
+    """A workspace that disappears between selection and exec aborts."""
+    workspace = fx.workspace / "doomed"
+    workspace.mkdir()
+    _pi_session(fx, "doomed", "doomed-id", workspace, title="doomed title")
+    code, screen = _resume(fx, "doomed", "--agent", "pi", "-D", "all",
+                           before_enter=lambda pty: workspace.rmdir())
+    return expect(
+        code == 1 and "Workspace is no longer available" in screen
+        and not _launched(fx),
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-revalidate-workspace-changed")
+def _(fx, ctx):
+    """Same path, new inode: the workspace was replaced, not kept."""
+    workspace = fx.workspace / "swapped"
+    workspace.mkdir()
+    _pi_session(fx, "swapped", "swapped-id", workspace, title="swapped title")
+
+    def replace(pty):
+        workspace.rmdir()
+        workspace.mkdir()
+
+    code, screen = _resume(fx, "swapped", "--agent", "pi", "-D", "all",
+                           before_enter=replace)
+    return expect(
+        code == 1 and "Workspace was replaced after selection" in screen
+        and not _launched(fx),
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("launch-revalidate-unsupported",
+       "errors-unified-catalog-e3003-unsupported-resume")
+def _(fx, ctx):
+    """A DiscoverOnly Session is selectable but not resumable: the E3003
+    block prints and exit is 2, without reaching exec."""
+    other = "22222222-2222-2222-2222-222222222222"
+    _claude(fx, "ws", f"{other}.jsonl", [{
+        "type": "user", "sessionId": "33333333-3333-3333-3333-333333333333",
+        "cwd": str(fx.workspace), "message": {"content": "disagreeing title"}}])
+    code, screen = _resume(fx, "disagreeing", "--agent", "claude")
+    return expect(
+        code == 2 and "ERROR [E3003]" in screen
+        and "selected Session is unavailable" in screen and not _launched(fx),
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-400:]!r}",
+    )
+
+
+@check("claude-missing-workspace-blocks-resume-spec")
+def _(fx, ctx):
+    """A Claude transcript with no cwd cannot produce a ResumeSpec. The
+    Session is still listed -- hiding it would be a silent loss -- but as
+    Unavailable with no workspace, and selecting it is refused."""
+    uuid = "44444444-4444-4444-4444-444444444444"
+    _claude(fx, "ws", f"{uuid}.jsonl",
+            [{"type": "user", "sessionId": uuid, "message": {"content": "no cwd"}}])
+    result = fx.run("--json", "--agent", "claude")
+    payload = json.loads(result.stdout)
+    found = next((s for s in payload["sessions"] if s["id"] == uuid), None)
+    listed = fx.run("--list", "--agent", "claude")
+    code, screen = _resume(fx, "no cwd", "--agent", "claude")
+    return expect(
+        found and found["workspace"] is None and found["support"] == "Unavailable"
+        and any(e["category"] == "claude_missing_workspace"
+                for e in payload["errors"])
+        and "claude_missing_workspace" in listed.stderr
+        and code == 2 and "ERROR [E3003]" in screen and not _launched(fx),
+        f"session {found}; errors {[e['category'] for e in payload['errors']]}; "
+        f"--list stderr {listed.stderr.strip()!r}; resume exit {code}; "
+        f"launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@contextlib.contextmanager
+def _live_codex(fx):
+    """Hold the fixture's rollout open from a process the probe will match,
+    and yield the environment that lets the probe run.
+
+    `lsof -c codex` matches the kernel's command name, which comes from the
+    executable file rather than argv, so the holder has to be a copy under a
+    codex* name; `tail -f` is the shortest thing that only holds a file open.
+    lsof itself is looked up on PATH, and the fixture's PATH holds only what
+    is put there.
+    """
+    shutil.copy(shutil.which("lsof"), fx.home / "bin/lsof")
+    holder = fx.home / "bin/codex-hold"
+    shutil.copy(shutil.which("tail") or "/usr/bin/tail", holder)
+    rollout = fx.home / ".codex/sessions/2026/01/01/rollout-test.jsonl"
+    live = subprocess.Popen([str(holder), "-f", str(rollout)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        yield fx.env(RESUME_DISABLE_PROC_PROBE=None)
+    finally:
+        live.kill()
+        live.wait()
+
+
+def _active_codex(fx, env):
+    """The held Session as --json describes it, or None if lsof saw nothing."""
+    payload = json.loads(fx.run_env("--json", "--agent", "codex", env=env).stdout)
+    found = next((s for s in payload["sessions"] if s["id"] == "codex-id"), None)
+    return found if found and str(found["activity"]).startswith("Active") else None
+
+
+@check("launch-risk-active", "codex-active-resume-risk")
+def _(fx, ctx):
+    """A Codex rollout held open by a live `codex*` process is Active, which
+    is a risk: the prompt fires even under --no-confirm."""
+    if shutil.which("lsof") is None:
+        return "SKIPPED: the activity probe needs lsof, which is not installed"
+    with _live_codex(fx) as env:
+        if _active_codex(fx, env) is None:
+            return ("SKIPPED: lsof did not report the held rollout; the probe "
+                    "cannot be exercised in this environment")
+        code, screen = _resume(fx, None, "--agent", "codex", "--no-confirm",
+                               env=env, answer="y")
+    return expect(
+        "Risk: Session is Active" in screen and code == 0
+        and len(_launched(fx)) == 1,
+        f"exit {code}; launched {_launched(fx)}; tail {screen[-300:]!r}",
+    )
+
+
+@check("session-status-supported-active")
+def _(fx, ctx):
+    """A Supported+Active Session carries no inline status text in --list;
+    --json is where the two fields are readable."""
+    if shutil.which("lsof") is None:
+        return "SKIPPED: the activity probe needs lsof, which is not installed"
+    with _live_codex(fx) as env:
+        found = _active_codex(fx, env)
+        if found is None:
+            return ("SKIPPED: lsof did not report the held rollout; the probe "
+                    "cannot be exercised in this environment")
+        listed = fx.run_env("--list", "--agent", "codex", env=env)
+    row = listed.stdout.strip()
+    return expect(
+        found["support"] == "Supported" and found["activity"] == "Active"
+        and "status_label" not in (ctx["root"] / "src/app.rs").read_text()
+        and row.endswith("no-branch") and "Active" not in row,
+        f"--json activity {found['activity']!r} (want the bare label "
+        f'"Active"); support {found["support"]!r}; --list row {row!r}',
+    )
+
+
+@check("exitcode-130-interrupt")
+def _(fx, ctx):
+    """130 is reserved for the interactive interrupt: Esc, a declined
+    confirmation and a usage error all use their own codes."""
+    with _picker(fx) as pty:
+        _key(pty, "ctrl-c")
+        interrupted = pty.wait()
+    with _picker(fx) as pty:
+        _key(pty, "esc")
+        cancelled = pty.wait()
+    declined, _ = _resume(fx, None, "--agent", "pi", "--confirm-always",
+                          answer="n")
+    usage = fx.run("--list", "--agent", "nope").returncode
+    return expect(
+        interrupted == 130 and cancelled != 130 and declined != 130
+        and usage != 130,
+        f"Ctrl+C {interrupted}, Esc {cancelled}, declined confirmation "
+        f"{declined}, usage error {usage}",
+    )
+
+
+@check("picker-no-controlling-terminal")
+def _(fx, ctx):
+    """Without a terminal the picker cannot run, so it must say so and point
+    at the two non-interactive modes."""
+    code, output = _detached(fx)
+    return expect(
+        code == 2 and "controlling terminal" in output
+        and "--list" in output and "--json" in output,
+        f"exit {code}; output {output.strip()[:300]!r}",
+    )
+
+
+@check("m2-fix-non-verbose-list-prints-diagnostics")
+def _(fx, ctx):
+    """Diagnostics are not a --verbose feature: the count line prints on a
+    plain --list too."""
+    _rollout(fx, "corrupt", fx.workspace, name="rollout-corrupt.jsonl")
+    (fx.home / ".codex/sessions/2026/01/01/rollout-corrupt.jsonl").write_text(
+        "{not json\n")
+    result = fx.run("--list", "--agent", "codex")
+    return expect(
+        re.search(r"codex_invalid_session: \d+", result.stderr),
+        f"--list stderr {result.stderr.strip()!r}",
+    )
+
+
+@check("m5-fix-json-errors-aggregated")
+def _(fx, ctx):
+    """One diagnostic entry per category, carrying the count -- and the same
+    count stderr reports for that run."""
+    for i in range(3):
+        path = _rollout(fx, f"bad-{i}", fx.workspace, name=f"rollout-bad-{i}.jsonl")
+        path.write_text("{not json\n")
+    result = fx.run("--json", "--agent", "codex")
+    payload = json.loads(result.stdout)
+    entries = [e for e in payload["errors"] if e["category"] == "codex_invalid_session"]
+    stderr_count = re.search(r"codex_invalid_session: (\d+)", result.stderr)
+    return expect(
+        len(entries) == 1 and entries[0]["count"] == 3
+        and stderr_count and int(stderr_count.group(1)) == 3,
+        f"json errors {payload['errors']}; stderr {result.stderr.strip()!r}",
+    )
+
+
+# --------------------------------------------------------------------- cmux
+CMUX_W, CMUX_S = "11111111-2222-3333-4444-555555555555", "aaaa-bbbb-cccc"
+
+
+@contextlib.contextmanager
+def _cmux_fixture(ctx):
+    """A fixture with a scripted `cmux` on PATH and a Session whose workspace
+    is a subdirectory, so origin and handoff target genuinely differ."""
+    fx = Fixture(ctx["root"], ctx["binary"], QA_FAKE_CMUX=True)
+    try:
+        fx.target = fx.workspace / "target"
+        fx.target.mkdir()
+        _pi_session(fx, "handoff", "handoff-id", fx.target, title="handoff title")
+        yield fx
+    finally:
+        shutil.rmtree(fx.home, ignore_errors=True)
+
+
+def _cmux_reply(fx, name, body, status=None):
+    path = fx.home / "cmux-replies" / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(body)
+    if status is not None:
+        (path.parent / f"{name}.status").write_text(str(status))
+
+
+def _cmux_list(directory, workspace=CMUX_W):
+    return json.dumps({"workspaces": [
+        {"id": workspace, "current_directory": _real(directory)}]})
+
+
+def _cmux_ready(fx, **overrides):
+    """Wire the scripted cmux for a handoff that should succeed, and return
+    the environment that makes resume attempt one."""
+    _cmux_reply(fx, "identify", json.dumps({
+        "caller": {"workspace_id": CMUX_W, "surface_id": CMUX_S},
+        "app_cli_path": str(fx.home / "bin/cmux")}))
+    _cmux_reply(fx, "workspace.1", _cmux_list(fx.workspace))   # pre-state
+    _cmux_reply(fx, "workspace.2", _cmux_list(fx.target))      # read-back
+    ids = {"CMUX_WORKSPACE_ID": CMUX_W, "CMUX_SURFACE_ID": CMUX_S}
+    return fx.env(**{**ids, **overrides})
+
+
+def _cmux_resume(fx, env):
+    code, screen = _resume(fx, "handoff", "--agent", "pi", "-D", "all", env=env)
+    return code, screen, fx.cmux_log()
+
+
+@check("cmux-noop-without-env")
+def _(fx, ctx):
+    """No cmux identifiers means no handoff at all -- not even a PATH probe."""
+    with _cmux_fixture(ctx) as cfx:
+        _cmux_ready(cfx)
+        code, screen, log = _cmux_resume(cfx, cfx.env())
+    return expect(
+        code == 0 and not any(l.startswith("cmux ") for l in log)
+        and len(_launched_lines(log)) == 1,
+        f"exit {code}; cmux log {log}; tail {screen[-200:]!r}",
+    )
+
+
+def _launched_lines(log):
+    return [l for l in log if l.startswith("agent ")]
+
+
+@check("cmux-handoff-precedes-exec")
+def _(fx, ctx):
+    """Every cmux call happens before the agent is executed -- exec replaces
+    the process, so anything after it could never run."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        code, screen, log = _cmux_resume(cfx, env)
+    verbs = [l for l in log if l.startswith("cmux ")]
+    agents = [i for i, l in enumerate(log) if l.startswith("agent ")]
+    return expect(
+        code == 0 and len(agents) == 1
+        and all(i < agents[0] for i, l in enumerate(log) if l.startswith("cmux "))
+        and len(verbs) == 4,
+        f"exit {code}; log {log}; tail {screen[-300:]!r}",
+    )
+
+
+@check("cmux-incomplete-env-fails-closed")
+def _(fx, ctx):
+    """One identifier without the other is never enough to infer provenance."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        env.pop("CMUX_SURFACE_ID")
+        code, screen, log = _cmux_resume(cfx, env)
+        empty = _cmux_ready(cfx, CMUX_SURFACE_ID="")
+        (cfx.home / "cmux.log").write_text("")
+        blank_code, blank_screen, blank_log = _cmux_resume(cfx, empty)
+    return expect(
+        code == 1 and "incomplete cmux provenance: missing ID" in screen
+        and not _launched_lines(log)
+        and blank_code == 1 and "incomplete cmux provenance: empty ID" in blank_screen
+        and not _launched_lines(blank_log),
+        f"missing: exit {code} tail {screen[-200:]!r}; empty: exit "
+        f"{blank_code} tail {blank_screen[-200:]!r}",
+    )
+
+
+@check("cmux-cli-unavailable-fails-closed")
+def _(fx, ctx):
+    """Identifiers present but no cmux binary: refuse, do not resume anyway."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        (cfx.home / "bin/cmux").unlink()
+        code, screen, log = _cmux_resume(cfx, env)
+    return expect(
+        code == 1 and "cmux CLI unavailable" in screen
+        and not _launched_lines(log),
+        f"exit {code}; log {log}; tail {screen[-300:]!r}",
+    )
+
+
+@check("cmux-caller-identity-checked")
+def _(fx, ctx):
+    """The identify step is not decoration: a caller that disagrees, a
+    non-zero status and unparseable output each abort with their own
+    message."""
+    cases = {}
+    for name, body, status in (
+        ("mismatch", json.dumps({
+            "caller": {"workspace_id": "someone-else", "surface_id": CMUX_S},
+            "app_cli_path": "/bin/sh"}), None),
+        ("status", "", 3),
+        ("json", "not json at all", None),
+        ("nopath", json.dumps({
+            "caller": {"workspace_id": CMUX_W, "surface_id": CMUX_S},
+            "app_cli_path": ""}), None),
+    ):
+        with _cmux_fixture(ctx) as cfx:
+            env = _cmux_ready(cfx)
+            _cmux_reply(cfx, "identify", body, status=status)
+            code, screen, log = _cmux_resume(cfx, env)
+            cases[name] = (code, screen[-300:], bool(_launched_lines(log)))
+    return expect(
+        cases["mismatch"][0] == 1 and "cmux caller mismatch" in cases["mismatch"][1]
+        and cases["status"][0] == 1 and "cmux identify failed" in cases["status"][1]
+        and cases["json"][0] == 1
+        and "invalid cmux identify response" in cases["json"][1]
+        and cases["nopath"][0] == 1
+        and "cmux CLI path unavailable" in cases["nopath"][1]
+        and not any(launched for _, _, launched in cases.values()),
+        f"{cases}",
+    )
+
+
+@check("cmux-workspace-must-be-unique")
+def _(fx, ctx):
+    """Zero or several matching workspaces is not a workspace to hand off."""
+    cases = {}
+    for name, body in (
+        ("none", json.dumps({"workspaces": []})),
+        ("two", json.dumps({"workspaces": [
+            {"id": CMUX_W, "current_directory": "/tmp"},
+            {"id": CMUX_W, "current_directory": "/var"}]})),
+        ("shape", json.dumps({"unexpected": []})),
+    ):
+        with _cmux_fixture(ctx) as cfx:
+            env = _cmux_ready(cfx)
+            _cmux_reply(cfx, "workspace.1", body)
+            code, screen, log = _cmux_resume(cfx, env)
+            cases[name] = (code, screen[-300:], bool(_launched_lines(log)))
+    return expect(
+        cases["none"][0] == 1
+        and "workspace is not unique (0 matches)" in cases["none"][1]
+        and cases["two"][0] == 1
+        and "workspace is not unique (2 matches)" in cases["two"][1]
+        and cases["shape"][0] == 1
+        and "invalid cmux workspace list response" in cases["shape"][1]
+        and not any(launched for _, _, launched in cases.values()),
+        f"{cases}",
+    )
+
+
+@check("cmux-pre-state-checked")
+def _(fx, ctx):
+    """If the workspace is not where resume was invoked, someone else moved
+    it: abort rather than clobber the newer state."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        _cmux_reply(cfx, "workspace.1", _cmux_list(cfx.home))
+        code, screen, log = _cmux_resume(cfx, env)
+    return expect(
+        code == 1 and "caller workspace directory mismatch" in screen
+        and not _launched_lines(log),
+        f"exit {code}; log {log}; tail {screen[-300:]!r}",
+    )
+
+
+@check("cmux-readback-verified")
+def _(fx, ctx):
+    """The report is verified, not assumed: a read-back that still shows the
+    old directory aborts, as does a report that failed outright."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        _cmux_reply(cfx, "workspace.2", _cmux_list(cfx.workspace))
+        stale_code, stale_screen, stale_log = _cmux_resume(cfx, env)
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        _cmux_reply(cfx, "rpc", "boom", status=4)
+        code, screen, log = _cmux_resume(cfx, env)
+    return expect(
+        stale_code == 1 and "read-back mismatch" in stale_screen
+        and not _launched_lines(stale_log)
+        and code == 1 and "cmux workspace report failed" in screen
+        and not _launched_lines(log),
+        f"stale read-back: exit {stale_code} tail {stale_screen[-250:]!r}; "
+        f"failed report: exit {code} tail {screen[-250:]!r}",
+    )
+
+
+@check("cmux-target-encoding-checked")
+def _(fx, ctx):
+    """A target that cannot be resolved aborts. The non-UTF-8 branch is not
+    reachable through discovery: every recorded workspace arrives as a JSON
+    string, so `spec.cwd` is always valid UTF-8."""
+    with _cmux_fixture(ctx) as cfx:
+        env = _cmux_ready(cfx)
+        # Revalidation has already run by the time the prompt appears, so
+        # removing the directory here reaches the handoff's canonicalize.
+        _write_config(cfx.home / "xdg/config/resume/config.toml",
+                      "confirm_always = true\n")
+        with _picker(cfx, "--agent", "pi", "-D", "all", env=env) as pty:
+            pty.send("handoff", settle=1.0)
+            _settled(pty, lambda: _rows(pty))
+            _key(pty, "enter", settle=1.0)
+            pty.expect(CONFIRM, timeout=15)
+            cfx.target.rmdir()
+            pty.send("y\r", settle=0.5)
+            code = pty.wait()
+        screen, log = pty.screen, cfx.cmux_log()
+    non_utf8 = [line for line in
+                (ctx["root"] / "src/launch.rs").read_text().splitlines()
+                if "NonUtf8Target" in line]
+    return expect(
+        code == 1 and "target Workspace unavailable" in screen
+        and not _launched_lines(log) and len(non_utf8) >= 3,
+        f"exit {code}; log {log}; tail {screen[-300:]!r}",
+    )
+
+
+@check("cmux-every-variant-fails-closed")
+def _(fx, ctx):
+    """`handoff_then_exec` reaches `exec` only on Ok(()), so no variant can
+    resume anyway. Confirmed structurally plus by the variants driven above."""
+    text = (ctx["root"] / "src/launch.rs").read_text()
+    variants = re.search(r"enum CmuxHandoffError \{(.*?)\n\}", text, re.S)
+    names = re.findall(r"^\s{4}(\w+)", variants.group(1), re.M)
+    ordering = re.search(
+        r"fn handoff_then_exec.*?\{(.*?)\n\}", text, re.S).group(1)
+    failed = _cargo_tests(
+        ctx, "launch::tests::handoff_then_exec_short_circuits_and_orders")
+    return expect(
+        len(names) == 18
+        and ordering.index("Err(error)") < ordering.index("Ok(()) =>")
+        and "HandoffThenExecError::Exec(exec(spec))" in ordering
+        and failed is None,
+        f"{len(names)} variants {names}; handoff_then_exec body "
+        f"{ordering.strip()!r}; ordering test: {failed}",
     )
 
 

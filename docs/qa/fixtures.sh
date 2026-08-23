@@ -64,10 +64,22 @@ done
 
 if [ "${QA_FAKE_CMUX:-0}" = 1 ]; then
   mkdir -p "$HOME_DIR/cmux-replies"
+  # The wrapper puts only this directory on PATH, so the reply reader below
+  # has to bring its own `cat` along.
+  cp "$(command -v cat)" "$HOME_DIR/bin/cat"
+  # Replies are keyed by verb ($1) and may be numbered -- workspace.1,
+  # workspace.2 -- so the two `workspace list` calls that bracket a handoff
+  # can answer differently, which is what a read-back check needs. An
+  # unnumbered file answers every call to that verb.
   cat >"$HOME_DIR/bin/cmux" <<EOF
 #!/bin/sh
 printf 'cmux %s\n' "\$*" >>"$HOME_DIR/cmux.log"
-reply="$HOME_DIR/cmux-replies/\${1:-none}"
+dir="$HOME_DIR/cmux-replies"
+verb="\${1:-none}"
+n=\$(( \$(cat "\$dir/\$verb.count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "\$n" >"\$dir/\$verb.count"
+reply="\$dir/\$verb.\$n"
+[ -f "\$reply" ] || reply="\$dir/\$verb"
 [ -f "\$reply" ] && cat "\$reply"
 [ -f "\$reply.status" ] && exit "\$(cat "\$reply.status")"
 exit 0
