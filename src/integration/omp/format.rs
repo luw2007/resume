@@ -33,8 +33,11 @@ impl ImportBadge {
     /// A safe, short display string for the badge. Never exposes the origin
     /// repository remote or an absolute import source path verbatim.
     pub fn to_display(&self) -> String {
-        let mut parts = vec![format!("imported from {}", self.source_kind)];
-        if let Some(id) = &self.origin_id {
+        let mut parts = vec![format!(
+            "imported from {}",
+            safe_badge_token(&self.source_kind).unwrap_or("unknown")
+        )];
+        if let Some(id) = self.origin_id.as_deref().and_then(safe_badge_token) {
             // Show only a short prefix of the origin ID to avoid impersonating
             // it as a resumable locator.
             let short: String = id.chars().take(8).collect();
@@ -42,6 +45,17 @@ impl ImportBadge {
         }
         parts.join(" ")
     }
+}
+
+/// Return a short terminal-safe import metadata token. Paths, remotes,
+/// controls, and arbitrary transcript text never qualify as display badges.
+fn safe_badge_token(value: &str) -> Option<&str> {
+    let value = value.trim();
+    ((1..=32).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(value)
 }
 
 /// A discovered OMP session with its parsed metadata, ready to become a
@@ -267,6 +281,7 @@ fn is_user_attributed(record: &Value, message_obj: &serde_json::Map<String, Valu
         message_obj.get("attribution").and_then(|v| v.get("source")),
         message_obj.get("source"),
         record.get("meta").and_then(|v| v.get("source")),
+        message_obj.get("meta").and_then(|v| v.get("source")),
     ];
     for source in sources.into_iter().flatten() {
         if let Some(s) = source.as_str() {
@@ -283,26 +298,28 @@ fn is_user_attributed(record: &Value, message_obj: &serde_json::Map<String, Valu
                 return false;
             }
         }
-        // A boolean "injected"/"automated" flag also excludes.
-        if source == true {
-            // Only treat bare `true` as exclusion if the key context implies it;
-            // to be safe we look at the containing object key.
-        }
     }
-    // Explicit injected/automated boolean flags.
+    // Explicit injected/automated boolean flags may accompany any common
+    // attribution or metadata envelope, not just the message record itself.
     let flags = [
         record.get("injected"),
         record.get("automated"),
         message_obj.get("injected"),
         message_obj.get("automated"),
+        record.get("attribution").and_then(|v| v.get("injected")),
+        record.get("attribution").and_then(|v| v.get("automated")),
+        message_obj
+            .get("attribution")
+            .and_then(|v| v.get("injected")),
+        message_obj
+            .get("attribution")
+            .and_then(|v| v.get("automated")),
         record.get("meta").and_then(|v| v.get("injected")),
+        record.get("meta").and_then(|v| v.get("automated")),
+        message_obj.get("meta").and_then(|v| v.get("injected")),
+        message_obj.get("meta").and_then(|v| v.get("automated")),
     ];
-    for flag in flags.into_iter().flatten() {
-        if flag == true {
-            return false;
-        }
-    }
-    true
+    !flags.into_iter().flatten().any(|flag| flag == true)
 }
 
 /// Extract a [`UserMessage`] from a `message` object with `role == "user"`.

@@ -268,6 +268,33 @@ fn excludes_injected_user_messages_by_attribution() {
 }
 
 #[test]
+fn excludes_nested_metadata_injected_user_messages() {
+    let fx = Fixture::new();
+    fx.write(
+        &fx.default_agent_root,
+        &fx.encoded_ws(),
+        "nested-inj.jsonl",
+        &[
+            header_v3("nested-inj", &fx.workspace, 1700000000),
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "meta": { "automated": true },
+                    "content": "automated user-role message",
+                },
+            }),
+            user_message_string("real user text", 1700000020),
+        ],
+    );
+
+    let outcome = fx.discover(fx.roots_default());
+    let messages = &outcome.parsed[0].messages;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "real user text");
+}
+
+#[test]
 fn injection_wrappers_collapsed_in_user_messages() {
     let fx = Fixture::new();
     fx.write(
@@ -495,6 +522,16 @@ fn import_badge_without_origin_id() {
     };
     let display = badge.to_display();
     assert_eq!(display, "imported from claude");
+}
+
+#[test]
+fn import_badge_rejects_untrusted_metadata() {
+    let badge = ImportBadge {
+        source_kind: "/private/source\nnot-a-kind".into(),
+        origin_id: Some("git@github.com:private/repo".into()),
+        origin_cwd: None,
+    };
+    assert_eq!(badge.to_display(), "imported from unknown");
 }
 
 #[test]

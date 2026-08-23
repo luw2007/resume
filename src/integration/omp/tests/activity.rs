@@ -164,6 +164,20 @@ fn breadcrumb_directory_uses_xdg_only_for_native_default_agent_roots() {
 }
 
 #[test]
+fn named_profile_uses_xdg_state_despite_default_agent_override() {
+    let fixture = Fixture::new();
+    let roots = fixture.roots_named("work");
+    let xdg = fixture.home().join("xdg-state");
+    let profile_state = xdg.join("omp/profiles/work");
+    std::fs::create_dir_all(&profile_state).unwrap();
+
+    assert_eq!(
+        omp::activity::breadcrumb_directory(&roots, true, Some(&xdg)),
+        profile_state.join("terminal-sessions"),
+    );
+}
+
+#[test]
 fn breadcrumb_directory_requires_exact_profile_xdg_path() {
     let fixture = Fixture::new();
     let roots = fixture.roots_named("work");

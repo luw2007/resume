@@ -1001,11 +1001,27 @@ fn extract_import(records: &[Value]) -> Option<ImportMeta> {
                 .get("source_kind")
                 .or_else(|| import.get("kind"))
                 .and_then(Value::as_str)
-                .map(str::to_owned);
+                .and_then(safe_badge_token);
             return Some(ImportMeta { source_kind });
         }
     }
     None
+}
+
+/// Return a short display-safe import metadata token. Import payloads are
+/// transcript data, not trusted UI input, so paths/remotes never qualify as a
+/// source kind or origin identifier badge.
+fn safe_badge_token(value: &str) -> Option<String> {
+    let value = value.trim();
+    (1..=32)
+        .contains(&value.len())
+        .then_some(value)
+        .filter(|value| {
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .map(str::to_owned)
 }
 
 /// Construct an [`IntegrationError::InvalidSession`] with a category and chain.

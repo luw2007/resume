@@ -1216,6 +1216,66 @@ fn imported_session_uses_new_rollout_id_for_resume() {
 }
 
 #[test]
+fn import_metadata_is_found_after_a_record_without_payload() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-import-after-title.jsonl",
+        &[
+            json!({ "type": "rollout_started" }),
+            session_meta(
+                "import-after-title-id",
+                workspace.canonicalize().unwrap().to_str().unwrap(),
+            ),
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "foreign_session_import": {
+                        "source_kind": "claude",
+                        "origin_path": "/private/source.jsonl"
+                    }
+                }
+            }),
+        ],
+    );
+
+    let session = discover_sessions(home.path()).pop().unwrap();
+    assert_eq!(session.title.as_deref(), Some("imported from claude"));
+}
+
+#[test]
+fn import_badge_rejects_untrusted_source_kind_text() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-unsafe-import.jsonl",
+        &[
+            session_meta(
+                "unsafe-import-id",
+                workspace.canonicalize().unwrap().to_str().unwrap(),
+            ),
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "foreign_session_import": {
+                        "source_kind": "/private/origin\nnot-a-badge"
+                    }
+                }
+            }),
+        ],
+    );
+
+    let session = discover_sessions(home.path()).pop().unwrap();
+    assert_eq!(session.title.as_deref(), Some("imported"));
+}
+
+#[test]
 fn thread_metadata_does_not_display_remote_or_path() {
     let home = codex_home();
     let workspace = home.path().join("ws");

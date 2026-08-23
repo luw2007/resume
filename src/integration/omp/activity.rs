@@ -86,7 +86,11 @@ pub(super) fn breadcrumb_directory(
     overridden: bool,
     xdg: Option<&Path>,
 ) -> PathBuf {
-    let profile = (!overridden)
+    // PI_CODING_AGENT_DIR overrides only the unprofiled agent root. A named
+    // profile remains native to its own config root and must still consult
+    // its profile-specific XDG state directory.
+    let native_root = !overridden || matches!(roots.profile, super::ProfileSelection::Named(_));
+    let profile = native_root
         .then_some(xdg)
         .flatten()
         .map(|home| home.join(AGENT))

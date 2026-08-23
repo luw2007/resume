@@ -503,6 +503,48 @@ fn new_schema_with_extra_columns_is_supported() {
 }
 
 #[test]
+fn unrelated_id_table_does_not_mask_later_session_table() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let id = next_id("schema-order");
+    let rollout_rel = format!("sessions/2026/08/07/rollout-{id}.jsonl");
+    let rollout_path = write_rollout_no_user_messages(
+        home.path(),
+        &rollout_rel,
+        &id,
+        &workspace.canonicalize().unwrap(),
+    );
+
+    create_state_db(home.path(), |conn| {
+        conn.execute_batch("CREATE TABLE unrelated (id TEXT);")
+            .unwrap();
+        schema_modern(conn);
+        insert_modern(
+            conn,
+            rollout_path.to_str().unwrap(),
+            &id,
+            workspace.canonicalize().unwrap().to_str().unwrap(),
+            "title from actual session table",
+            "2026-08-07T12:00:00.000Z",
+            false,
+        );
+    });
+
+    let (sessions, outcome) = discover_enriched(home.path());
+    assert!(
+        !outcome.is_degraded(),
+        "actual session table must be selected"
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].title.as_deref(),
+        Some("title from actual session table")
+    );
+}
+
+#[test]
 fn integer_updated_at_enriches_without_query_degradation() {
     let home = codex_home();
     let workspace = home.path().join("ws");

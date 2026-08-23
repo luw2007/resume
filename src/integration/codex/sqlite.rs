@@ -320,9 +320,9 @@ fn detect_schema(conn: &Connection) -> Result<Schema, DetectError> {
     let mut schema = Schema::default();
     for name in table_names {
         let columns = table_columns(conn, &name)?;
-        // Heuristic: pick the first candidate table that exposes a rollout
-        // path column or an id column together with at least one enrichment
-        // column. This keeps us schema-version-tolerant.
+        // A candidate table needs a reliable join key *and* an enrichment
+        // column. Otherwise an unrelated table with a generic `id` column
+        // could mask the actual session table that follows it.
         let rollout_path_col = first_match(
             &columns,
             &["rollout_path", "path", "file", "transcript_path"],
@@ -345,7 +345,12 @@ fn detect_schema(conn: &Connection) -> Result<Schema, DetectError> {
         );
         let archived_col = first_match(&columns, &["archived", "is_archived"]);
 
-        if rollout_path_col.is_some() || id_col.is_some() {
+        if (rollout_path_col.is_some() || id_col.is_some())
+            && (cwd_col.is_some()
+                || title_col.is_some()
+                || activity_time_col.is_some()
+                || archived_col.is_some())
+        {
             schema = Schema {
                 table: Some(name),
                 rollout_path_col,
