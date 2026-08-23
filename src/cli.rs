@@ -277,7 +277,6 @@ pub struct Cli {
         short = 'U',
         long,
         value_name = "N|all",
-        conflicts_with = "down",
         allow_hyphen_values = true,
         help = "Include ancestor directories up to N edges, or all"
     )]
@@ -287,7 +286,6 @@ pub struct Cli {
         short = 'D',
         long,
         value_name = "N|all",
-        conflicts_with = "up",
         allow_hyphen_values = true,
         help = "Include descendant directories down to N edges, or all"
     )]
@@ -362,6 +360,14 @@ impl Cli {
             || self.config.is_some()
             || self.confirm_always
             || self.no_confirm
+    }
+
+    /// Whether `-U/--up` and `-D/--down` were both supplied. Checked by the
+    /// caller (not by a declarative clap `conflicts_with`) so the E1002
+    /// four-line `Report` block documented in `--man` is the message the
+    /// user actually sees, rather than clap's own terse conflict text.
+    pub fn direction_conflict(&self) -> bool {
+        self.up.is_some() && self.down.is_some()
     }
 
     /// Reject argument combinations that are individually valid but
@@ -512,9 +518,13 @@ mod tests {
     }
 
     #[test]
-    fn direction_conflict_is_usage_error() {
-        let error = Cli::try_parse_from(["resume", "--up", "1", "--down", "2"]).unwrap_err();
-        assert_eq!(error.exit_code(), 2);
+    fn direction_conflict_is_no_longer_a_parse_error() {
+        // --up/--down conflict now surfaces as the E1002 four-line block
+        // (see `direction_conflict` and `main.rs`), not clap's own
+        // declarative `conflicts_with` parse failure. Parsing itself must
+        // succeed so `direction_conflict()` can observe both values.
+        let cli = Cli::try_parse_from(["resume", "--up", "1", "--down", "2"]).unwrap();
+        assert!(cli.direction_conflict());
     }
 
     #[test]

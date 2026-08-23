@@ -418,6 +418,32 @@ fn meaningless_option_combinations_are_usage_errors() {
 }
 
 #[test]
+fn direction_conflict_prints_the_e1002_four_line_block() {
+    // BUG FIX (docs/qa/feature-inventory.csv cli-error-catalog-mechanics):
+    // --man documented E1002 CONFLICTING_DIRECTION in the four-line
+    // `ERROR [CODE] SLUG: what` / Trigger / Fix / Example format, but
+    // --up/--down conflict was previously caught entirely inside clap's
+    // own parser (a declarative `conflicts_with`), which prints clap's
+    // own terse "cannot be used with" message instead and never reaches
+    // any of resume's own error-formatting code. Fixed by checking
+    // `Cli::direction_conflict()` explicitly in `main` and emitting the
+    // real E1002 report before clap-level validation ever runs.
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir(&ws).unwrap();
+    let output = run(tmp.path(), &ws, &["--up", "1", "--down", "2"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("ERROR [E1002] CONFLICTING_DIRECTION:"),
+        "stderr={stderr:?}"
+    );
+    assert!(stderr.contains("Trigger:"), "stderr={stderr:?}");
+    assert!(stderr.contains("Fix:"), "stderr={stderr:?}");
+    assert!(stderr.contains("Example:"), "stderr={stderr:?}");
+}
+
+#[test]
 fn codex_corrupt_rollout_is_diagnosed_while_valid_sibling_survives() {
     let (tmp, ws) = fixtures();
     let corrupt_dir = tmp.path().join(".codex/sessions/2026/01/01");

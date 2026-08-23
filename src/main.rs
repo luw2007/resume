@@ -6,6 +6,13 @@ use resume::cli::{Cli, Command, ConfigCommand, Shell};
 
 fn main() {
     let cli = Cli::parse();
+    if cli.direction_conflict() {
+        std::process::exit(
+            resume::errors::E1002
+                .report("both -U/--up and -D/--down were supplied")
+                .emit(),
+        );
+    }
     if let Err(error) = cli.validate() {
         error.exit();
     }
