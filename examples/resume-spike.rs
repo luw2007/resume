@@ -82,7 +82,10 @@ fn run_tabbed_demo() -> PickerOutcome {
                 display: format!("{agent}-candidate-{i:03}"),
                 search_text: format!("{agent}-candidate-{i:03}"),
                 preview: format!("Session {agent}-{i}"),
-                rank: Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                rank: (
+                    0,
+                    Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                ),
                 agent: agent.to_string(),
             });
             next_id += 1;
@@ -115,7 +118,10 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                 display: format!("{agent}-candidate-{i:03}"),
                 search_text: format!("{agent}-candidate-{i:03}"),
                 preview: format!("Session {agent}-{i}"),
-                rank: Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                rank: (
+                    0,
+                    Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                ),
                 agent: agent.to_string(),
             });
             next_id += 1;
@@ -137,7 +143,10 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                     display: format!("codex-candidate-{i:03}"),
                     search_text: format!("codex-candidate-{i:03}"),
                     preview: format!("Session codex-{i}"),
-                    rank: Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                    rank: (
+                        0,
+                        Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
+                    ),
                     agent: "codex".to_string(),
                 });
             }

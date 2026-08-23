@@ -111,20 +111,38 @@ pub enum IntegrationError {
     },
 }
 
+/// Sort sessions for human and JSON output: positive Active evidence first,
+/// then Inactive evidence, then Unknown; within each activity state, newest
+/// updates first and stable identity breaks ties.
 pub fn compare_sessions(left: &Session, right: &Session) -> Ordering {
-    right
-        .updated_at
-        .map(|updated_at| updated_at.at)
-        .cmp(&left.updated_at.map(|updated_at| updated_at.at))
+    activity_sort_priority(left.activity)
+        .cmp(&activity_sort_priority(right.activity))
+        .then_with(|| {
+            right
+                .updated_at
+                .map(|updated_at| updated_at.at)
+                .cmp(&left.updated_at.map(|updated_at| updated_at.at))
+        })
         .then_with(|| left.key.cmp(&right.key))
 }
 
-/// Ascending sort key for the interactive picker's paginated view (oldest
-/// first, most recently active last, unknown-time first), mirroring
-/// `compare_sessions` reversed. `Option<SystemTime>`'s natural `Ord` already
-/// puts `None` before any `Some`, matching that ordering directly.
-pub(crate) fn sort_rank(updated_at: Option<UpdateTime>) -> Option<SystemTime> {
-    updated_at.map(|update| update.at)
+fn activity_sort_priority(activity: ActivityStatus) -> u8 {
+    match activity {
+        ActivityStatus::Active { .. } => 0,
+        ActivityStatus::Inactive { .. } => 1,
+        ActivityStatus::Unknown => 2,
+    }
+}
+
+/// Ascending sort key for the interactive picker's paginated view. It is the
+/// exact reverse of [`compare_sessions`]' activity priority, so Skim's
+/// reverse display puts Active sessions first while preserving newest-first
+/// order within each activity state.
+pub(crate) fn sort_rank(session: &Session) -> (u8, Option<SystemTime>) {
+    (
+        2 - activity_sort_priority(session.activity),
+        session.updated_at.map(|update| update.at),
+    )
 }
 
 pub fn sort_sessions(sessions: &mut [Session]) {
@@ -158,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn final_order_is_updated_at_descending_unknown_last_then_key() {
+    fn final_order_is_activity_first_then_updated_at_descending_then_key() {
         fn session(
             key_name: &str,
             updated_at: Option<SystemTime>,
@@ -197,7 +215,7 @@ mod tests {
                 .iter()
                 .map(|session| session.resumable_id.clone())
                 .collect::<Vec<_>>(),
-            ["a", "b", "c", "y", "z"].map(OsString::from)
+            ["b", "z", "c", "a", "y"].map(OsString::from)
         );
     }
 

@@ -55,14 +55,20 @@ impl PreviewItem {
     }
 
     /// Render the full display, including truncation notice and source path.
+    ///
+    /// `PreviewItem` is public, so callers can construct one without going
+    /// through [`PreviewItem::from_content`]. Normalize again at the display
+    /// boundary to keep both content and filesystem-derived source paths safe.
     pub fn render(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&self.content);
+        let mut out = text::normalize(&self.content, text::Mode::Raw);
         if self.truncated {
             out.push_str(TRUNCATION_NOTICE);
         }
         out.push_str("\n[source: ");
-        out.push_str(&self.source_path.display().to_string());
+        out.push_str(&text::normalize(
+            &self.source_path.display().to_string(),
+            text::Mode::Raw,
+        ));
         out.push(']');
         out
     }
@@ -293,6 +299,17 @@ mod tests {
         let rendered = item.render();
         assert!(rendered.contains("content"));
         assert!(rendered.contains("/path/to/source"));
+    }
+
+    #[test]
+    fn render_sanitizes_public_item_content_and_source_path() {
+        let item = PreviewItem {
+            content: "safe \u{1b}[31mtext\u{1b}[0m".into(),
+            source_path: PathBuf::from("/tmp/\u{1b}]52;c;payload\u{7}source"),
+            truncated: false,
+        };
+        let rendered = item.render();
+        assert_eq!(rendered, "safe text\n[source: /tmp/source]");
     }
 
     #[test]

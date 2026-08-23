@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -915,8 +915,17 @@ fn title_column_width_for_tty(tty_size: Option<(usize, usize)>) -> usize {
     }
 }
 
+fn support_label(support: SupportStatus) -> &'static str {
+    match support {
+        SupportStatus::Supported => "",
+        SupportStatus::DiscoverOnly => " [DiscoverOnly]",
+        SupportStatus::Unsupported => " [Unsupported]",
+        SupportStatus::Unavailable => " [Unavailable]",
+    }
+}
+
 fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
-    let agent = agent_label(session);
+    let agent = text::normalize(&agent_label(session), text::Mode::Normalized);
     let updated = updated_label(session.updated_at);
     let updated_detail = updated_detail(session.updated_at);
     // Native titles (e.g. Pi's session_info.name) are untrusted transcript
@@ -928,25 +937,31 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         text::Mode::Normalized,
     );
     let title = title.as_str();
-    let branch = branch_label(session.workspace.workspace());
+    let branch = text::normalize(
+        &branch_label(session.workspace.workspace()),
+        text::Mode::Normalized,
+    );
     let column_width = title_column_width();
+    let support = support_label(session.support);
     let display = format!(
-        "{:<10} {:<18} {} {}",
+        "{:<10} {:<18} {} {}{}",
         updated,
         agent,
         text::pad_to_width(&text::truncate_to_width(title, column_width), column_width),
         branch,
+        support,
     );
     let search_text = text::normalize(
         &format!(
-            "{updated} {agent} {title} {branch} {:?}",
+            "{updated} {agent} {title} {branch}{support} {:?}",
             session.resumable_id
         ),
         text::Mode::Normalized,
     );
     let preview = text::normalize(
         &format!(
-            "UPDATED {updated_detail}\nAGENT {agent}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}"
+            "UPDATED {updated_detail}\nAGENT {agent}\nSUPPORT {:?}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}",
+            session.support
         ),
         text::Mode::Raw,
     );
@@ -955,8 +970,8 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         display,
         search_text,
         preview,
-        rank: crate::session::sort_rank(session.updated_at),
-        agent: session.key.agent.to_string_lossy().into_owned(),
+        rank: crate::session::sort_rank(session),
+        agent: text::normalize(&session.key.agent.to_string_lossy(), text::Mode::Normalized),
     }
 }
 
@@ -1070,7 +1085,10 @@ fn resolve_branch_label(workspace: &std::path::Path) -> String {
         return "no-branch".into();
     };
     if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let branch = text::normalize(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            text::Mode::Normalized,
+        );
         if !branch.is_empty() {
             return branch;
         }
@@ -1150,26 +1168,30 @@ fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
             count: e.count,
         })
         .collect();
-    println!(
-        "{}",
-        serde_json::to_string(&JsonOutput {
-            schema_version: 1,
-            sessions,
-            errors
-        })
-        .expect("JSON serialization")
-    );
+    let output = serde_json::to_string(&JsonOutput {
+        schema_version: 1,
+        sessions,
+        errors,
+    })
+    .expect("JSON serialization");
+    let _ = writeln!(io::stdout(), "{output}");
 }
 fn print_list(records: &[CandidateRecord]) {
     if let Some(message) = empty_list_message(records) {
-        println!("{message}");
+        let _ = writeln!(io::stdout(), "{message}");
         return;
     }
+    let mut stdout = io::stdout().lock();
     for record in records {
-        println!(
+        if writeln!(
+            stdout,
             "{}",
             picker_candidate(CandidateKey(0), &record.session).display
-        );
+        )
+        .is_err()
+        {
+            return;
+        }
     }
 }
 
@@ -1314,6 +1336,108 @@ mod tests {
             "title and branch are separate columns, not glued with '+'"
         );
         assert!(!item.search_text.contains("/workspace"));
+    }
+    #[test]
+    fn picker_metadata_normalizes_agent_and_branch_labels() {
+        let session = Session {
+            key: crate::session::SessionKey {
+                agent: "omp\u{1b}[31m".into(),
+                effective_root: "/r".into(),
+                profile: Some("work\u{202e}".into()),
+                native_locator: "/t".into(),
+            },
+            resumable_id: "id".into(),
+            title: None,
+            updated_at: None,
+            workspace: WorkspaceEvidence::Unknown,
+            support: SupportStatus::Supported,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        };
+        let item = picker_candidate(CandidateKey(1), &session);
+        assert_eq!(item.agent, "omp");
+        assert!(!item.display.contains('\u{1b}'));
+        assert!(!item.display.contains('\u{202e}'));
+        assert!(item.display.contains("omp[work]"));
+    }
+
+    #[test]
+    fn picker_row_and_preview_mark_non_supported_sessions() {
+        let mut session = Session {
+            key: crate::session::SessionKey {
+                agent: "pi".into(),
+                effective_root: "/r".into(),
+                profile: None,
+                native_locator: "/t".into(),
+            },
+            resumable_id: "id".into(),
+            title: Some("title".into()),
+            updated_at: None,
+            workspace: WorkspaceEvidence::Unknown,
+            support: SupportStatus::Supported,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        };
+        for (support, label) in [
+            (SupportStatus::DiscoverOnly, "[DiscoverOnly]"),
+            (SupportStatus::Unsupported, "[Unsupported]"),
+            (SupportStatus::Unavailable, "[Unavailable]"),
+        ] {
+            session.support = support;
+            let item = picker_candidate(CandidateKey(1), &session);
+            assert!(item.display.ends_with(label), "display={:?}", item.display);
+            assert!(item.preview.contains(&format!("SUPPORT {support:?}")));
+        }
+    }
+    #[test]
+    fn branch_label_strips_terminal_controls_from_git_output() {
+        let root = tempfile::tempdir().unwrap();
+        let branch = "safe\u{202e}evil".to_string();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for args in [
+            ["config", "user.email", "qa@example.test"],
+            ["config", "user.name", "QA"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(root.path().join("x"), "").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "x"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "-qm", "init"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["checkout", "-qb", &branch])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(resolve_branch_label(root.path()), "safeevil");
     }
 
     #[test]

@@ -29,7 +29,7 @@ resume --since 2026-01-01      # only Sessions active on or after a date
 resume --since all             # no time filtering (default)
 ```
 
-The interactive picker opens after discovery completes. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a row number.
+The interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background and appears on its tab after the next navigation. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a row number.
 
 ## Scope and Directory Distance
 
@@ -86,7 +86,7 @@ resume --json
 resume /path/to/repo --json -a claude -a codex
 ```
 
-`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session: `UPDATED AGENT[PROFILE] TITLE BRANCH`. `UPDATED` uses the agent-native Session timestamp with a session-file modification-time fallback and renders as a human-relative date. `BRANCH` identifies the recorded Workspace worktree; detached and non-Git workspaces render `detached` and `no-branch`. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
+`--list` waits for discovery, sorts the collected Sessions deterministically, and prints one terminal-safe row per Session: `UPDATED AGENT[PROFILE] TITLE BRANCH`. `UPDATED` uses the agent-native Session timestamp with a session-file modification-time fallback and renders as a human-relative date. `BRANCH` identifies the recorded Workspace worktree; detached and non-Git workspaces render `detached` and `no-branch`. Non-resumable rows append their support state (`[DiscoverOnly]`, `[Unavailable]`, or `[Unsupported]`); the picker Preview also shows `SUPPORT`. `--json` writes exactly one JSON document to stdout. Diagnostics go to stderr, so stdout can be piped safely:
 
 ```sh
 resume --json 2>resume.errors | jq '.sessions[] | {agent, id, workspace}'
@@ -120,7 +120,7 @@ resume config example
 ```
 
 ```toml
-agents = ["codex", "claude", "pi", "omp"]
+agents = ["codex", "claude", "pi", "omp"] # add "opencode" when built with --features opencode
 since = "all"                    # duration (7d, 2h, 30m, 1w) | YYYY-MM-DD | all
 confirm_always = false
 preview = "hidden"               # hidden | visible

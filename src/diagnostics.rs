@@ -133,7 +133,7 @@ pub fn redact_path(path: &Path) -> String {
 /// - Message bodies (heuristic: lines containing "body=" or "message=")
 /// - Base64-like blobs (long alphanumeric+/= sequences)
 pub fn redact_text(text: &str) -> String {
-    let mut result = text.to_string();
+    let mut result = redact_message_bodies(text);
 
     // Redact URLs with known schemes.
     for scheme in [
@@ -141,7 +141,6 @@ pub fn redact_text(text: &str) -> String {
     ] {
         while let Some(start) = result.find(scheme) {
             let rest = &result[start + scheme.len()..];
-            // Find end of URL (whitespace or end of string).
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
             let url_end = start + scheme.len() + end;
             result.replace_range(start..url_end, "[redacted-url]");
@@ -155,28 +154,52 @@ pub fn redact_text(text: &str) -> String {
         result.replace_range(start..start + end, "[redacted-remote]");
     }
 
-    // Redact base64-like blobs (40+ chars of base64 alphabet).
-    let mut redacted = String::with_capacity(result.len());
-    let mut i = 0;
-    let bytes = result.as_bytes();
-    while i < bytes.len() {
-        let run_start = i;
-        let mut run_len = 0;
-        while i < bytes.len() && is_base64_char(bytes[i]) {
+    redact_base64_runs(&result)
+}
+
+fn redact_message_bodies(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            if line.contains("body=") || line.contains("message=") {
+                if line.ends_with('\n') {
+                    "[redacted-message]\n"
+                } else {
+                    "[redacted-message]"
+                }
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+fn redact_base64_runs(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut run_start = None;
+    let mut run_len = 0;
+    for (index, ch) in text.char_indices() {
+        if ch.is_ascii() && is_base64_char(ch as u8) {
+            if run_start.is_none() {
+                run_start = Some(index);
+            }
             run_len += 1;
-            i += 1;
+            continue;
         }
-        if run_len >= 40 {
-            redacted.push_str("[redacted-blob]");
-        } else {
-            redacted.push_str(&result[run_start..run_start + run_len]);
+        if let Some(start) = run_start.take()
+            && run_len >= 40
+        {
+            output.push_str(&text[..start]);
+            output.push_str("[redacted-blob]");
+            return output + &redact_base64_runs(&text[index..]);
         }
-        if i < bytes.len() {
-            redacted.push(bytes[i] as char);
-            i += 1;
-        }
+        run_len = 0;
     }
-    redacted
+    if let Some(start) = run_start
+        && run_len >= 40
+    {
+        return format!("{}[redacted-blob]", &text[..start]);
+    }
+    text.to_owned()
 }
 
 fn is_base64_char(b: u8) -> bool {
@@ -230,12 +253,28 @@ mod tests {
         assert!(redacted.contains("[redacted-blob]"));
         assert!(!redacted.contains(&blob));
     }
+    #[test]
+    fn redact_text_preserves_unicode_around_base64_blobs() {
+        let blob = "a".repeat(50);
+        let input = format!("错误 café {blob} 世界");
+        assert_eq!(redact_text(&input), "错误 café [redacted-blob] 世界");
+    }
 
     #[test]
     fn redact_text_preserves_short_text() {
         let input = "jsonl_malformed: 1 path=/tmp/x.jsonl";
         let redacted = redact_text(input);
         assert_eq!(redacted, input);
+    }
+
+    #[test]
+    fn redact_text_removes_message_body_lines() {
+        let input =
+            "invalid transcript\nmessage=private transcript content\nbody=another secret\nretry";
+        assert_eq!(
+            redact_text(input),
+            "invalid transcript\n[redacted-message]\n[redacted-message]\nretry"
+        );
     }
 
     #[test]

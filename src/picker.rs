@@ -385,9 +385,10 @@ pub struct PickerCandidate {
     pub display: String,
     pub search_text: String,
     pub preview: String,
-    /// Ascending ordering key (oldest first, most recently active last — the
-    /// bottom of the final page). Mirrors `session::compare_sessions`, reversed.
-    pub rank: Option<SystemTime>,
+    /// Ascending rank for the paginated view. It reverses
+    /// `session::compare_sessions` so Skim's reverse display preserves the
+    /// documented activity-first, newest-first order.
+    pub rank: (u8, Option<SystemTime>),
     /// Agent name, used to build the per-agent tabs (`Alt+Left`/`Alt+Right`).
     pub agent: String,
 }

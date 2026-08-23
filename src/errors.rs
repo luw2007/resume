@@ -282,7 +282,9 @@ impl fmt::Display for Report {
         writeln!(
             f,
             "ERROR [{}] {}: {}",
-            self.spec.code, self.spec.slug, self.what
+            self.spec.code,
+            self.spec.slug,
+            self.what.replace('\n', " ")
         )?;
         writeln!(f, "  Trigger: {}", self.spec.trigger)?;
         writeln!(f, "  Fix:     {}", self.spec.fix)?;
@@ -454,6 +456,16 @@ mod tests {
         assert!(lines[2].starts_with("  Fix:     "));
         assert_eq!(lines[3], "  Example: resume --since 7d");
         assert!(rendered.ends_with('\n'));
+    }
+
+    #[test]
+    fn report_keeps_multiline_detail_on_its_first_line() {
+        let rendered = E1004.report("invalid config\nline two").to_string();
+        assert_eq!(rendered.lines().count(), 4);
+        assert_eq!(
+            rendered.lines().next(),
+            Some("ERROR [E1004] INVALID_CONFIG: invalid config line two")
+        );
     }
 
     #[test]
