@@ -2,8 +2,9 @@
 //!
 //! OpenCode has no non-SQLite session store, so without `rusqlite` linked
 //! there is nothing this module can read. It returns `Ok(None)`, which the
-//! `resume` binary surfaces as `opencode_disabled` — the same shape as a
-//! missing database, never a hard failure that would block other agents.
+//! `resume` binary surfaces as `opencode_root_unavailable` -- the same
+//! category as a missing database, never a hard failure that would block
+//! other agents.
 
 use std::path::Path;
 use std::time::SystemTime;
