@@ -376,6 +376,314 @@ def _(fx, ctx):
     )
 
 
+# ----------------------------------------------------------------- session
+@check("session-status-supported-ready")
+def _(fx, ctx):
+    result, payload = fx.json()
+    bad = [s for s in payload["sessions"]
+           if s["support"] != "Supported" or s["activity"] == "Active"]
+    listing = fx.run("--list").stdout
+    words = [w for w in ("Supported", "DiscoverOnly", "Unavailable", "Ready")
+             if w in listing]
+    return expect(
+        not bad and not words,
+        f"non-ready sessions {bad}; --list leaks status words {words}",
+    )
+
+
+@check("session-status-supported-active")
+def _(fx, ctx):
+    # The fixture sets RESUME_DISABLE_PROC_PROBE=1 precisely so QA never
+    # depends on whatever agents happen to be running on the host, so the
+    # Active half of this row is not reachable from here by construction.
+    return ("SKIPPED: Active requires a live agent process holding the session; "
+            "the fixture disables the proc probe")
+
+
+@check("session-status-discover-only")
+def _(fx, ctx):
+    """Filename UUID and embedded sessionId disagree -> DiscoverOnly."""
+    other = "22222222-2222-2222-2222-222222222222"
+    path = fx.home / f".claude/projects/ws/{other}.jsonl"
+    path.write_text(json.dumps({
+        "type": "user", "sessionId": "33333333-3333-3333-3333-333333333333",
+        "cwd": str(fx.workspace), "message": {"content": "disagreeing title"},
+    }) + "\n")
+    _, payload = fx.json()
+    found = [s for s in payload["sessions"]
+             if s["id"] == "33333333-3333-3333-3333-333333333333"]
+    return expect(
+        found and found[0]["support"] == "DiscoverOnly",
+        f"identity disagreement did not yield DiscoverOnly: {found}",
+    )
+
+
+@check("session-status-unsupported")
+def _(fx, ctx):
+    """`Unsupported` must be unreachable: declaration and tests only."""
+    live = []
+    for path in (ctx["root"] / "src").rglob("*.rs"):
+        text = path.read_text()
+        head = text.split("#[cfg(test)]")[0]
+        for n, line in enumerate(head.splitlines(), 1):
+            if "SupportStatus::Unsupported" in line:
+                live.append(f"{path.relative_to(ctx['root'])}:{n}")
+    return expect(not live, f"production code can produce Unsupported at {live}")
+
+
+@check("session-status-unavailable")
+def _(fx, ctx):
+    """A recorded workspace that no longer exists reads as Unavailable."""
+    gone = fx.workspace / "gone"
+    gone.mkdir()
+    d = fx.home / ".pi/agent/sessions/gone"
+    d.mkdir(parents=True)
+    (d / "gone.jsonl").write_text(json.dumps({
+        "type": "session", "version": 3, "id": "gone-id",
+        "timestamp": 1700000000, "cwd": str(gone),
+    }) + "\n")
+    shutil.rmtree(gone)
+    _, payload = fx.json("-D", "1")
+    found = [s for s in payload["sessions"] if s["id"] == "gone-id"]
+    listing = fx.run("-D", "1", "--list").stdout
+    return expect(
+        found and all(s["support"] == "Unavailable" for s in found)
+        and "UNAVAILABLE" not in listing.upper(),
+        f"support {[s['support'] for s in found]}; --list said {listing!r}",
+    )
+
+
+@check("session-activity-unknown-default")
+def _(fx, ctx):
+    _, payload = fx.json()
+    bad = [(s["agent"], s["activity"]) for s in payload["sessions"]
+           if s["activity"] == "Inactive"]
+    return expect(
+        not bad,
+        f"absence of evidence was reported as Inactive rather than Unknown: {bad}",
+    )
+
+
+@check("session-sort-order", "output-json-sorted-sessions")
+def _(fx, ctx):
+    _, first = fx.json()
+    _, second = fx.json()
+    a = [(s["agent"], s["id"]) for s in first["sessions"]]
+    b = [(s["agent"], s["id"]) for s in second["sessions"]]
+    return expect(a == b, f"order is not stable across runs:\n  {a}\n  {b}")
+
+
+# ------------------------------------------------------------- diagnostics
+def _bad_claude_transcripts(fx, count, names=None):
+    """Transcripts that trigger claude_no_session_id: Claude-shaped, but with
+    neither an embedded sessionId nor a cwd, so identity is unrecoverable.
+
+    Each lands directly under a workspace-key directory, because discovery
+    enumerates only the direct `.jsonl` children of those and would not see a
+    transcript nested any deeper.
+    """
+    paths = []
+    for i in range(count):
+        name = names[i] if names else f"broken{i}"
+        d = fx.home / ".claude/projects" / name
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"4444444{i}-1111-1111-1111-111111111111.jsonl"
+        p.write_text(json.dumps(
+            {"type": "user", "message": {"content": "no id, no cwd"}}) + "\n")
+        paths.append(p)
+    return paths
+
+
+@check("diag-non-verbose-category-aggregation")
+def _(fx, ctx):
+    _bad_claude_transcripts(fx, 3)
+    lines = [l for l in fx.run("--list").stderr.splitlines()
+             if "claude_no_session_id" in l]
+    return expect(
+        lines == ["resume: claude_no_session_id: 3"],
+        f"expected one aggregated line, got {lines}",
+    )
+
+
+@check("diag-verbose-per-path-preserved")
+def _(fx, ctx):
+    paths = _bad_claude_transcripts(fx, 2)
+    # A third transcript in the same directory as the first, so two distinct
+    # directories are involved but one of them carries two occurrences.
+    dup = paths[0].with_name("44444440-1111-1111-1111-111111111112.jsonl")
+    dup.write_text(paths[0].read_text())
+    lines = [l for l in fx.run("--verbose", "--list").stderr.splitlines()
+             if "claude_no_session_id" in l]
+    return expect(
+        len(lines) == 3 and all(": 1" in l for l in lines),
+        f"verbose mode collapsed distinct paths: {lines}",
+    )
+
+
+@check("diag-verbose-redaction")
+def _(fx, ctx):
+    # A URL cannot occur in a path (`https://` needs two slashes, and a path
+    # component cannot contain one) and chains never carry user text, so the
+    # `git@host:` remote form is the only sensitive token reachable from a
+    # real diagnostic. redact_text handles both through the same code path.
+    _bad_claude_transcripts(fx, 1, names=["git@secret.example:api"])
+    stderr = fx.run("--verbose", "--list").stderr
+    return expect(
+        "[redacted-remote]" in stderr and "secret.example" not in stderr,
+        f"verbose diagnostics leaked the remote: {stderr[:300]!r}",
+    )
+
+
+@check("diag-no-message-body-leak")
+def _(fx, ctx):
+    """Chains must be fixed literals; a formatted chain could carry user text."""
+    offenders = []
+    for path in (ctx["root"] / "src").rglob("*.rs"):
+        text = path.read_text()
+        head = text.split("#[cfg(test)]")[0]
+        for n, line in enumerate(head.splitlines(), 1):
+            if "verbose_chain" not in line or "None" in line:
+                continue
+            if "format!" in line or "{}" in line:
+                offenders.append(f"{path.relative_to(ctx['root'])}:{n}")
+    return expect(
+        not offenders,
+        f"verbose_chain is built by interpolation at {offenders}",
+    )
+
+
+# ------------------------------------------------------------------ output
+@check("output-list-zero-sessions")
+def _(fx, ctx):
+    for pattern in (".pi", ".claude", ".codex", ".omp"):
+        for p in (fx.home / pattern).rglob("*.jsonl"):
+            p.unlink()
+    db = fx.home / "xdg/data/opencode/opencode.db"
+    if db.is_file():
+        db.unlink()
+    result = fx.run("--list")
+    return expect(
+        result.returncode == 0 and result.stdout == "No Sessions found in Scope.\n",
+        f"exit {result.returncode}, stdout {result.stdout!r}",
+    )
+
+
+@check("output-list-all-integrations-fail")
+def _(fx, ctx):
+    # Built without the opencode database, so that integration fails too and
+    # every one of the five is genuinely broken rather than merely empty.
+    broken = Fixture(ctx["root"], ctx["binary"], QA_NO_OPENCODE=True)
+    roots = [broken.home / p for p in (".pi", ".claude", ".codex", ".omp")]
+    for r in roots:
+        os.chmod(r, 0o000)
+    try:
+        result = broken.run("--list")
+    finally:
+        for r in roots:
+            os.chmod(r, 0o755)
+        shutil.rmtree(broken.home, ignore_errors=True)
+    categories = re.findall(r"resume: (\w+):", result.stderr)
+    agentish = [c for c in categories
+                if any(c.startswith(a) for a in ("pi_", "claude_", "codex_", "omp_"))]
+    return expect(
+        result.returncode == 1 and agentish,
+        f"exit {result.returncode} (want 1), diagnostics {categories}",
+    )
+
+
+@check("output-list-one-integration-fails-others-continue")
+def _(fx, ctx):
+    os.chmod(fx.home / ".codex", 0o000)
+    try:
+        result = fx.run("--list")
+        _, payload = fx.json()
+    finally:
+        os.chmod(fx.home / ".codex", 0o755)
+    agents = {s["agent"] for s in (payload or {"sessions": []})["sessions"]}
+    return expect(
+        result.returncode == 0 and {"pi", "claude", "omp"} <= agents
+        and "codex" not in agents and "codex" in result.stderr,
+        f"exit {result.returncode}, agents {agents}, stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("output-json-schema-envelope")
+def _(fx, ctx):
+    result, payload = fx.json()
+    return expect(
+        set(payload) == {"schemaVersion", "sessions", "errors"}
+        and payload["schemaVersion"] == 1,
+        f"top-level keys {sorted(payload)}, schemaVersion {payload.get('schemaVersion')!r}",
+    )
+
+
+@check("output-json-session-fields")
+def _(fx, ctx):
+    want = ["agent", "profile", "id", "title", "workspace",
+            "support", "activity", "risk"]
+    _, payload = fx.json()
+    problems = []
+    for s in payload["sessions"]:
+        if list(s) != want:
+            problems.append(f"{s.get('id')}: keys {list(s)}")
+        for field in ("support", "activity", "risk"):
+            if not isinstance(s.get(field), str):
+                problems.append(f"{s.get('id')}: {field} is {s.get(field)!r}")
+    return expect(not problems, "; ".join(problems[:5]))
+
+
+@check("output-json-error-fields")
+def _(fx, ctx):
+    _bad_claude_transcripts(fx, 1, names=["git@secret.example:api"])
+    result = fx.run("--json", "--verbose")
+    payload = json.loads(result.stdout)
+    bad = [e for e in payload["errors"] if set(e) != {"category", "count"}]
+    return expect(
+        not bad and "secret.example" not in result.stdout,
+        f"error objects carry extra fields {bad}, or stdout leaked a path",
+    )
+
+
+@check("output-json-no-message-bodies")
+def _(fx, ctx):
+    # The title is a deterministic summary of this input, so its leading words
+    # legitimately appear; what must never appear is the body itself.
+    body = "line one of a long body\nline two mentions hunter2\n" + "x" * 400
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": body}}) + "\n"
+    )
+    result, payload = fx.json()
+    session = next((s for s in payload["sessions"] if s["id"] == "pi-id"), None)
+    title = (session or {}).get("title") or ""
+    return expect(
+        "x" * 60 not in result.stdout and "\n" not in title and len(title) <= 80,
+        f"stdout carries the body verbatim, or title is {title!r} ({len(title)} chars)",
+    )
+
+
+@check("output-json-stdout-only-schema")
+def _(fx, ctx):
+    result = fx.run("--json", "--verbose")
+    try:
+        json.loads(result.stdout)
+    except ValueError as error:
+        return f"stdout is not parseable JSON ({error}); stdout {result.stdout[:200]!r}"
+    return expect(
+        result.stderr.strip(),
+        "no diagnostics reached stderr, so this run does not prove separation",
+    )
+
+
+@check("errors-unified-catalog-e3003-unsupported-resume")
+def _(fx, ctx):
+    return ("SKIPPED: reaching the resume path requires selecting a row in the "
+            "picker; belongs to the PTY harness")
+
+
 # -------------------------------------------------------------------- docs
 @check("doccheck-resume-env-vars")
 def _(fx, ctx):
@@ -511,9 +819,12 @@ def write_back(root, results):
             continue
         status, note = results[r["feature_id"]]
         r["status"] = status
-        if note:
-            prior = r["error_notes"].strip()
-            r["error_notes"] = f"{note} || {prior}" if prior else note
+        if not note:
+            continue
+        # Re-running the suite must not stack identical notes: keep the newest
+        # first and preserve only genuinely different prior observations.
+        prior = [s.strip() for s in r["error_notes"].split("||") if s.strip()]
+        r["error_notes"] = " || ".join([note] + [p for p in prior if p != note])
     with path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
