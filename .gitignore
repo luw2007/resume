@@ -1,3 +1,4 @@
 /target
 .pi
 .done
+__pycache__/
