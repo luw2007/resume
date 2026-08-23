@@ -1171,7 +1171,405 @@ def _(fx, ctx):
             "picker; belongs to the PTY harness")
 
 
+# ------------------------------------------------------------------- scope
+GIT = shutil.which("git")
+
+
+def _with_git(fx, **overrides):
+    """The fixture environment with a real `git` reachable.
+
+    The isolated PATH deliberately holds only the fake agents, so every other
+    check sees the no-git fallback; scope checks that need a repository opt
+    back in explicitly rather than the fixture leaking git everywhere.
+    """
+    env = fx.env(**overrides)
+    env["PATH"] = f"{env['PATH']}:{os.path.dirname(GIT)}"
+    return env
+
+
+def _git(cwd, *args):
+    subprocess.run([GIT, "-C", str(cwd), *args], capture_output=True, check=True)
+
+
+def _init_repo(path):
+    subprocess.run([GIT, "init", "-q", str(path)], capture_output=True, check=True)
+    _git(path, "config", "user.email", "qa@example.invalid")
+    _git(path, "config", "user.name", "qa")
+    (path / "seed").write_text("seed\n")
+    _git(path, "add", "seed")
+    _git(path, "commit", "-qm", "seed")
+
+
+@check("scope-default-git")
+def _(fx, ctx):
+    if not GIT:
+        return "SKIPPED: git is not installed"
+    _init_repo(fx.workspace)
+    linked = fx.home / "linked"
+    _git(fx.workspace, "worktree", "add", "-q", str(linked), "-b", "qa-linked")
+    _pi_session(fx, "linked", "linked-id", linked)
+    nested = fx.workspace / "nested"
+    nested.mkdir()
+    _init_repo(nested)
+    _pi_session(fx, "nested", "nested-id", nested)
+    default = _ids(json.loads(fx.run_env("--json", env=_with_git(fx)).stdout))
+    widened = _ids(json.loads(
+        fx.run_env("--json", "--all-worktrees", env=_with_git(fx)).stdout))
+    return expect(
+        default == {"pi-id"} and {"pi-id", "linked-id"} <= widened
+        and "nested-id" not in widened,
+        f"default scope {default} (want just the current worktree), "
+        f"--all-worktrees {widened} (want the linked worktree in, the nested "
+        f"repository out)",
+    )
+
+
+@check("scope-default-nongit")
+def _(fx, ctx):
+    child = fx.workspace / "child"
+    child.mkdir()
+    _pi_session(fx, "child", "child-id", child)
+    _, payload = fx.json()
+    return expect(
+        _ids(payload) == {"pi-id"},
+        f"non-git default scope returned {_ids(payload)}; want the exact "
+        f"directory only",
+    )
+
+
+@check("scope-git-failure-diagnostic",
+       "doccheck-git-scope-failure-not-surfaced-as-diagnostic")
+def _(fx, ctx):
+    """With no git on PATH the scope falls back to the exact directory, and
+    the failure is visible rather than silent."""
+    child = fx.workspace / "child"
+    child.mkdir()
+    _pi_session(fx, "child", "child-id", child)
+    plain = fx.run("--list")
+    verbose = fx.run("--verbose", "--list")
+    _, payload = fx.json()
+    return expect(
+        "resume: git_scope_discovery_failed: 1" in plain.stderr
+        and len(verbose.stderr) > len(plain.stderr)
+        and _ids(payload) == {"pi-id"},
+        f"stderr {plain.stderr!r}; verbose adds nothing: "
+        f"{verbose.stderr == plain.stderr}; scope {_ids(payload)}",
+    )
+
+
+@check("scope-directory-distance-zero")
+def _(fx, ctx):
+    child = fx.workspace / "child"
+    child.mkdir()
+    _pi_session(fx, "child", "child-id", child)
+    _pi_session(fx, "parent", "parent-id", fx.home)
+    _, up = fx.json("-U", "0")
+    _, down = fx.json("-D", "0")
+    return expect(
+        _ids(up) == {"pi-id"} and _ids(down) == {"pi-id"},
+        f"-U 0 gave {_ids(up)}, -D 0 gave {_ids(down)}; both want exactly pi-id",
+    )
+
+
+@check("scope-canonicalizes-symlinks")
+def _(fx, ctx):
+    link = fx.home / "link-to-workspace"
+    link.symlink_to(fx.workspace)
+    result = fx.run_env("--json", cwd=link)
+    ids = _ids(json.loads(result.stdout))
+    return expect(
+        "pi-id" in ids,
+        f"entering through a symlink lost the session recorded under the real "
+        f"path: {ids}",
+    )
+
+
+@check("scope-missing-base-usage-error")
+def _(fx, ctx):
+    result = fx.run(str(fx.home / "does/not/exist"), "--list")
+    return expect(
+        result.returncode == 2 and result.stderr.strip(),
+        f"exit {result.returncode}, stderr {result.stderr!r}",
+    )
+
+
+@check("scope-unavailable-workspace")
+def _(fx, ctx):
+    gone = fx.workspace / "gone"
+    gone.mkdir()
+    _pi_session(fx, "gone", "gone-id", gone)
+    shutil.rmtree(gone)
+    _, payload = fx.json("-D", "1")
+    found = [s for s in payload["sessions"] if s["id"] == "gone-id"]
+    return expect(
+        found and all(s["support"] == "Unavailable" for s in found),
+        f"deleted workspace reported as {[s['support'] for s in found]}",
+    )
+
+
+@check("scope-missing-workspace-matched-by-last-known-path")
+def _(fx, ctx):
+    gone = fx.workspace / "deleted"
+    _pi_session(fx, "gone", "gone-id", gone)          # never created
+    elsewhere = fx.home / "other/deleted"
+    _pi_session(fx, "elsewhere", "elsewhere-id", elsewhere)
+    _, payload = fx.json("-D", "all")
+    ids = _ids(payload)
+    return expect(
+        "gone-id" in ids and "elsewhere-id" not in ids,
+        f"--down all returned {ids}; a path under the base must still match "
+        f"by its last known location, an unrelated one must not",
+    )
+
+
+@check("scope-contains-workspace-caches-git-common-dir")
+def _(fx, ctx):
+    """Repeated membership tests for one base must spawn git once."""
+    if not GIT:
+        return "SKIPPED: git is not installed"
+    _init_repo(fx.workspace)
+    spy_dir = fx.home / "gitspy"
+    spy_dir.mkdir()
+    log = fx.home / "git.log"
+    spy = spy_dir / "git"
+    spy.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >>"{log}"\nexec "{GIT}" "$@"\n')
+    spy.chmod(0o755)
+    env = fx.env()
+    env["PATH"] = f"{spy_dir}:{env['PATH']}"
+
+    def spawns(session_count):
+        for i in range(session_count):
+            _pi_session(fx, f"s{i}", f"s{i}-id", fx.workspace)
+        log.write_text("")
+        fx.run_env("--json", "-a", "pi", env=env)
+        return len([l for l in log.read_text().splitlines()
+                    if "--git-common-dir" in l and "--show-toplevel" not in l])
+
+    few, many = spawns(4), spawns(16)
+    return expect(
+        few == many == 1,
+        f"membership spawns git {few} times for 4 sessions and {many} for 16 "
+        f"at the same canonical path; a memoized lookup must spawn once",
+    )
+
+
+# ------------------------------------------------------------------ safety
+def _snapshot(root):
+    out = {}
+    for path in sorted(root.rglob("*")):
+        try:
+            st = path.lstat()
+        except OSError:
+            continue
+        out[str(path.relative_to(root))] = (st.st_mode, st.st_size, st.st_mtime_ns)
+    return out
+
+
+@check("safety-no-write-mutation-during-discovery")
+def _(fx, ctx):
+    roots = [fx.home / p for p in (".pi", ".claude", ".codex", ".omp",
+                                   "xdg/data/opencode")]
+    before = {str(r): _snapshot(r) for r in roots if r.exists()}
+    fx.run("--list")
+    fx.run("--json")
+    after = {str(r): _snapshot(r) for r in roots if r.exists()}
+    changed = [r for r in before if before[r] != after[r]]
+    return expect(not changed, f"discovery mutated {changed}")
+
+
+@check("safety-preview-cache-in-memory-only")
+def _(fx, ctx):
+    """No preview code may open a file for writing, and a full run must leave
+    the isolated HOME byte-identical outside the directories resume owns."""
+    writes = []
+    for path in (ctx["root"] / "src/preview").rglob("*.rs"):
+        head = path.read_text().split("#[cfg(test)]")[0]
+        for n, line in enumerate(head.splitlines(), 1):
+            if re.search(r"fs::write|File::create|OpenOptions", line):
+                writes.append(f"{path.relative_to(ctx['root'])}:{n}")
+    before = _snapshot(fx.home)
+    fx.run("--json")
+    after = _snapshot(fx.home)
+    # The Codex discovery cache is a documented, separate on-disk artifact;
+    # anything else appearing would be preview content reaching the disk.
+    added = [p for p in sorted(set(after) - set(before))
+             if "codex-discovery" not in p and not p.endswith("xdg/cache/resume")]
+    return expect(
+        not writes and not added,
+        f"preview writes files at {writes}; run created {added}",
+    )
+
+
+@check("safety-symlink-confinement")
+def _(fx, ctx):
+    outside = fx.home / "outside"
+    outside.mkdir()
+    smuggled = outside / "rollout-smuggled.jsonl"
+    smuggled.write_text(
+        json.dumps({"type": "session_meta", "payload": {
+            "id": "smuggled-id", "cwd": str(fx.workspace),
+            "timestamp": "2026-01-01T00:00:00Z"}}) + "\n")
+    link = fx.home / ".codex/sessions/2026/01/01/rollout-link.jsonl"
+    link.symlink_to(smuggled)
+    _, payload = fx.json("-a", "codex")
+    ids = {s["id"] for s in payload["sessions"]}
+    return expect(
+        "smuggled-id" not in ids,
+        f"a symlink out of CODEX_HOME surfaced as a session: {ids}",
+    )
+
+
+@check("safety-attachments-never-base64")
+def _(fx, ctx):
+    blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5" * 40
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message", "message": {
+            "role": "user",
+            "content": [{"type": "image", "data": blob},
+                        {"type": "text", "text": "look at this"}]}}) + "\n"
+    )
+    result = fx.run("--json")
+    listing = fx.run("--list")
+    return expect(
+        blob[:60] not in result.stdout and blob[:60] not in listing.stdout,
+        "attachment payload reached the output",
+    )
+
+
+@check("safety-injection-collapses-known-wrappers-only")
+def _(fx, ctx):
+    text = "<root><child>value</child></root> <skill>injected</skill> tail"
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": text}}) + "\n"
+    )
+    _, payload = fx.json("-a", "pi")
+    title = next(s["title"] for s in payload["sessions"] if s["id"] == "pi-id")
+    # Collapsing keeps the inner text and drops only the wrapper tags, so
+    # "injected" is expected to survive; "<skill>" must not.
+    return expect(
+        "<skill>" not in title and "</skill>" not in title
+        and "injected" in title and "<root><child>value</child></root>" in title,
+        f"title is {title!r}; the skill wrapper must collapse to its inner "
+        f"text and the unknown XML must survive verbatim",
+    )
+
+
+@check("safety-terminal-control-stripping")
+def _(fx, ctx):
+    hostile = ("]8;;https://evil.exampleclick]8;;"
+               "]0;pwned‮txet-desrever")
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": hostile}}) + "\n"
+    )
+    listing = subprocess.run([str(fx.home / "run"), "--list"], capture_output=True)
+    payload = fx.run("--json").stdout
+    leaked = [name for name, needle in
+              (("ESC", b"\x1b"), ("BEL", b"\x07"), ("bidi", "‮".encode()))
+              if needle in listing.stdout]
+    return expect(
+        not leaked and "‮" not in payload,
+        f"--list stdout carries {leaked}; JSON keeps the bidi override: "
+        f"{chr(0x202e) in payload}",
+    )
+
+
+@check("safety-jsonl-bounds-dos-protection")
+def _(fx, ctx):
+    """An oversized line must be refused, not buffered."""
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message", "message": {
+            "role": "user", "content": "y" * (9 * 1024 * 1024)}}) + "\n"
+    )
+    result = fx.run("--verbose", "--json")
+    return expect(
+        result.returncode in (0, 1) and "y" * 200 not in result.stdout,
+        f"exit {result.returncode}; a 9 MiB line reached the output",
+    )
+
+
+@check("safety-no-machine-wide-scan")
+def _(fx, ctx):
+    return ("SKIPPED: syscall tracing needs dtruss/fs_usage under sudo, which a "
+            "QA run must not require; the read-only claim is covered by "
+            "safety-no-write-mutation-during-discovery")
+
+
 # -------------------------------------------------------------------- docs
+@check("doccheck-branch-column-unpopulated")
+def _(fx, ctx):
+    if not GIT:
+        return "SKIPPED: git is not installed"
+    _init_repo(fx.workspace)
+    _git(fx.workspace, "checkout", "-q", "-b", "qa-branch")
+    listing = fx.run_env("--list", env=_with_git(fx))
+    return expect(
+        "qa-branch" in listing.stdout and " - " not in listing.stdout,
+        f"BRANCH column shows no real branch name: {listing.stdout!r}",
+    )
+
+
+@check("doccheck-support-status-unsupported-unreachable")
+def _(fx, ctx):
+    context = ctx["root"] / "CONTEXT.md"
+    if not context.is_file():
+        return "CONTEXT.md no longer exists, so the row's citation is dangling"
+    text = context.read_text()
+    return expect(
+        re.search(r"Unsupported is modeled for .{0,120}not currently assigned",
+                  text, re.S),
+        "CONTEXT.md no longer describes Unsupported as modeled but unassigned",
+    )
+
+
+@check("doccheck-risk-statuses-partially-unreachable")
+def _(fx, ctx):
+    live = []
+    for path in (ctx["root"] / "src").rglob("*.rs"):
+        head = path.read_text().split("#[cfg(test)]")[0]
+        for n, line in enumerate(head.splitlines(), 1):
+            for variant in ("WorkspaceChanged", "ConflictingMetadata"):
+                if f"RiskStatus::{variant}" in line and "=>" not in line:
+                    live.append(f"{path.relative_to(ctx['root'])}:{n} {variant}")
+    return expect(
+        not live,
+        f"the row records these variants as unreachable, but production code "
+        f"assigns them at {live}",
+    )
+
+
+@check("doccheck-config-example-not-round-trip-tested")
+def _(fx, ctx):
+    """The example is user-facing; a schema change must not be able to break
+    it silently. This passes only once a test parses it back."""
+    for name in ("src/cli.rs", "src/config.rs"):
+        text = (ctx["root"] / name).read_text()
+        tests = text.split("#[cfg(test)]", 1)
+        if len(tests) > 1 and "config_example" in tests[1] and "from_str" in tests[1]:
+            return None
+    return ("no test parses `config example` output back into Config, so a "
+            "field rename would break the documented example silently")
+
+
+@check("doccheck-omp-vs-claude-codex-env-propagation-asymmetry")
+def _(fx, ctx):
+    return ("SKIPPED: observing the resumed agent's environment requires "
+            "selecting a row; belongs to the PTY harness")
+
+
 @check("doccheck-resume-env-vars")
 def _(fx, ctx):
     src = ctx["root"] / "src"
