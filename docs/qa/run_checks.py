@@ -1709,6 +1709,502 @@ def _(fx, ctx):
     return "SKIPPED: requires a resume handoff; PTY harness"
 
 
+# ------------------------------------------------------------------- codex
+def _rollout(fx, session_id, cwd, title="codex title", *, root=".codex",
+             kind="sessions", day="2026/01/01", name=None, extra=()):
+    """One rollout-*.jsonl under the date-partitioned Codex layout."""
+    d = fx.home / root / kind / day
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / (name or f"rollout-{session_id}.jsonl")
+    records = [
+        {"type": "session_meta", "payload": {
+            "id": session_id, "cwd": str(cwd),
+            "timestamp": "2026-01-01T00:00:00Z"}},
+        {"type": "event_msg", "payload": {
+            "type": "user_message", "message": {"role": "user", "content": title}}},
+    ]
+    records.extend(extra)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def _codex(fx, *args, env=None, cwd=None, binary=None):
+    result = (fx.run_env("--json", "-a", "codex", *args, env=env, cwd=cwd)
+              if binary is None else subprocess.run(
+                  [str(binary), "--json", "-a", "codex", *args],
+                  capture_output=True, text=True,
+                  env=env if env is not None else fx.env(),
+                  cwd=str(cwd or fx.workspace)))
+    payload = json.loads(result.stdout) if result.stdout.strip() else {"sessions": []}
+    return result, {s["id"]: s for s in payload["sessions"] if s["agent"] == "codex"}
+
+
+@check("codex-root-resolution")
+def _(fx, ctx):
+    other = fx.home / "custom-codex"
+    _rollout(fx, "custom-root-id", fx.workspace, root="custom-codex")
+    _, sessions = _codex(fx, env=fx.env(CODEX_HOME=str(other)))
+    return expect(
+        set(sessions) == {"custom-root-id"},
+        f"CODEX_HOME was not honoured: {set(sessions)}",
+    )
+
+
+@check("codex-active-and-archived-roots")
+def _(fx, ctx):
+    _rollout(fx, "active-id", fx.workspace, kind="sessions")
+    _rollout(fx, "archived-id", fx.workspace, kind="archived_sessions")
+    _, sessions = _codex(fx)
+    return expect(
+        {"active-id", "archived-id"} <= set(sessions),
+        f"both rollout roots must be scanned: {set(sessions)}",
+    )
+
+
+@check("codex-identity-and-workspace-authoritative")
+def _(fx, ctx):
+    elsewhere = fx.home / "codex-decoy"
+    elsewhere.mkdir()
+    _rollout(fx, "true-id", fx.workspace, name="rollout-unrelated-filename.jsonl",
+             day="2026/02/02")
+    # A payload.session_id that disagrees must be ignored in favour of payload.id.
+    path = fx.home / ".codex/sessions/2026/02/02/rollout-unrelated-filename.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[0]["payload"]["session_id"] = "decoy-session-id"
+    records[0]["payload"]["workspace_roots"] = [str(elsewhere)]
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    _, sessions = _codex(fx)
+    found = sessions.get("true-id", {})
+    return expect(
+        "decoy-session-id" not in sessions and found
+        and os.path.realpath(found.get("workspace", ""))
+        == os.path.realpath(fx.workspace),
+        f"identity/workspace did not come from session_meta.payload: {sessions}",
+    )
+
+
+@check("codex-user-message-dedup")
+def _(fx, ctx):
+    text = "the very same sentence"
+    _rollout(fx, "dedup-id", fx.workspace, title=text, extra=[
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": text}}])
+    _, sessions = _codex(fx)
+    title = sessions.get("dedup-id", {}).get("title") or ""
+    return expect(
+        title.count(text) == 1,
+        f"the two representations of one message were not deduped: {title!r}",
+    )
+
+
+@check("codex-import-badge-safe")
+def _(fx, ctx):
+    secret = "/private/origin/path/and-remote"
+    _rollout(fx, "import-id", fx.workspace, extra=[
+        {"type": "event_msg", "payload": {
+            "type": "foreign_session_import",
+            "foreign_session_import": {
+                "source_kind": "claude", "origin_cwd": secret,
+                "origin_remote": "git@example.invalid:secret/repo.git"}}}])
+    result, sessions = _codex(fx)
+    blob = result.stdout + result.stderr + fx.run("--list", "-a", "codex").stdout
+    return expect(
+        secret not in blob and "example.invalid" not in blob,
+        f"an import payload leaked a path or remote into output: "
+        f"{[l for l in blob.splitlines() if 'origin' in l or 'invalid' in l]}",
+    )
+
+
+@check("codex-per-file-error-isolation")
+def _(fx, ctx):
+    for i in range(3):
+        _rollout(fx, f"valid-{i}", fx.workspace)
+    corrupt = fx.home / ".codex/sessions/2026/01/01/rollout-corrupt.jsonl"
+    corrupt.write_bytes(b"\x00\x01 not jsonl at all\n" * 20)
+    result, sessions = _codex(fx, "--verbose")
+    return expect(
+        {f"valid-{i}" for i in range(3)} <= set(sessions)
+        and "codex" in result.stderr,
+        f"one corrupt rollout must not stop the others: discovered "
+        f"{set(sessions)}, stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("codex-root-unavailable-diagnostic")
+def _(fx, ctx):
+    _rollout(fx, "hidden-id", fx.workspace)
+    sessions_dir = fx.home / ".codex/sessions"
+    os.chmod(sessions_dir, 0o000)
+    try:
+        blocked = fx.run("--json", "--verbose", "-a", "codex")
+    finally:
+        os.chmod(sessions_dir, 0o755)
+    missing = fx.run_env("--json", "--verbose", "-a", "codex",
+                         env=fx.env(CODEX_HOME=str(fx.home / "no-such-codex")))
+    reported = "codex_root_unavailable" in (blocked.stdout + blocked.stderr)
+    return expect(
+        reported and blocked.returncode == 1
+        and "codex_root_unavailable" not in (missing.stdout + missing.stderr)
+        and missing.returncode == 0,
+        f"unreadable: exit {blocked.returncode} reported={reported}; "
+        f"missing: exit {missing.returncode}, "
+        f"stderr {missing.stderr[:150]!r}",
+    )
+
+
+@check("codex-proc-probe-disable-guard")
+def _(fx, ctx):
+    marker = fx.home / "lsof-ran"
+    lsof = fx.home / "bin/lsof"
+    lsof.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n")
+    os.chmod(lsof, 0o755)
+    _rollout(fx, "probe-id", fx.workspace)
+    _, sessions = _codex(fx)  # the fixture sets RESUME_DISABLE_PROC_PROBE=1
+    return expect(
+        not marker.exists()
+        and {s["activity"] for s in sessions.values()} == {"Unknown"},
+        f"lsof ran: {marker.exists()}; activities "
+        f"{ {s['activity'] for s in sessions.values()} }",
+    )
+
+
+@check("codex-active-detection")
+def _(fx, ctx):
+    """The probe is one fixed-argv lsof run whose malformed records are
+    isolated per PID. With the guard cleared, a replaying fake lsof must be
+    executed exactly once however many sessions are queried."""
+    base = len(_codex(fx)[1])  # the shared fixture already ships one rollout
+    calls = fx.home / "lsof-calls"
+    lsof = fx.home / "bin/lsof"
+    lsof.write_text(f"#!/bin/sh\necho \"$*\" >>{calls}\n"
+                    f"printf 'p-not-a-pid\\nfbad\\np4242\\n'\nexit 0\n")
+    os.chmod(lsof, 0o755)
+    for i in range(6):
+        _rollout(fx, f"probe-{i}", fx.workspace)
+    result, sessions = _codex(
+        fx, env=fx.env(RESUME_DISABLE_PROC_PROBE=None))
+    ran = calls.read_text().splitlines() if calls.is_file() else []
+    return expect(
+        len(ran) == 1 and len(sessions) == base + 6 and result.returncode == 0,
+        f"lsof ran {len(ran)} time(s) for {len(sessions)} sessions "
+        f"(want 1 probe, {base + 6} sessions), exit {result.returncode}",
+    )
+
+
+@check("codex-discovery-parallel-scan", "codex-parallel-scan-bounded")
+def _(fx, ctx):
+    """Output must not depend on whether the parallel path was taken, so the
+    check compares a corpus above PARALLEL_THRESHOLD against one below it."""
+    order = lambda result: [s["id"] for s in json.loads(result.stdout)["sessions"]
+                            if s["agent"] == "codex"]
+    base = len(_codex(fx)[1])  # the shared fixture already ships one rollout
+    for i in range(40):
+        _rollout(fx, f"many-{i:02d}", fx.workspace, day=f"2026/03/{i % 28 + 1:02d}")
+    first, many = _codex(fx)
+    small = Fixture(ctx["root"], ctx["binary"])
+    try:
+        small_base = len(_codex(small)[1])
+        for i in range(3):
+            _rollout(small, f"few-{i}", small.workspace)
+        _, few = _codex(small)
+    finally:
+        shutil.rmtree(small.home, ignore_errors=True)
+    # Re-run the parallel corpus: worker scheduling must not reorder output.
+    (fx.home / "xdg/cache/resume/codex-discovery-v1.json").unlink(missing_ok=True)
+    again, _ = _codex(fx)
+    return expect(
+        len(many) == base + 40 and len(few) == small_base + 3
+        and order(first) == order(again) and order(first),
+        f"parallel corpus yielded {len(many)} of {base + 40}, sequential "
+        f"{len(few)} of {small_base + 3}, and the order was "
+        f"{'reproducible' if order(first) == order(again) else 'not reproducible'}",
+    )
+
+
+def _cache_file(fx):
+    path = fx.home / "xdg/cache/resume/codex-discovery-v1.json"
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+@check("codex-cache-location")
+def _(fx, ctx):
+    _rollout(fx, "cached-id", fx.workspace)
+    fx.run("--json", "-a", "codex")
+    stray = list((fx.home / ".cache").rglob("codex-discovery-v1.json")) \
+        if (fx.home / ".cache").is_dir() else []
+    return expect(
+        _cache_file(fx) is not None and not stray,
+        f"cache under XDG_CACHE_HOME: {_cache_file(fx) is not None}; "
+        f"stray copies under HOME: {stray}",
+    )
+
+
+@check("codex-discovery-cache", "codex-cache-hit-skips-parse")
+def _(fx, ctx):
+    for i in range(20):
+        _rollout(fx, f"warm-{i:02d}", fx.workspace)
+    cold = fx.run("--json", "-a", "codex")
+    entries = len((_cache_file(fx) or {}).get("entries", {}))
+    rollouts = len(list((fx.home / ".codex").rglob("rollout-*.jsonl")))
+    warm = fx.run("--json", "-a", "codex")
+    # Content change must invalidate the entry, not the (unchanged) mtime.
+    path = fx.home / ".codex/sessions/2026/01/01/rollout-warm-00.jsonl"
+    records = [json.loads(l) for l in path.read_text().splitlines()]
+    records[1]["payload"]["message"]["content"] = "edited after caching"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    edited = json.loads(fx.run("--json", "-a", "codex").stdout)
+    title = next(s["title"] for s in edited["sessions"] if s["id"] == "warm-00")
+    (fx.home / "xdg/cache/resume/codex-discovery-v1.json").unlink()
+    fresh = fx.run("--json", "-a", "codex")
+    return expect(
+        cold.stdout == warm.stdout and entries == rollouts
+        and title == "edited after caching"
+        and json.loads(fresh.stdout)["sessions"] == edited["sessions"],
+        f"cold==warm: {cold.stdout == warm.stdout}; entries {entries} "
+        f"(want {rollouts}, one per rollout on disk); "
+        f"edited title {title!r}; cache-less run matched: "
+        f"{json.loads(fresh.stdout)['sessions'] == edited['sessions']}",
+    )
+
+
+@check("codex-cache-degrades-silently")
+def _(fx, ctx):
+    _rollout(fx, "degrade-id", fx.workspace)
+    cold = fx.run("--json", "-a", "codex")
+    path = fx.home / "xdg/cache/resume/codex-discovery-v1.json"
+    problems = []
+    for label, content in (("truncated", ""), ("garbage", "}{ not json"),
+                           ("wrong version", json.dumps(
+                               {"version": 9999, "entries": {}}))):
+        path.write_text(content)
+        again = fx.run("--json", "-a", "codex")
+        # Compared against the cold run, not against empty: the fixture always
+        # emits git_scope_discovery_failed, which is unrelated to the cache.
+        if (again.stdout, again.stderr, again.returncode) \
+                != (cold.stdout, cold.stderr, cold.returncode):
+            problems.append(f"{label}: exit {again.returncode}, "
+                            f"stderr {again.stderr[:120]!r}")
+    return expect(not problems, "; ".join(problems))
+
+
+@check("codex-cache-prunes-orphans")
+def _(fx, ctx):
+    kept = _rollout(fx, "kept-id", fx.workspace)
+    doomed = _rollout(fx, "doomed-id", fx.workspace)
+    fx.run("--json", "-a", "codex")
+    before = set((_cache_file(fx) or {}).get("entries", {}))
+    doomed.unlink()
+    fx.run("--json", "-a", "codex")
+    after = set((_cache_file(fx) or {}).get("entries", {}))
+    return expect(
+        any(str(doomed) in k for k in before)
+        and not any(str(doomed) in k for k in after)
+        and any(str(kept) in k for k in after),
+        f"orphan pruning: before {len(before)} entries, after {len(after)}; "
+        f"deleted rollout still present: "
+        f"{[k for k in after if str(doomed) in k]}",
+    )
+
+
+@check("codex-cache-keeps-other-roots")
+def _(fx, ctx):
+    _rollout(fx, "root-a-id", fx.workspace, root="codex-a")
+    _rollout(fx, "root-b-id", fx.workspace, root="codex-b")
+    a = fx.env(CODEX_HOME=str(fx.home / "codex-a"))
+    b = fx.env(CODEX_HOME=str(fx.home / "codex-b"))
+    fx.run_env("--json", "-a", "codex", env=a)
+    fx.run_env("--json", "-a", "codex", env=b)
+    entries = set((_cache_file(fx) or {}).get("entries", {}))
+    return expect(
+        any("codex-a" in k for k in entries) and any("codex-b" in k for k in entries),
+        f"scanning root B pruned root A's entries: {sorted(entries)}",
+    )
+
+
+@check("codex-scope-gated-not-cached")
+def _(fx, ctx):
+    deep = fx.workspace / "deep"
+    deep.mkdir()
+    _rollout(fx, "deep-id", deep)
+    narrow, _ = _codex(fx)
+    broad, wide = _codex(fx, "-D", "all")
+    return expect(
+        "deep-id" not in json.loads(narrow.stdout).get("sessions", [{}])[0].get("id", "")
+        and "deep-id" in wide,
+        f"a scope-gated rejection was cached as 'no session': the broader "
+        f"run found {set(wide)}",
+    )
+
+
+def _sqlite_binary(ctx):
+    """Build (once) a binary with the optional codex-sqlite feature. The
+    default binary deliberately has no SQLite linked, so the enrichment rows
+    cannot be checked with it."""
+    if "sqlite_binary" in ctx:
+        return ctx["sqlite_binary"]
+    target = ctx["root"] / "target/qa-codex-sqlite"
+    build = subprocess.run(
+        ["cargo", "build", "--locked", "--features", "codex-sqlite",
+         "--target-dir", str(target)],
+        cwd=ctx["root"], capture_output=True, text=True)
+    ctx["sqlite_binary"] = (target / "debug/resume") if build.returncode == 0 else None
+    ctx["sqlite_build"] = build.stderr[-400:]
+    return ctx["sqlite_binary"]
+
+
+def _state_db(fx, rows, name="state_5.sqlite", root=".codex", with_path=False):
+    """A Codex state DB holding the columns the enrichment query reads.
+
+    `with_path` adds `path` (one of the rollout-path column names
+    sqlite.rs detect_schema recognises); rows then carry a trailing rollout
+    path. It matters for the precedence rows: sqlite.rs match_row only reaches
+    the cwd-disagreement check through a path match, because an id match whose
+    cwd disagrees is rejected outright as an id collision."""
+    path = fx.home / root / name
+    script = [
+        "create table session (id text primary key, cwd text, title text,"
+        " updated_at integer, archived integer"
+        + (", path text" if with_path else "") + ");"]
+    for row in rows:
+        script.append(
+            "insert into session values ("
+            + ", ".join("null" if v is None else
+                        (str(v) if isinstance(v, int) else f"'{v}'")
+                        for v in row) + ");")
+    subprocess.run(["sqlite3", str(path)], input="\n".join(script),
+                   text=True, check=True, capture_output=True)
+    return path
+
+
+@check("codex-sqlite-enrichment-off-by-default")
+def _(fx, ctx):
+    tree = subprocess.run(["cargo", "tree", "--locked", "-e", "normal",
+                           "--prefix", "none"],
+                          cwd=ctx["root"], capture_output=True, text=True)
+    linked = subprocess.run(["otool", "-L", str(ctx["binary"])],
+                            capture_output=True, text=True)
+    return expect(
+        "rusqlite" not in tree.stdout and "sqlite" not in linked.stdout.lower(),
+        f"a default build links SQLite: cargo tree mentions rusqlite "
+        f"{'rusqlite' in tree.stdout}; otool lines "
+        f"{[l.strip() for l in linked.stdout.splitlines() if 'sqlite' in l.lower()]}",
+    )
+
+
+@check("codex-sqlite-readonly-open")
+def _(fx, ctx):
+    if _sqlite_binary(ctx) is None:
+        return f"the codex-sqlite build failed: {ctx['sqlite_build']}"
+    result = subprocess.run(
+        ["cargo", "test", "--locked", "--features", "codex-sqlite", "--lib",
+         "--quiet", "--", "integration::codex::sqlite::tests"],
+        cwd=ctx["root"], capture_output=True, text=True)
+    return expect(
+        result.returncode == 0 and "0 passed" not in result.stdout,
+        f"the assert_readonly-backed suite did not pass: "
+        f"{(result.stdout + result.stderr)[-400:]}",
+    )
+
+
+@check("codex-sqlite-db-absent-degrades-silently")
+def _(fx, ctx):
+    binary = _sqlite_binary(ctx)
+    if binary is None:
+        return f"the codex-sqlite build failed: {ctx['sqlite_build']}"
+    _rollout(fx, "no-db-id", fx.workspace)
+    plain = fx.run("--json", "--verbose", "-a", "codex")
+    with_feature = subprocess.run(
+        [str(binary), "--json", "--verbose", "-a", "codex"],
+        capture_output=True, text=True, env=fx.env(), cwd=str(fx.workspace))
+    return expect(
+        (with_feature.stdout, with_feature.stderr, with_feature.returncode)
+        == (plain.stdout, plain.stderr, plain.returncode),
+        f"an absent state DB changed the output: exit {with_feature.returncode} "
+        f"vs {plain.returncode}; stderr {with_feature.stderr[:200]!r} vs "
+        f"{plain.stderr[:200]!r}",
+    )
+
+
+@check("codex-sqlite-db-corrupt-degrades-silently")
+def _(fx, ctx):
+    binary = _sqlite_binary(ctx)
+    if binary is None:
+        return f"the codex-sqlite build failed: {ctx['sqlite_build']}"
+    _rollout(fx, "corrupt-db-id", fx.workspace)
+    plain = fx.run("--json", "-a", "codex")
+    (fx.home / ".codex/state_5.sqlite").write_bytes(b"definitely not a database\n")
+    degraded = subprocess.run(
+        [str(binary), "--json", "--verbose", "-a", "codex"],
+        capture_output=True, text=True, env=fx.env(), cwd=str(fx.workspace))
+    return expect(
+        degraded.returncode == 0
+        and json.loads(degraded.stdout)["sessions"]
+        == json.loads(plain.stdout)["sessions"],
+        f"a corrupt state DB did not degrade to the JSONL result: exit "
+        f"{degraded.returncode}, stderr {degraded.stderr[:200]!r}",
+    )
+
+
+@check("codex-sqlite-enrichment-title-activity")
+def _(fx, ctx):
+    binary = _sqlite_binary(ctx)
+    if binary is None:
+        return f"the codex-sqlite build failed: {ctx['sqlite_build']}"
+    # One rollout with a derivable title, one with none at all.
+    _rollout(fx, "has-title-id", fx.workspace, title="from the transcript")
+    silent = fx.home / ".codex/sessions/2026/01/01/rollout-silent-id.jsonl"
+    silent.write_text(json.dumps({"type": "session_meta", "payload": {
+        "id": "silent-id", "cwd": str(fx.workspace),
+        "timestamp": "2026-01-01T00:00:00Z"}}) + "\n")
+    _state_db(fx, [("has-title-id", str(fx.workspace), "db title", 1700000000, 0),
+                   ("silent-id", str(fx.workspace), "db title only", 1700000000, 0)])
+    _, sessions = _codex(fx, binary=binary)
+    return expect(
+        sessions.get("has-title-id", {}).get("title") == "from the transcript"
+        and sessions.get("silent-id", {}).get("title") == "db title only",
+        f"enrichment is fallback-only: got "
+        f"{ {k: v.get('title') for k, v in sessions.items()} }",
+    )
+
+
+@check("codex-sqlite-precedence-conflict-diagnostic")
+def _(fx, ctx):
+    binary = _sqlite_binary(ctx)
+    if binary is None:
+        return f"the codex-sqlite build failed: {ctx['sqlite_build']}"
+    elsewhere = fx.home / "sqlite-decoy"
+    elsewhere.mkdir()
+    silent = fx.home / ".codex/sessions/2026/01/01/rollout-conflict-id.jsonl"
+    silent.parent.mkdir(parents=True, exist_ok=True)
+    silent.write_text(json.dumps({"type": "session_meta", "payload": {
+        "id": "conflict-id", "cwd": str(fx.workspace),
+        "timestamp": "2026-01-01T00:00:00Z"}}) + "\n")
+    _state_db(fx, [("conflict-id", str(elsewhere), "db title", 1700000000, 0,
+                    str(silent))], with_path=True)
+    result, sessions = _codex(fx, "--verbose", binary=binary)
+    found = sessions.get("conflict-id", {})
+    return expect(
+        os.path.realpath(found.get("workspace", "")) == os.path.realpath(fx.workspace)
+        and found.get("title") != "db title"
+        and "codex_sqlite_workspace_mismatch" in (result.stdout + result.stderr),
+        f"session {found}; a cwd disagreement must leave the JSONL identity "
+        f"untouched and report codex_sqlite_workspace_mismatch; stderr "
+        f"{result.stderr[:250]!r}",
+    )
+
+
+@check("codex-active-resume-risk", "codex-resume-spec-exact",
+       "codex-resume-env-preservation-provenance-based")
+def _(fx, ctx):
+    return "SKIPPED: requires a resume handoff; PTY harness"
+
+
+@check("codex-background-discovery", "codex-sole-agent-synchronous",
+       "codex-results-merge-on-navigation", "codex-progress-after-picker")
+def _(fx, ctx):
+    return "SKIPPED: requires the picker; PTY harness"
+
+
 # --------------------------------------------------------------------- omp
 def _omp(fx, root, key, name, records):
     """One OMP transcript under a grouped workspace-key directory."""
