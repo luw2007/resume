@@ -37,12 +37,12 @@ A **Workspace** is the directory recorded by an agent for a Session. A **Scope**
 
 ### Default Scope
 
-Inside Git, the default Scope includes Workspaces at any depth in the current repository's main and linked worktrees. A distinct nested repository is excluded.
+Inside Git, the default Scope includes Workspaces at any depth in the current worktree. Use `--all-worktrees` to include linked worktrees too. A distinct nested repository is excluded.
 
 ```text
 /repo                 included
 /repo/services/api    included
-/linked-worktree      included
+/linked-worktree      included only with --all-worktrees
 /repo/vendor/other    excluded when it is a distinct nested repository
 /unrelated            excluded
 ```

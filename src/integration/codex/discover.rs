@@ -82,7 +82,7 @@ pub fn discover(effective_root: &Path, bounds: &Bounds) -> Vec<DiscoveredSession
 }
 
 /// An early per-file Workspace gate: receives `session_meta.payload.cwd`
-/// resolved through the same `canonicalize_workspace` rule as the full parse
+/// resolved through the same `resolve_workspace_cwd` rule as the full parse
 /// (so it sees exactly the value the post-parse filter would see as
 /// `parsed.cwd`) and returns whether the rollout could be in Scope. `None`
 /// disables the gate (every file is fully parsed).
@@ -529,11 +529,11 @@ pub fn parse_rollout_file_gated(
                 .and_then(Value::as_object)
                 .and_then(|payload| payload.get("cwd"))
                 .and_then(Value::as_str)
-            // Resolve exactly as the full parse does (`canonicalize_workspace`):
+            // Resolve exactly as the full parse does (`resolve_workspace_cwd`):
             // a relative/unresolvable cwd becomes `parsed.cwd == None` there,
             // which the post-parse filter keeps unconditionally -- so the gate
             // must not reject it either.
-            && let Some(resolved) = canonicalize_workspace(Path::new(cwd))
+            && let Some(resolved) = resolve_workspace_cwd(Path::new(cwd))
             && !gate(&resolved)
         {
             return Ok(None);
@@ -624,7 +624,7 @@ pub(crate) fn parse_rollout_records(
         .get("cwd")
         .and_then(Value::as_str)
         .map(PathBuf::from);
-    let cwd = cwd.as_deref().and_then(canonicalize_workspace);
+    let cwd = cwd.as_deref().and_then(resolve_workspace_cwd);
 
     let user_messages = extract_user_messages(&read.records);
     let import = extract_import(&read.records);
@@ -758,20 +758,20 @@ fn native_locator(id: &str, rollout_path: &Path) -> OsString {
     locator
 }
 
-/// Canonicalize a recorded workspace if it exists; otherwise drop it to avoid
-/// building a false Workspace from a directory that moved. The Session becomes
-/// Unavailable rather than resuming into a wrong directory.
-fn canonicalize_workspace(cwd: &Path) -> Option<PathBuf> {
-    // Preserve the recorded path verbatim if it does not canonicalize (a
-    // missing workspace is surfaced via WorkspaceEvidence, not dropped). We
-    // only canonicalize for identity stability when it exists.
-    cwd.canonicalize().ok().or_else(|| {
-        if cwd.is_absolute() {
-            Some(cwd.to_path_buf())
-        } else {
-            None
-        }
-    })
+/// Recorded Workspace resolution: an absolute `cwd` is kept exactly as
+/// Codex wrote it, matching every other integration's WorkspaceEvidence
+/// contract (Claude/Pi/OMP never resolve symlinks in the stored workspace
+/// either -- canonical resolution for Scope membership and Directory
+/// Distance is `scope::canonical_workspace`'s job, not identity/display).
+/// A relative `cwd` cannot be a valid recorded Workspace and is dropped so
+/// the Session surfaces without one (`WorkspaceEvidence::Unknown`), rather
+/// than resolving it against this process's unrelated working directory.
+fn resolve_workspace_cwd(cwd: &Path) -> Option<PathBuf> {
+    if cwd.is_absolute() {
+        Some(cwd.to_path_buf())
+    } else {
+        None
+    }
 }
 
 /// Derive a display title from a parsed session. Codex rollouts do not embed
@@ -990,7 +990,9 @@ fn fingerprint(msg: &UserMessage) -> String {
 /// only a coarse source-kind badge; the origin path/remote is never surfaced.
 fn extract_import(records: &[Value]) -> Option<ImportMeta> {
     for record in records {
-        let payload = record.get("payload")?;
+        let Some(payload) = record.get("payload") else {
+            continue;
+        };
         if let Some(import) = payload
             .get("foreign_session_import")
             .and_then(Value::as_object)
