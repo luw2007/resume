@@ -17,14 +17,20 @@ Usage:
 Without --write it reports only. With --write it records status and
 error_notes back into the inventory.
 """
+import fcntl
 import json
 import os
 import pathlib
 import re
+import select
 import shutil
+import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 from collections import Counter
 
 CHECKS = {}
@@ -94,6 +100,109 @@ class Fixture:
 
 def expect(condition, message):
     return None if condition else message
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[]P][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[()][0-9A-B]|\x1b[=><]")
+
+
+class PtyTimeout(Exception):
+    """A pattern never appeared, or the binary never exited, in time."""
+
+
+class Pty:
+    """The real binary on a controlling terminal.
+
+    A pseudoterminal is the only way to reach the code paths that read
+    `/dev/tty` directly (first-run setup) or take over the screen (the
+    picker), so those rows cannot be checked through a pipe.
+    """
+
+    def __init__(self, fx, *args, env=None, cwd=None, rows=30, cols=120,
+                 term="xterm-256color"):
+        env = dict(fx.env() if env is None else env)
+        env["TERM"] = term
+        cwd = str(cwd or fx.workspace)
+        argv = [str(fx.binary), *args]
+        pid, fd = os.forkpty()
+        if pid == 0:
+            try:
+                os.chdir(cwd)
+                os.execve(argv[0], argv, env)
+            except BaseException:
+                os._exit(127)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        self.pid, self.fd, self.raw, self.status = pid, fd, "", None
+
+    @property
+    def screen(self):
+        """Output with escape sequences removed, for substring matching."""
+        return ANSI.sub("", self.raw).replace("\r\n", "\n")
+
+    def _drain(self, timeout):
+        ready, _, _ = select.select([self.fd], [], [], timeout)
+        if not ready:
+            return False
+        try:
+            chunk = os.read(self.fd, 65536)
+        except OSError:  # the child exited and closed the slave side
+            return None
+        if not chunk:
+            return None
+        self.raw += chunk.decode("utf-8", "replace")
+        return True
+
+    def expect(self, pattern, timeout=15):
+        """Read until `pattern` (regex) matches the accumulated screen."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if re.search(pattern, self.screen, re.MULTILINE):
+                return self.screen
+            if time.monotonic() > deadline:
+                raise PtyTimeout(f"never saw {pattern!r}; screen so far:\n"
+                                 f"{self.screen[-1500:]}")
+            if self._drain(min(0.2, max(0.0, deadline - time.monotonic()))) is None:
+                if re.search(pattern, self.screen, re.MULTILINE):
+                    return self.screen
+                raise PtyTimeout(f"exited before {pattern!r}; screen:\n"
+                                 f"{self.screen[-1500:]}")
+
+    def send(self, data, settle=0.35):
+        os.write(self.fd, data.encode() if isinstance(data, str) else data)
+        deadline = time.monotonic() + settle
+        while time.monotonic() < deadline:
+            if self._drain(deadline - time.monotonic()) is None:
+                break
+        return self
+
+    def wait(self, timeout=15):
+        """Drain to EOF and return the exit code (128+signal when killed)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._drain(min(0.2, deadline - time.monotonic())) is None:
+                break
+        else:
+            os.kill(self.pid, signal.SIGKILL)
+            raise PtyTimeout(f"did not exit within {timeout}s; screen:\n"
+                             f"{self.screen[-1500:]}")
+        _, status = os.waitpid(self.pid, 0)
+        self.status = (os.WEXITSTATUS(status) if os.WIFEXITED(status)
+                       else 128 + os.WTERMSIG(status))
+        return self.status
+
+    def close(self):
+        if self.status is None:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+            except OSError:
+                pass
+        os.close(self.fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 # --------------------------------------------------------------------- CLI
@@ -1598,6 +1707,412 @@ def _(fx, ctx):
        "claude-missing-workspace-blocks-resume-spec")
 def _(fx, ctx):
     return "SKIPPED: requires a resume handoff; PTY harness"
+
+
+# --------------------------------------------------------------------- omp
+def _omp(fx, root, key, name, records):
+    """One OMP transcript under a grouped workspace-key directory."""
+    d = fx.home / root / key
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records))
+    return d / f"{name}.jsonl"
+
+
+def _omp_header(session_id, cwd, title=None, timestamp=1700000000):
+    header = {"type": "session", "version": 3, "id": session_id,
+              "timestamp": timestamp, "cwd": str(cwd)}
+    if title is not None:
+        header["title"] = title
+    return header
+
+
+def _omp_key(fx, workspace):
+    """OMP's encoded, home-relative grouping directory name."""
+    rel = os.path.relpath(str(workspace), str(fx.home))
+    return "-" + re.sub(r"[^A-Za-z0-9]", "-", rel)
+
+
+def _omp_ids(fx, *args, env=None):
+    result = fx.run_env("--json", "-a", "omp", *args, env=env)
+    payload = json.loads(result.stdout) if result.stdout.strip() else {"sessions": []}
+    return result, {s["id"]: s for s in payload["sessions"] if s["agent"] == "omp"}
+
+
+@check("omp-base-root-resolution")
+def _(fx, ctx):
+    custom = fx.home / "custom-omp"
+    _omp(fx, "custom-omp/agent", _omp_key(fx, fx.workspace), "base",
+         [_omp_header("custom-config-id", fx.workspace, "custom config root")])
+    # PI_CODING_AGENT_DIR would win for the default profile, so clear it to
+    # observe the config root alone.
+    _, sessions = _omp_ids(fx, env=fx.env(PI_CONFIG_DIR=str(custom),
+                                          PI_CODING_AGENT_DIR=None,
+                                          XDG_DATA_HOME=None))
+    return expect(
+        set(sessions) == {"custom-config-id"},
+        f"PI_CONFIG_DIR was not used as the OMP config root: {set(sessions)}",
+    )
+
+
+@check("omp-profile-selection-precedence")
+def _(fx, ctx):
+    """`discover_omp` force-resolves the unprofiled Default and enumerates
+    every `profiles/<name>` directory regardless of which profile the env
+    selected, so the discovered set is identical either way and the
+    precedence order itself is only observable in `select_profile`."""
+    flag = fx.run("--json", "-a", "omp", "--profile", "x")
+    for profile in ("work", "personal"):
+        _omp(fx, f".omp/profiles/{profile}/agent", _omp_key(fx, fx.workspace),
+             profile, [_omp_header(f"{profile}-id", fx.workspace, profile)])
+    _, both = _omp_ids(fx, env=fx.env(OMP_PROFILE="work", PI_PROFILE="personal"))
+    _, neither = _omp_ids(fx)
+    designated = _cargo_tests(ctx, *[
+        f"integration::omp::tests::roots::{n}" for n in (
+            "profile_flag_beats_omp_and_pi_profile_env",
+            "omp_profile_beats_pi_profile",
+            "pi_profile_selected_when_no_omp_profile_or_flag",
+        )])
+    return designated or expect(
+        flag.returncode == 2 and set(both) == set(neither)
+        and {"work-id", "personal-id"} <= set(both),
+        f"--profile exit {flag.returncode} (want 2, no such argument exists); "
+        f"with env {set(both)} vs without {set(neither)} — every profile is "
+        f"discovered either way",
+    )
+
+
+@check("omp-all-profiles-discovered")
+def _(fx, ctx):
+    key = _omp_key(fx, fx.workspace)
+    _omp(fx, ".omp/agent", key, "default",
+         [_omp_header("default-profile-id", fx.workspace, "default")])
+    for profile in ("work", "personal"):
+        _omp(fx, f".omp/profiles/{profile}/agent", key, profile,
+             [_omp_header(f"{profile}-id", fx.workspace, profile)])
+    # PI_CODING_AGENT_DIR would redirect the default profile at Pi's root.
+    env = fx.env(PI_CODING_AGENT_DIR=None, XDG_DATA_HOME=None)
+    result, sessions = _omp_ids(fx, env=env)
+    listing = fx.run_env("--list", "-a", "omp", env=env).stdout
+    want = {"default-profile-id", "work-id", "personal-id"}
+    profiles = re.findall(r"omp\[([a-z]+)\]", listing)
+    return expect(
+        want <= set(sessions) and {"work", "personal"} <= set(profiles),
+        f"discovered {set(sessions)} (want {want}); "
+        f"profile tags in --list: {sorted(set(profiles))}",
+    )
+
+
+@check("omp-named-profile-ignores-pi-coding-agent-dir")
+def _(fx, ctx):
+    _omp(fx, ".omp/profiles/work/agent", _omp_key(fx, fx.workspace), "work",
+         [_omp_header("work-id", fx.workspace, "work profile")])
+    # The fixture's PI_CODING_AGENT_DIR points at Pi's root, which holds no
+    # OMP fixture of its own; only the Default profile may read from it.
+    _, sessions = _omp_ids(fx, env=fx.env(OMP_PROFILE="work"))
+    work = sessions.get("work-id", {})
+    borrowed = [i for i, s in sessions.items() if s.get("profile") == "work"]
+    return expect(
+        work.get("profile") == "work" and borrowed == ["work-id"],
+        f"the 'work' profile reported {work.get('profile')!r} and claimed "
+        f"{borrowed}; it must read only <config-root>/profiles/work/agent, "
+        f"never PI_CODING_AGENT_DIR",
+    )
+
+
+@check("omp-default-profile-agent-root-honors-pi-coding-agent-dir")
+def _(fx, ctx):
+    """The fixture deliberately sets PI_CODING_AGENT_DIR at Pi's root, so
+    unprofiled OMP must mirror the Pi fixture rather than read ~/.omp/agent."""
+    _, sessions = _omp_ids(fx)
+    _, payload = fx.json("-a", "pi")
+    pi = {s["id"]: s["title"] for s in payload["sessions"]}
+    return expect(
+        "pi-id" in sessions and "omp-id" not in sessions
+        and sessions["pi-id"]["title"] == pi["pi-id"],
+        f"unprofiled OMP reported {set(sessions)}; with PI_CODING_AGENT_DIR set "
+        f"it must read Pi's root, not <config-root>/agent",
+    )
+
+
+@check("omp-title-sidecar-before-header")
+def _(fx, ctx):
+    _omp(fx, ".pi/agent", _omp_key(fx, fx.workspace), "sidecar", [
+        {"type": "title", "v": 1, "title": "my title"},
+        _omp_header("sidecar-id", fx.workspace)])
+    _, sessions = _omp_ids(fx)
+    return expect(
+        sessions.get("sidecar-id", {}).get("title") == "my title",
+        f"a title sidecar preceding the header was lost: "
+        f"{sessions.get('sidecar-id')}",
+    )
+
+
+@check("omp-title-change-latest-wins")
+def _(fx, ctx):
+    _omp(fx, ".pi/agent", _omp_key(fx, fx.workspace), "renamed", [
+        _omp_header("renamed-id", fx.workspace, "original header title"),
+        {"type": "title_change", "title": "renamed later"},
+        {"type": "title_change", "title": "   "}])
+    _, sessions = _omp_ids(fx)
+    return expect(
+        sessions.get("renamed-id", {}).get("title") == "renamed later",
+        f"latest non-empty title did not win: {sessions.get('renamed-id')}",
+    )
+
+
+@check("omp-attribution-filters-injected-messages")
+def _(fx, ctx):
+    _omp(fx, ".pi/agent", _omp_key(fx, fx.workspace), "attributed", [
+        _omp_header("attributed-id", fx.workspace),
+        {"type": "message", "attribution": {"source": "agent"},
+         "message": {"role": "user", "content": "injected by the agent"}},
+        {"type": "message",
+         "message": {"role": "user", "content": "typed by the human"}}])
+    _, sessions = _omp_ids(fx)
+    title = sessions.get("attributed-id", {}).get("title") or ""
+    return expect(
+        "injected by the agent" not in title and "typed by the human" in title,
+        f"title is {title!r}; an agent-attributed message must not contribute",
+    )
+
+
+@check("omp-import-badge-safe")
+def _(fx, ctx):
+    origin = "0123456789abcdef-full-origin-identifier"
+    secret_cwd = "/private/import/source/path"
+    _omp(fx, ".pi/agent", _omp_key(fx, fx.workspace), "imported", [
+        _omp_header("imported-id", fx.workspace, "carried over"),
+        {"type": "custom", "foreign_session_import": {
+            "source_kind": "claude", "origin_id": origin,
+            "origin_cwd": secret_cwd}}])
+    _, sessions = _omp_ids(fx)
+    title = sessions.get("imported-id", {}).get("title") or ""
+    return expect(
+        "imported from claude" in title and "origin:01234567" in title
+        and origin not in title and secret_cwd not in title,
+        f"badge title is {title!r}; want the source kind and an 8-character id "
+        f"prefix only, never the full id or the origin cwd",
+    )
+
+
+@check("omp-header-cwd-scope-filtering")
+def _(fx, ctx):
+    """The grouping directory name is a prefilter; the header cwd decides."""
+    outside = fx.home / "outside-omp"
+    outside.mkdir()
+    key = _omp_key(fx, fx.workspace)
+    _omp(fx, ".pi/agent", key, "in-scope",
+         [_omp_header("omp-in-id", fx.workspace)])
+    # Same in-scope directory name, but a header cwd pointing elsewhere.
+    _omp(fx, ".pi/agent", key, "lying-key",
+         [_omp_header("omp-lying-id", outside)])
+    _, sessions = _omp_ids(fx)
+    return expect(
+        "omp-in-id" in sessions and "omp-lying-id" not in sessions,
+        f"scope followed the storage directory rather than the header cwd: "
+        f"{set(sessions)}",
+    )
+
+
+@check("omp-home-relative-prefilter")
+def _(fx, ctx):
+    outside = fx.home / "outside-omp"
+    outside.mkdir()
+    _omp(fx, ".pi/agent", _omp_key(fx, fx.workspace), "inside",
+         [_omp_header("omp-inside-id", fx.workspace)])
+    _omp(fx, ".pi/agent", _omp_key(fx, outside), "outside",
+         [_omp_header("omp-outside-id", outside)])
+    _, sessions = _omp_ids(fx)
+    return expect(
+        "omp-inside-id" in sessions and "omp-outside-id" not in sessions,
+        f"the encoded-directory prefilter kept out-of-scope workspaces: "
+        f"{set(sessions)}",
+    )
+
+
+@check("omp-hidden-dot-workspace")
+def _(fx, ctx):
+    hidden = fx.home / ".hidden/project"
+    hidden.mkdir(parents=True)
+    _omp(fx, ".pi/agent", _omp_key(fx, hidden), "hidden",
+         [_omp_header("hidden-id", hidden)])
+    result, sessions = _omp_ids(fx, env=None)
+    from_hidden = fx.run_env("--json", "-a", "omp", cwd=hidden)
+    ids = {s["id"] for s in json.loads(from_hidden.stdout)["sessions"]}
+    return expect(
+        "hidden-id" in ids,
+        f"a workspace under a hidden dot directory was pruned by the "
+        f"lossy-key prefilter: {ids}",
+    )
+
+
+def _cargo_tests(ctx, *names):
+    """Run named library tests. Rows whose how_to_test designates a Rust
+    regression test are verified by running exactly that test."""
+    failed = []
+    for name in names:
+        result = subprocess.run(
+            ["cargo", "test", "--all-features", "--lib", "--quiet", "--",
+             "--exact", name],
+            cwd=ctx["root"], capture_output=True, text=True)
+        if result.returncode != 0 or "1 passed" not in result.stdout:
+            failed.append(f"{name}: {result.stdout.strip()[-300:]}")
+    return expect(not failed, "designated regression test(s) did not pass: "
+                              + " || ".join(failed))
+
+
+@check("omp-activity-triple-correlation", "omp-active-staleness-gate-m3-fix")
+def _(fx, ctx):
+    return _cargo_tests(
+        ctx,
+        "integration::omp::tests::activity::correlate_live_rejects_breadcrumb_older_than_recycled_tty_process",
+        "integration::omp::tests::activity::missing_process_start_time_uses_twelve_hour_freshness_fallback",
+        "integration::omp::tests::activity::correlate_live_requires_process_tty_breadcrumb_and_existing_transcript",
+        "integration::omp::tests::activity::activity_active_only_with_live_process_tty_and_matching_breadcrumb",
+    )
+
+
+@check("omp-breadcrumb-directory-xdg-state-resolution")
+def _(fx, ctx):
+    """XDG_STATE_HOME is only consulted when the path already exists, so the
+    binary must report Unknown either way; the resolution itself is only
+    observable through the designated unit tests."""
+    xdg = fx.home / "xdg/state/omp/terminal-sessions"
+    xdg.mkdir(parents=True)
+    _, sessions = _omp_ids(fx)
+    activities = {s["activity"] for s in sessions.values()}
+    designated = _cargo_tests(
+        ctx, *[f"integration::omp::tests::activity::{n}" for n in (
+            "breadcrumb_directory_uses_xdg_only_for_native_default_agent_roots",
+            "breadcrumb_directory_requires_exact_profile_xdg_path",
+        )])
+    return designated or expect(
+        activities <= {"Unknown"},
+        f"an empty breadcrumb directory produced {activities}",
+    )
+
+
+@check("omp-resume-spec-default-profile", "omp-resume-spec-named-profile",
+       "omp-resume-env-config-dir-propagated-only-when-overridden")
+def _(fx, ctx):
+    return "SKIPPED: requires a resume handoff; PTY harness"
+
+
+# ---------------------------------------------------------------- opencode
+@check("opencode-resume-exact-session", "opencode-resume-cwd-is-workspace")
+def _(fx, ctx):
+    return "SKIPPED: requires a resume handoff; PTY harness"
+
+
+# ------------------------------------------------------------------- setup
+SETUP_PROMPT = r"Selection \(for example 1,3; `all`; or `none`\): "
+
+
+def _settings(fx):
+    path = fx.home / ".resume/settings.json"
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def _first_run(fx):
+    """Return the fixture to its pre-setup state: no persisted selection."""
+    path = fx.home / ".resume/settings.json"
+    if path.is_file():
+        path.unlink()
+    return fx
+
+
+def _answer_setup(fx, answer, *args):
+    """Drive one setup dialogue to completion and return (exit code, screen)."""
+    _first_run(fx)
+    with Pty(fx, *(args or ("setup",))) as pty:
+        pty.expect(SETUP_PROMPT)
+        pty.send(f"{answer}\r")
+        return pty.wait(), pty.screen
+
+
+@check("setup-first-run-prompt")
+def _(fx, ctx):
+    """Bare `resume` takes the picker path, which prompts. `--list`/`--json`
+    deliberately refuse instead (setup-required-for-list-json)."""
+    _first_run(fx)
+    with Pty(fx) as pty:
+        screen = pty.expect(SETUP_PROMPT)
+        pty.send("none\r")
+        pty.wait()
+    numbered = re.findall(r"^\s*(\d+)\. (\S+)", screen, re.MULTILINE)
+    return expect(
+        [a for _, a in numbered] == ctx["agents"]
+        and [int(n) for n, _ in numbered] == list(range(1, len(ctx["agents"]) + 1))
+        and screen.index("Choose agents to scan:") < screen.index("Selection"),
+        f"numbered list {numbered} does not match SUPPORTED_AGENTS "
+        f"{ctx['agents']} in order, or did not precede the prompt",
+    )
+
+
+@check("setup-selection-numbers")
+def _(fx, ctx):
+    _answer_setup(fx, "2, 1, 2")
+    saved = _settings(fx)
+    want = [ctx["agents"][1], ctx["agents"][0]]
+    return expect(
+        saved and saved["agents"] == want,
+        f"`2, 1, 2` saved {saved and saved['agents']}; want {want} — "
+        f"whitespace ignored, repeats deduped, order preserved",
+    )
+
+
+@check("setup-selection-all-and-none")
+def _(fx, ctx):
+    _answer_setup(fx, "ALL")
+    every = _settings(fx)
+    code, _ = _answer_setup(fx, "None")
+    none = _settings(fx)
+    return expect(
+        every and every["agents"] == ctx["agents"]
+        and none is not None and none["agents"] == [] and code == 0,
+        f"`ALL` saved {every and every['agents']} (want {ctx['agents']}); "
+        f"`None` saved {none and none['agents']} (want []) with exit {code}",
+    )
+
+
+@check("setup-selection-rejects-invalid")
+def _(fx, ctx):
+    problems = []
+    for answer in ("", "x", "0", "99"):
+        code, screen = _answer_setup(fx, answer)
+        grammar = all(form in screen for form in
+                      ("comma-separated numbers", "`all`", "`none`"))
+        written = _settings(fx) is not None
+        if code == 0 or not grammar or written:
+            problems.append(f"{answer!r}: exit {code}, grammar named {grammar}, "
+                            f"settings written {written}")
+    return expect(not problems, "; ".join(problems))
+
+
+@check("setup-no-terminal-error")
+def _(fx, ctx):
+    """setsid detaches the controlling terminal, so /dev/tty cannot open."""
+    detach = (
+        "import os,sys\n"
+        "os.setsid()\n"                      # a new session has no /dev/tty
+        "out = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n"
+        "os.dup2(out, 1); os.dup2(out, 2)\n"
+        "os.dup2(os.open(os.devnull, os.O_RDONLY), 0)\n"
+        "os.execve(sys.argv[1], [sys.argv[1], 'setup'], os.environ)\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / "out"
+        result = subprocess.run(
+            [sys.executable, "-c", detach, str(fx.binary), str(out)],
+            capture_output=True, text=True, env=fx.env(),
+            cwd=str(fx.workspace), timeout=30)
+        text = out.read_text() if out.is_file() else result.stderr
+    return expect(
+        result.returncode != 0 and "no controlling terminal" in text
+        and "resume setup" in text and "interactive terminal" in text,
+        f"exit {result.returncode}, output {text[:250]!r}",
+    )
 
 
 # ------------------------------------------------------------------- scope
