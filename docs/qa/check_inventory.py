@@ -3,7 +3,9 @@
 
 The inventory's line-number citations rotted silently across 60 commits before
 this check existed, so drift is verified mechanically rather than by review:
-every `path:line (symbol)` anchor must still declare that symbol on that line.
+every `path:line (symbol)` anchor must still declare that symbol on that line,
+and every `§N Heading` spec reference must name a heading that really lives
+under that numbered section of docs/product-design.md.
 
 Usage:  python3 docs/qa/check_inventory.py [repo-root]
 Exit 0 when the inventory is internally consistent, 1 otherwise.
@@ -23,6 +25,8 @@ VALID_STATUS = {"Untested", "Pass", "Fail", "Blocked"}
 VALID_RETEST = {"", "N/A", "Pass", "Fail", "Blocked"}
 
 ANCHOR = re.compile(r'^(?P<path>[A-Za-z0-9_./-]+\.rs):(?P<line>\d+) \((?P<symbol>[^()]+)\)$')
+SPEC_REF = re.compile(r'^§(?P<number>\d+) (?P<heading>.+)$')
+HEADING = re.compile(r'^(?P<hashes>#{2,3}) (?:(?P<number>\d+)\. )?(?P<title>.+?)\s*$')
 DECL = re.compile(
     r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+|extern\s+"[^"]*"\s+)*'
     r'(?:fn|struct|enum|trait|type|mod|const|static)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)'
@@ -49,8 +53,41 @@ def check_anchor(root, ref):
     return None
 
 
+def spec_sections(root):
+    """Map every `## N. Title` / `### Subtitle` in the spec to its section number.
+
+    Returns {(number, title)} so a `§N Title` ref is only valid when that title
+    really lives under that numbered section.
+    """
+    text = (root / "docs/product-design.md").read_text(encoding="utf-8")
+    sections, current = set(), None
+    for line in text.splitlines():
+        m = HEADING.match(line)
+        if not m:
+            continue
+        if m["hashes"] == "##" and m["number"]:
+            current = m["number"]
+            sections.add((current, m["title"]))
+        elif m["hashes"] == "###" and current:
+            sections.add((current, m["title"]))
+    return sections
+
+
+def check_spec_ref(sections, ref):
+    """Return an error string, or None when the spec reference resolves."""
+    if ref == "-":
+        return None
+    m = SPEC_REF.match(ref)
+    if not m:
+        return f"malformed spec_ref {ref!r} (want '§N Heading' or '-')"
+    if (m["number"], m["heading"]) not in sections:
+        return f"spec_ref {ref!r} names no heading under section {m['number']}"
+    return None
+
+
 def main():
     root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    sections = spec_sections(root)
     path = root / "docs/qa/feature-inventory.csv"
     with path.open(newline="") as fh:
         reader = csv.DictReader(fh)
@@ -66,9 +103,16 @@ def main():
         if fid in seen:
             errors.append(f"{fid}: duplicate feature_id")
         seen.add(fid)
-        for col in ("feature_name", "user_story", "expected_behaviour", "how_to_test", "code_ref"):
+        for col in ("feature_name", "user_story", "expected_behaviour", "how_to_test",
+                    "spec_ref", "code_ref"):
             if not r[col].strip():
                 errors.append(f"{fid}: empty {col}")
+        for ref in (x.strip() for x in r["spec_ref"].split(";")):
+            if not ref:
+                continue
+            problem = check_spec_ref(sections, ref)
+            if problem:
+                errors.append(f"{fid}: {problem}")
         if r["status"] not in VALID_STATUS:
             errors.append(f"{fid}: status {r['status']!r} not in {sorted(VALID_STATUS)}")
         if r["retest_status"] not in VALID_RETEST:
