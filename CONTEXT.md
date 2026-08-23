@@ -22,7 +22,7 @@ A discovered Session whose recorded Workspace no longer exists. It may be listed
 _Avoid_: Broken session, stale session
 
 **Scope**:
-The set of Sessions considered for listing. In Git, the default Scope covers every Workspace belonging to the current repository, including all worktrees. Outside Git, the default Scope contains only the current directory. An explicit direction expands from the current real directory by Directory Distance and overrides the Git default; it never scans unrelated sibling subtrees. There is no machine-wide Scope.
+The set of Sessions considered for listing. In Git, the default Scope covers every Workspace at any depth in the current worktree; `--all-worktrees` also includes linked worktrees. Outside Git, the default Scope contains only the current directory. An explicit direction expands from the current real directory by Directory Distance and overrides the Git default; it never scans unrelated sibling subtrees. There is no machine-wide Scope.
 _Avoid_: Search range, project filter
 
 **Directory Distance**:

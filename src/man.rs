@@ -18,9 +18,10 @@ SYNOPSIS
 
 DESCRIPTION
     `resume` scans the local on-disk stores of the coding agents you use --
-    Codex, Claude Code, Pi, and OMP -- collects the Sessions that belong to
-    the directory you are standing in, and hands the one you pick back to
-    its own agent using that agent's native resume invocation.
+    Codex, Claude Code, Pi, OMP, and (when built with its optional SQLite
+    feature) OpenCode -- collects the Sessions that belong to the directory
+    you are standing in, and hands the one you pick back to its own agent
+    using that agent's native resume invocation.
 
     Discovery is read-only. `resume` never copies, rewrites, indexes,
     uploads, repairs, migrates, merges, or deletes a Session. It never kills,
@@ -65,7 +66,8 @@ OPTIONS
         working directory. The path is canonicalised before scope is
         computed, so symlinks resolve to their targets and a Session
         recorded under a different spelling of the same directory still
-        matches. A nonexistent or unreadable path is a usage error, exit 2.
+        matches. A nonexistent, unreadable, or non-directory path is a usage
+        error, exit 2.
 
     -U, --up <N|all>
         Widen the scope upward, toward the filesystem root, by at most N
@@ -96,8 +98,11 @@ OPTIONS
     -a, --agent <AGENT>
         Restrict discovery to one agent. Repeatable: `-a codex -a claude`
         scans exactly those two. Names are case-insensitive. Valid names are
-        `codex`, `claude`, `pi`, and `omp`; anything else is a usage error,
-        exit 2.
+        `codex`, `claude`, `pi`, `omp`, and `opencode`; anything else is a
+        usage error, exit 2.
+        `opencode` requires a binary built with `--features opencode`; in a
+        default build it reports an unavailable-root diagnostic and yields no
+        Sessions.
 
         If any --agent occurs, the command-line list COMPLETELY REPLACES the
         configured `agents` list rather than appending to it. This mirrors
@@ -157,9 +162,9 @@ OPTIONS
         Read this configuration file instead of the discovered one.
 
         Discovery order without --config: $XDG_CONFIG_HOME/resume/config.toml
-        when XDG_CONFIG_HOME is set, otherwise $HOME/.config/resume/
-        config.toml. If neither exists, built-in defaults are used and no
-        error is reported.
+        when that file exists, then $HOME/.config/resume/config.toml when
+        that file exists. If neither exists, built-in defaults are used and
+        no error is reported.
 
         Configuration files are NEVER merged. Exactly one file is selected,
         so exactly one file can ever be at fault. A read failure or a parse
@@ -168,16 +173,17 @@ OPTIONS
 
         Supported keys, all optional:
 
-            agents           list of strings, default
-                             ["codex", "claude", "pi", "omp"]
+            agents           list of strings; the config example starts
+                             with ["codex", "claude", "pi", "omp"]
+                             Add "opencode" when the binary was built with
+                             `--features opencode`.
             since            string, same grammar as --since, default "all"
             confirm_always   boolean, default false
             preview          "hidden" | "visible", default "hidden"
             preview_position "auto" | "right" | "bottom", default "auto"
             verbose          boolean, default false
 
-        Run `resume config example` for a ready-to-edit file with every key
-        set to its default.
+        Run `resume config example` for a ready-to-edit file with every key.
 
     --confirm-always
         Ask for confirmation before every Resume, including ordinary ready
@@ -624,10 +630,7 @@ CAVEATS
         - Continuous watching or refresh.
         - Persistent transcript or full-text index.
         - External pager or editor.
-        - Custom Skim fork or direct Ratatui UI.
-        - Automatic agent install, process termination, terminal takeover,
-          or Resume fallback to "latest".
-        - Cursor, OpenCode, Grok, and Gemini in v0.1.0.
+        - Cursor, Grok, and Gemini in v0.1.0.
 
     v0.1.0 specifics.
 

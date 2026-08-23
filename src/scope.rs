@@ -292,7 +292,15 @@ fn key_is_prefix(prefix: &str, key: &str) -> bool {
 }
 
 pub fn canonical_base(path: &Path) -> io::Result<PathBuf> {
-    path.canonicalize()
+    let canonical = path.canonicalize()?;
+    if canonical.is_dir() {
+        Ok(canonical)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("base path {} is not a directory", path.display()),
+        ))
+    }
 }
 
 pub fn canonical_workspace(path: &Path) -> Option<PathBuf> {
@@ -365,7 +373,7 @@ pub struct GitScopeEvidence {
 ///
 /// When `all_worktrees` is `true` (`--all-worktrees`), a second `git
 /// worktree list --porcelain` call additionally enumerates every linked
-/// worktree, matching the pre-existing default-Scope behavior.
+/// worktree.
 pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitScopeEvidence> {
     let common_output = Command::new("git")
         .args([
@@ -700,6 +708,16 @@ mod tests {
             );
         }
         assert!(canonical_workspace(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn canonical_base_rejects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, "contents").unwrap();
+        let error = canonical_base(&file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a directory"));
     }
 
     #[test]

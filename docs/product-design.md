@@ -48,6 +48,8 @@ Only Supported Sessions can Resume. A “continue latest” command cannot subst
 
 By default, load every implemented integration, including integrations whose native CLI is unavailable. A missing data root returns quickly. Planned but unimplemented integrations are not scanned. `--agent` narrows this set.
 
+OpenCode is optional and requires a binary built with `--features opencode`; a default build recognizes its name but reports it unavailable rather than reading its SQLite store.
+
 ### Support order
 
 First batch, all required for v0.1.0:
@@ -57,10 +59,13 @@ First batch, all required for v0.1.0:
 3. Pi
 4. OMP / Oh My Pi
 
-Second batch:
+Optional SQLite-backed integration:
+
+- OpenCode, enabled by the `opencode` Cargo feature
+
+Later candidates:
 
 - Cursor Agent
-- OpenCode
 - Grok
 - Gemini after stable-ID Resume research
 
@@ -493,10 +498,8 @@ Resolution, first match only:
 
 CLI overrides config. No project-level config and no merge of multiple files.
 
-Supported TOML fields:
-
 ```toml
-agents = ["codex", "claude", "pi", "omp"]
+agents = ["codex", "claude", "pi", "omp"] # add "opencode" when built with --features opencode
 since = "all"
 confirm_always = false
 preview = "hidden"              # hidden | visible
@@ -679,8 +682,7 @@ Second-batch agents do not block v0.1.0.
 - Persistent transcript/full-text search index (a user-facing "search across all Session content" feature): rejected. Distinct from the narrow, non-authoritative Codex discovery cache (see "Codex parallel scan and discovery cache" in section 5), which adds no search capability and exists purely to skip re-parsing an unchanged rollout file.
 - External pager/editor.
 - Custom Skim fork or direct Ratatui UI.
-- Automatic agent install, process termination, terminal takeover, or Resume fallback to “latest.”
-- Cursor/OpenCode/Grok/Gemini in v0.1.0.
+- Cursor/Grok/Gemini in v0.1.0.
 
 ## 13. Superseded interview proposals
 

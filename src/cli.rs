@@ -93,6 +93,9 @@ pub enum Shell {
     Fish,
 }
 
+/// Agent names accepted by `-a/--agent`. `opencode` requires a binary built
+/// with the optional `opencode` feature; without it, discovery reports the
+/// same unavailable-root diagnostic as a missing OpenCode database.
 pub const SUPPORTED_AGENTS: [&str; 5] = ["codex", "claude", "pi", "omp", "opencode"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -103,9 +106,9 @@ pub enum Command {
 Inspect resume configuration.
 
 `resume` reads exactly one configuration file and never merges several.
-The file is $XDG_CONFIG_HOME/resume/config.toml when XDG_CONFIG_HOME is
-set, otherwise $HOME/.config/resume/config.toml, unless --config named a
-different path.
+The file is $XDG_CONFIG_HOME/resume/config.toml when that file exists;
+otherwise it falls back to $HOME/.config/resume/config.toml when that file
+exists, unless --config named a different path.
 
 This subcommand does not scan Sessions, so it rejects every
 Session-query option and the bare DIRECTORY positional.\
@@ -155,9 +158,10 @@ pub enum ConfigCommand {
         long_about = "\
 Print a commented example configuration file.
 
-Writes a complete, valid TOML document to stdout with every supported
-key set to its default. Redirect it into place to start from a known
-good file:
+Writes a complete, valid TOML document with every supported key. The
+`agents` value is a conservative starter selection; the remaining values are
+their runtime defaults. Redirect it into place to start from a known good
+file:
 
     resume config example > ~/.config/resume/config.toml
 
@@ -177,9 +181,10 @@ so a file produced this way always parses.\
 Find and resume coding-agent Sessions.
 
 `resume` scans the local on-disk stores of the coding agents you use --
-Codex, Claude Code, Pi, and OMP -- collects the Sessions that belong to
-the directory you are standing in, and hands the one you pick back to
-its own agent using that agent's native resume invocation.
+Codex, Claude Code, Pi, OMP, and (when built with its optional SQLite
+feature) OpenCode -- collects the Sessions that belong to the directory you
+are standing in, and hands the one you pick back to its own agent using that
+agent's native resume invocation.
 
 Nothing is copied, rewritten, indexed, or uploaded. Discovery is
 read-only. Resume is an exec into the agent's own CLI with the recorded
