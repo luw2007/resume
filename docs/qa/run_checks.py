@@ -1320,7 +1320,11 @@ def _(fx, ctx):
     # Built without the opencode database, so that integration fails too and
     # every one of the five is genuinely broken rather than merely empty.
     broken = Fixture(ctx["root"], ctx["binary"], QA_NO_OPENCODE=True)
-    roots = [broken.home / p for p in (".pi", ".claude", ".codex", ".omp")]
+    # Each path is the directory the integration enumerates, not the root it
+    # probes with `is_dir()`; an unreadable root reads as "not installed" and
+    # is silently skipped, which is the opposite of the failure under test.
+    roots = [broken.home / p for p in (".pi/agent/sessions", ".claude/projects",
+                                       ".codex/sessions", ".omp/agent")]
     for r in roots:
         os.chmod(r, 0o000)
     try:
@@ -1340,12 +1344,16 @@ def _(fx, ctx):
 
 @check("output-list-one-integration-fails-others-continue")
 def _(fx, ctx):
-    os.chmod(fx.home / ".codex", 0o000)
+    # Break the directory Codex actually scans, not its root: an unreadable
+    # root fails the `is_dir()` probe and reads as "Codex is not installed
+    # here", which is silent by design and would test nothing.
+    scanned = fx.home / ".codex/sessions"
+    os.chmod(scanned, 0o000)
     try:
         result = fx.run("--list")
         _, payload = fx.json()
     finally:
-        os.chmod(fx.home / ".codex", 0o755)
+        os.chmod(scanned, 0o755)
     agents = {s["agent"] for s in (payload or {"sessions": []})["sessions"]}
     return expect(
         result.returncode == 0 and {"pi", "claude", "omp"} <= agents
