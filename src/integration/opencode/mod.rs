@@ -29,7 +29,9 @@
 //! OpenCode has no non-SQLite session store, so without `rusqlite` linked
 //! ([`--features opencode`][crate]) discovery returns no Sessions and one
 //! `opencode_disabled` diagnostic rather than attempting a degraded scan.
-//! This never blocks other agents' discovery.
+//! This never blocks other agents' discovery. A feature-on build with no
+//! database reports `opencode_root_unavailable` instead, so the two are
+//! distinguishable on stderr — see [`NO_SESSIONS_CATEGORY`].
 
 pub const AGENT: &str = "opencode";
 
@@ -43,7 +45,7 @@ mod discover;
 
 mod resume;
 
-pub use discover::{ParsedSession, discover};
+pub use discover::{NO_SESSIONS_CATEGORY, ParsedSession, discover};
 pub use resume::{resume_spec, transcript_path};
 
 #[cfg(test)]

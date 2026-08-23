@@ -2,8 +2,12 @@
 //!
 //! OpenCode has no non-SQLite session store, so without `rusqlite` linked
 //! there is nothing this module can read. It returns `Ok(None)`, which the
-//! `resume` binary surfaces as `opencode_disabled` — the same shape as a
-//! missing database, never a hard failure that would block other agents.
+//! `resume` binary surfaces as `opencode_disabled` — never a hard failure
+//! that would block other agents. The category deliberately differs from the
+//! feature-on [`NO_SESSIONS_CATEGORY`](super::NO_SESSIONS_CATEGORY): "this
+//! build cannot read OpenCode" and "this machine has no OpenCode data" call
+//! for different actions, and a shared category left the user unable to tell
+//! which one they were looking at.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -33,6 +37,10 @@ pub struct DiscoverOutcome {
     pub parsed: Vec<ParsedSession>,
     pub skipped_rows: usize,
 }
+
+/// Diagnostic category for `Ok(None)` in this build: the feature is off, so
+/// the filesystem was never consulted and "no database" is not what happened.
+pub const NO_SESSIONS_CATEGORY: &str = "opencode_disabled";
 
 /// Always reports "no database" without touching the filesystem, since no
 /// SQLite reader is linked in this build.
