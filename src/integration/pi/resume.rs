@@ -20,10 +20,18 @@ impl ParsedSession {
     pub fn resume_spec(&self, roots: &EffectiveRoots) -> ResumeSpec {
         let mut argv: Vec<OsString> = Vec::with_capacity(4);
         argv.push(OsString::from("--session"));
-        argv.push(self.transcript_path.clone().into_os_string());
+        let transcript_path = self
+            .transcript_path
+            .canonicalize()
+            .unwrap_or_else(|_| self.transcript_path.clone());
+        argv.push(transcript_path.into_os_string());
         if roots.custom_session_root {
+            let session_root = roots
+                .session_root
+                .canonicalize()
+                .unwrap_or_else(|_| roots.session_root.clone());
             argv.push(OsString::from("--session-dir"));
-            argv.push(roots.session_root.clone().into_os_string());
+            argv.push(session_root.into_os_string());
         }
         let cwd = self.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
         ResumeSpec {

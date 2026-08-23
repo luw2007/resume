@@ -70,9 +70,22 @@ where
     let projects = root.effective_root.join(PROJECTS_DIR);
     let projects_real = match projects.canonicalize() {
         Ok(path) => path,
-        Err(_) => {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && projects.symlink_metadata().is_err() =>
+        {
             // No `projects` directory: nothing to discover, not an error.
             return Ok(Discovery::new());
+        }
+        Err(error) => {
+            let mut discovery = Discovery::new();
+            discovery.diagnostics.push(Diagnostic {
+                category: "claude_root_unavailable",
+                count: 1,
+                verbose_path: Some(projects),
+                verbose_chain: Some(error.to_string()),
+            });
+            return Ok(discovery);
         }
     };
 

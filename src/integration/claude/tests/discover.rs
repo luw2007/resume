@@ -420,6 +420,55 @@ fn missing_projects_dir_yields_empty_discovery() {
     assert!(discovery.diagnostics.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_claude_root_reports_root_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let config_root = default_root_dir(home.path());
+    fs::create_dir_all(config_root.join("projects")).unwrap();
+    let mut permissions = fs::metadata(&config_root).unwrap().permissions();
+    permissions.set_mode(0o000);
+    fs::set_permissions(&config_root, permissions).unwrap();
+
+    let root = claude::resolve_root(None, Some(home.path())).unwrap();
+    let discovery = claude::discover(&root).unwrap();
+
+    let mut permissions = fs::metadata(home.path()).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&config_root, permissions).unwrap();
+
+    assert!(discovery.sessions.is_empty());
+    assert!(
+        discovery
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category == "claude_root_unavailable")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn projects_path_that_cannot_be_resolved_is_diagnosed() {
+    let home = tempfile::tempdir().unwrap();
+    let root = claude::resolve_root(None, Some(home.path())).unwrap();
+    let projects = default_root_dir(home.path()).join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    let target = home.path().join("missing-projects-target");
+    fs::remove_dir(&projects).unwrap();
+    std::os::unix::fs::symlink(&target, &projects).unwrap();
+
+    let discovery = claude::discover(&root).unwrap();
+    assert!(discovery.sessions.is_empty());
+    assert!(
+        discovery
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category == "claude_root_unavailable")
+    );
+}
+
 #[test]
 fn empty_projects_dir_yields_empty_discovery() {
     let home = tempfile::tempdir().unwrap();

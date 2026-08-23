@@ -47,6 +47,57 @@ fn resume_spec_uses_absolute_session_path_never_session_id() {
 }
 
 #[test]
+fn resume_spec_canonicalizes_relative_transcript_and_session_root() {
+    let fx = Fixture::new();
+    let temp = tempfile::tempdir_in(".").unwrap();
+    let current_dir = std::env::current_dir().unwrap();
+    let absolute_root = temp.path().join("sessions");
+    fs::create_dir_all(&absolute_root).unwrap();
+    let relative_root = absolute_root
+        .strip_prefix(&current_dir)
+        .unwrap()
+        .to_path_buf();
+    let relative_path = relative_root.join("session.jsonl");
+    fs::write(
+        &relative_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&header_v3("relative", &fx.workspace, 1700000000)).unwrap()
+        ),
+    )
+    .unwrap();
+    let parsed = ParsedSession {
+        id: "relative".into(),
+        workspace: Some(fx.workspace.clone()),
+        parent: None,
+        session_info_name: None,
+        header_time: None,
+        activity_time: None,
+        messages: Vec::new(),
+        transcript_path: relative_path,
+        file_mtime: None,
+    };
+    let roots = EffectiveRoots {
+        agent_root: relative_root.parent().unwrap().to_path_buf(),
+        session_root: relative_root,
+        custom_session_root: true,
+    };
+
+    let spec = parsed.resume_spec(&roots);
+
+    let session_idx = spec.argv.iter().position(|arg| arg == "--session").unwrap();
+    let session_path = PathBuf::from(spec.argv[session_idx + 1].clone());
+    assert!(session_path.is_absolute());
+    let root_idx = spec
+        .argv
+        .iter()
+        .position(|arg| arg == "--session-dir")
+        .unwrap();
+    let session_root = PathBuf::from(spec.argv[root_idx + 1].clone());
+    assert!(session_root.is_absolute());
+}
+
+#[test]
 fn resume_spec_preserves_custom_session_dir() {
     let fx = Fixture::new();
     let custom = fx.agent_root.join("custom-sessions");
