@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.3 - 2026-08-23
+
+### Added
+
+- Added a cmux workspace handoff: when `resume` is launched from inside a cmux-managed workspace/surface pair (`CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` both present) and the selected Session's directory differs from the caller's, `resume` now reports the canonical target directory to cmux (`surface.report_pwd`) before replacing itself with the resumed agent, so cmux's own workspace state tracks the directory the agent will actually run in. Verified against both IDs present, absent, and partial/malformed provenance (fails closed, no handoff attempted, no focus/selection change).
+- Added a `CI failure issue` GitHub Actions workflow that opens or updates a single metadata-only triage issue when the `CI` workflow fails on `main`, instead of leaving failures to be found by hand.
+
+### Fixed
+
+- Pi, OMP, and Claude discovery's home-relative directory prefilter silently dropped every Session under a workspace whose first path component after `$HOME` starts with `.` (e.g. `~/.omp/agent`): the lossy path-to-directory-name encoding collapses both the path separator and the leading `.` to `-`, producing a doubled separator that `candidate_keys` only stripped one character of, so the derived key never matched the on-disk directory name and `Scope::may_contain_session_dir` pruned the directory before reading any file inside it. Sessions under a hidden-dot leading component now match correctly.
+- The tabbed picker could open on a partial page instead of the newest full page of `PAGE_SIZE` Sessions when an older, shorter remainder page existed: paging is now newest-first from a full page, and the header states the exact count of older Sessions still available via `Alt-P`.
+
 ## 0.3.2 - 2026-08-16
 
 ### Fixed
