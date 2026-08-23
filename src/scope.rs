@@ -274,7 +274,10 @@ fn candidate_keys(path: &Path, home: Option<&Path>) -> Vec<String> {
         && abs.len() > home_key.len()
         && key_is_prefix(&home_key, &abs)
     {
-        keys.push(abs[home_key.len() + 1..].to_owned());
+        // The lossy encoding may create consecutive separators at a hidden
+        // first relative component (`/.omp` -> `--omp`). OMP trims them from
+        // its home-relative directory name, so do the same before comparing.
+        keys.push(abs[home_key.len()..].trim_start_matches('-').to_owned());
     }
     keys.push(abs);
     keys
@@ -847,6 +850,11 @@ mod tests {
         // already trimmed by the key).
         assert!(scope.may_contain_session_dir("-ai-resume", Some(home)));
         assert!(!scope.may_contain_session_dir("-ai-other", Some(home)));
+        // A hidden first component produces a doubled separator in the
+        // absolute lossy form; its home-relative OMP directory must remain
+        // eligible for the authoritative header check.
+        let hidden = scope_with("/Users/u/.omp/agent", None);
+        assert!(hidden.may_contain_session_dir("-.omp-agent", Some(home)));
         // Without home knowledge the relative form cannot match Exact.
         assert!(!scope.may_contain_session_dir("-ai-resume", None));
     }
