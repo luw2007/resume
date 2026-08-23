@@ -18,10 +18,9 @@ SYNOPSIS
 
 DESCRIPTION
     `resume` scans the local on-disk stores of the coding agents you use --
-    Codex, Claude Code, Pi, OMP, and (when built with its optional SQLite
-    feature) OpenCode -- collects the Sessions that belong to the directory
-    you are standing in, and hands the one you pick back to its own agent
-    using that agent's native resume invocation.
+    Codex, Claude Code, Pi, OMP, and OpenCode -- collects the Sessions that
+    belong to the directory you are standing in, and hands the one you pick
+    back to its own agent using that agent's native resume invocation.
 
     Discovery is read-only. `resume` never copies, rewrites, indexes,
     uploads, repairs, migrates, merges, or deletes a Session. It never kills,

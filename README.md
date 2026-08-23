@@ -120,7 +120,7 @@ resume config example
 ```
 
 ```toml
-agents = ["codex", "claude", "pi", "omp"] # add "opencode" when built with --features opencode
+agents = ["codex", "claude", "pi", "omp", "opencode"]
 since = "all"                    # duration (7d, 2h, 30m, 1w) | YYYY-MM-DD | all
 confirm_always = false
 preview = "hidden"               # hidden | visible
@@ -151,7 +151,7 @@ The recorded Workspace is the child working directory. Missing or changed Worksp
 
 “Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi, so Pi Sessions remain `Unknown`. Claude Sessions also report `Unknown`. Codex Sessions report `Active` only when one process-wide `lsof` probe finds a live Codex process holding the exact rollout file open. OMP correlates one read-only process snapshot with its per-profile terminal breadcrumbs.
 
-OpenCode support is compiled in only with `cargo build --features opencode` (it depends on SQLite, unlike every other integration); a plain `cargo build` runs without it and `-a opencode` reports `opencode_root_unavailable`.
+OpenCode support is compiled in only with `cargo build --features opencode` (it depends on SQLite, unlike every other integration); a plain `cargo build` runs without it and `-a opencode` reports `opencode_disabled`. A build that does have the feature but finds no database reports `opencode_root_unavailable` instead, so the two are distinguishable: the first is fixed by rebuilding, the second is not.
 
 | Agent | Discovery | Preview parsing | Exact Resume | Profiles | Active Detection |
 |---|---|---|---|---|---|
