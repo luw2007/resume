@@ -3,7 +3,7 @@
 use std::{
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -86,6 +86,40 @@ fn run_with_env_and_settings(
         .env("CODEX_HOME", home.join(".codex"));
     for (key, value) in extra_env {
         command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
+fn run_without_controlling_terminal(home: &Path, workspace: &Path) -> std::process::Output {
+    let mut command = Command::new(binary());
+    command
+        .current_dir(workspace)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", home.join("bin"))
+        .env("TERM", "dumb")
+        .env("RESUME_DISABLE_PROC_PROBE", "1")
+        .env("XDG_CONFIG_HOME", home.join("xdg/config"))
+        .env("XDG_DATA_HOME", home.join("xdg/data"))
+        .env("XDG_STATE_HOME", home.join("xdg/state"))
+        .env("XDG_CACHE_HOME", home.join("xdg/cache"))
+        .env("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
+        .env("PI_CONFIG_DIR", home.join(".omp"))
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"));
+    // SAFETY: `setsid` runs after fork and before exec. The child owns no
+    // shared Rust state at this point; failure is surfaced as a spawn error.
+    unsafe {
+        command.pre_exec(|| {
+            unsafe extern "C" {
+                fn setsid() -> i32;
+            }
+            if setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
     }
     command.output().unwrap()
 }
@@ -711,7 +745,14 @@ fn missing_base_directory_is_a_usage_error() {
 #[test]
 fn no_controlling_terminal_is_a_usage_error_with_a_list_json_suggestion() {
     let (tmp, ws) = fixtures();
-    let output = run(tmp.path(), &ws, &[]);
+    let settings = tmp.path().join(".resume/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        settings,
+        r#"{"schema_version":1,"agents":["pi"],"known_agents":["pi"]}"#,
+    )
+    .unwrap();
+    let output = run_without_controlling_terminal(tmp.path(), &ws);
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

@@ -902,8 +902,12 @@ const TITLE_WIDTH_MAX: usize = 60;
 const TITLE_WIDTH_DEFAULT: usize = 48;
 
 fn title_column_width() -> usize {
+    title_column_width_for_tty(crate::picker::tty_size())
+}
+
+fn title_column_width_for_tty(tty_size: Option<(usize, usize)>) -> usize {
     const LEADING_COLUMNS: usize = 10 + 1 + 18 + 1;
-    match crate::picker::tty_size() {
+    match tty_size {
         Some((width, _)) if width > LEADING_COLUMNS => {
             (width - LEADING_COLUMNS).clamp(TITLE_WIDTH_MIN, TITLE_WIDTH_MAX)
         }
@@ -1375,22 +1379,27 @@ mod tests {
         );
     }
 
-    /// `docs/product-design.md` Â§3: "Title allocation is at most 60
-    /// columns on a wide terminal and at least 16 columns in the compact
-    /// layout". `title_column_width` must stay within `[16, 60]` for every
-    /// plausible terminal width, and fall back to a stable default with no
-    /// controlling terminal (the common case for `--list`/`--json` in tests,
-    /// CI, and redirected/piped invocations).
+    /// `docs/product-design.md` §3: title allocation is at least 16 and at
+    /// most 60 columns. Test the terminal-size mapping directly because a
+    /// test harness may itself have a controlling terminal.
     #[test]
     fn title_column_width_stays_within_documented_bounds() {
-        let width = title_column_width();
-        assert!(
-            (TITLE_WIDTH_MIN..=TITLE_WIDTH_MAX).contains(&width),
-            "width {width} outside [{TITLE_WIDTH_MIN}, {TITLE_WIDTH_MAX}]"
-        );
-        // No controlling terminal in the test harness: falls back to the
-        // fixed default rather than clamping to an arbitrary bound.
-        assert_eq!(width, TITLE_WIDTH_DEFAULT);
+        for tty_size in [
+            None,
+            Some((0, 0)),
+            Some((30, 0)),
+            Some((31, 0)),
+            Some((47, 0)),
+            Some((48, 0)),
+            Some((usize::MAX, 0)),
+        ] {
+            let width = title_column_width_for_tty(tty_size);
+            assert!(
+                (TITLE_WIDTH_MIN..=TITLE_WIDTH_MAX).contains(&width),
+                "TTY size {tty_size:?} produced width {width} outside [{TITLE_WIDTH_MIN}, {TITLE_WIDTH_MAX}]"
+            );
+        }
+        assert_eq!(title_column_width_for_tty(None), TITLE_WIDTH_DEFAULT);
     }
     #[test]
     fn non_verbose_diagnostics_collapse_by_category_summing_counts() {
