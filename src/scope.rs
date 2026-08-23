@@ -373,7 +373,32 @@ pub struct GitScopeEvidence {
 ///
 /// When `all_worktrees` is `true` (`--all-worktrees`), a second `git
 /// worktree list --porcelain` call additionally enumerates every linked
-/// worktree.
+/// worktree, matching the pre-existing default-Scope behavior.
+/// Spawn failure for a `git` invocation, named so the diagnostic is actionable.
+///
+/// This surfaces through `--verbose` as the `git_scope_discovery_failed` chain.
+/// The raw `io::Error` is "No such file or directory" when git is not on PATH,
+/// which reads as if a *session* file were missing rather than the git binary.
+fn git_spawn_failed(subcommand: &str, base: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "cannot run `git {subcommand}` in {}: {error}",
+            base.display()
+        ),
+    )
+}
+
+/// Nonzero exit for a `git` invocation, carrying git's own stderr.
+fn git_command_failed(subcommand: &str, base: &Path, stderr: &[u8]) -> io::Error {
+    let detail = String::from_utf8_lossy(stderr);
+    let detail = detail.trim();
+    io::Error::other(if detail.is_empty() {
+        format!("`git {subcommand}` failed in {}", base.display())
+    } else {
+        format!("`git {subcommand}` failed in {}: {detail}", base.display())
+    })
+}
 pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitScopeEvidence> {
     let common_output = Command::new("git")
         .args([
@@ -384,9 +409,10 @@ pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitSco
             OsStr::new("--git-common-dir"),
             OsStr::new("--show-toplevel"),
         ])
-        .output()?;
+        .output()
+        .map_err(|error| git_spawn_failed("rev-parse", base, error))?;
     if !common_output.status.success() {
-        return Err(io::Error::other("git rev-parse failed"));
+        return Err(git_command_failed("rev-parse", base, &common_output.stderr));
     }
     let mut lines = common_output.stdout.split(|byte| *byte == b'\n');
     let common_dir = bytes_to_path(trim_newline(lines.next().unwrap_or_default()));
@@ -408,9 +434,10 @@ pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitSco
             OsStr::new("--porcelain"),
             OsStr::new("-z"),
         ])
-        .output()?;
+        .output()
+        .map_err(|error| git_spawn_failed("worktree list", base, error))?;
     if !output.status.success() {
-        return Err(io::Error::other("git worktree list failed"));
+        return Err(git_command_failed("worktree list", base, &output.stderr));
     }
     let worktrees = parse_worktree_porcelain_z(&output.stdout)?;
     Ok(GitScopeEvidence {
@@ -813,6 +840,29 @@ mod tests {
         assert!(wide.worktrees.contains(&repo));
         assert!(wide.worktrees.contains(&linked));
         assert_eq!(wide.worktrees.len(), 2);
+    }
+
+    #[test]
+    fn git_scope_failure_names_the_command_and_the_directory() {
+        // This error string is what `--verbose` prints as the
+        // `git_scope_discovery_failed` chain, and it is the only thing the
+        // user gets to diagnose a silent fall back to exact-directory Scope.
+        // "git rev-parse failed" alone does not say where, and a bare
+        // spawn error ("No such file or directory") does not even say that
+        // git was involved.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        // GIT_CEILING_DIRECTORIES stops the upward walk, so this is not a
+        // repository even when the temp dir happens to sit inside one.
+        unsafe { std::env::set_var("GIT_CEILING_DIRECTORIES", &base) };
+        let error = discover_git_scope(&base, false).unwrap_err().to_string();
+        unsafe { std::env::remove_var("GIT_CEILING_DIRECTORIES") };
+        assert!(error.contains("git"), "{error:?} does not name git");
+        assert!(
+            error.contains(&base.display().to_string()),
+            "{error:?} does not name {}",
+            base.display()
+        );
     }
     // -----------------------------------------------------------------------
     // may_contain_session_dir: lossy grouped-directory-name prefilter
