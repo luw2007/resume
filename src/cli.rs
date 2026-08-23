@@ -177,9 +177,9 @@ so a file produced this way always parses.\
 Find and resume coding-agent Sessions.
 
 `resume` scans the local on-disk stores of the coding agents you use --
-Codex, Claude Code, Pi, and OMP -- collects the Sessions that belong to
-the directory you are standing in, and hands the one you pick back to
-its own agent using that agent's native resume invocation.
+Codex, Claude Code, Pi, OMP, and OpenCode -- collects the Sessions that
+belong to the directory you are standing in, and hands the one you pick
+back to its own agent using that agent's native resume invocation.
 
 Nothing is copied, rewritten, indexed, or uploaded. Discovery is
 read-only. Resume is an exec into the agent's own CLI with the recorded
@@ -401,7 +401,7 @@ pub fn command() -> clap::Command {
 }
 
 pub fn config_example() -> &'static str {
-    r#"agents = ["codex", "claude", "pi", "omp"]
+    r#"agents = ["codex", "claude", "pi", "omp", "opencode"]
 since = "all"
 confirm_always = false
 preview = "hidden"
@@ -547,15 +547,15 @@ mod tests {
     #[test]
     fn config_example_round_trips_through_config_schema() {
         let config: crate::config::Config = toml::from_str(config_example()).unwrap();
-        assert_eq!(
-            config.agents,
-            Some(vec![
-                "codex".into(),
-                "claude".into(),
-                "pi".into(),
-                "omp".into()
-            ])
-        );
+        // cli-config-subcommand-example: the example is the template users copy
+        // into config.toml, and `agents` there is an exhaustive selection --
+        // omitting a supported agent silently turns it off for anyone who
+        // starts from the generated file.
+        let mut listed = config.agents.clone().unwrap();
+        listed.sort();
+        let mut supported: Vec<String> = SUPPORTED_AGENTS.iter().map(|a| a.to_string()).collect();
+        supported.sort();
+        assert_eq!(listed, supported);
         assert_eq!(config.since, Some(Since::All));
         assert_eq!(config.confirm_always, Some(false));
         assert_eq!(config.preview, Some(crate::config::PreviewMode::Hidden));

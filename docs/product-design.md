@@ -278,7 +278,7 @@ Discovery and content parsing are two-stage:
 
 If Skim can safely update an emitted item without moving the stable selection, user content becomes searchable after parsing. Otherwise do not rebuild the list; that Session's content remains browsable through Preview but may not join main-list matching during that run. First-screen speed and selection safety take priority over complete transcript indexing.
 
-There is no implicit age limit, result count cap, continuous watch, or refresh; rerun `resume` to rescan. The Picker opens after discovery settles with an `All` tab plus one tab per discovered agent. Each tab retains every Session, sorts oldest-first with the most recently updated last, splits results into pages of 50, and opens on its newest page. `Alt+P`/`Alt+N` move to the older/newer page in the current tab. `Alt+Left`/`Alt+Right` cycle through tabs and reset the selected tab to its newest page.
+There is no implicit age limit, result count cap, continuous watch, or refresh; rerun `resume` to rescan. The Picker opens after discovery settles with an `All` tab plus one tab per discovered agent. Each tab retains every Session, sorts oldest-first with the most recently updated last, splits results into pages of 50, and opens on its newest page. `Alt+P`/`Alt+N` move to the older/newer page in the current tab. `Alt+Left`/`Alt+Right` cycle through tabs and reset the selected tab to its newest page; `Left`/`Shift+Tab` and `Right`/`Tab` are equivalent, so tabs are reachable without a modifier on terminals that swallow Alt+arrow.
 
 Within an open Session Preview, search applies only to that Session's user inputs and supports previous/next match navigation, subject to Skim's proven public interaction surface.
 
@@ -496,7 +496,7 @@ CLI overrides config. No project-level config and no merge of multiple files.
 Supported TOML fields:
 
 ```toml
-agents = ["codex", "claude", "pi", "omp"]
+agents = ["codex", "claude", "pi", "omp", "opencode"]
 since = "all"
 confirm_always = false
 preview = "hidden"              # hidden | visible
@@ -512,7 +512,19 @@ verbose = false
 - `resume config example` prints an example to stdout and does not write a file.
 - There is no `config path`, `config validate`, or `doctor` command.
 - `--verbose` may enable configured false; there is no `--quiet` override.
-- No custom `RESUME_*` environment variables. Only standard HOME/XDG/PATH and official agent environment variables are read.
+- Configuration is not read from the environment: apart from standard HOME/XDG/PATH and official agent variables, the only variable `resume` consults is `RESUME_DISABLE_PROC_PROBE`. Setting it to any value (including empty) skips the process-table and `lsof` probes, so Active detection reports Unknown. It exists so tests and QA fixtures cannot correlate against unrelated host processes; it changes no other behavior and there is no environment equivalent of any config field.
+
+### Agent selection
+
+Which agents get scanned at all is a separate, one-time choice that lives outside `config.toml`, because it is answered interactively on the first run rather than hand-written.
+
+- The selection is stored in `~/.resume/settings.json`, resolved through `$HOME` only — never through XDG, and never through `--config`. Missing `$HOME` is an error, not a fallback.
+- The file holds `schema_version` (currently 1), `agents` (the selection), and `known_agents` (every agent that had shipped when the file was last written). Unrecognized fields are preserved verbatim across rewrites, so a file written by a newer version survives an older one. A `schema_version` other than the current one, or an agent name outside the supported list, is a configuration error rather than a silent reset.
+- On a first run with no file, an interactive invocation opens the chooser: agents are listed numbered, and the answer is a comma-separated list of those numbers, `all`, or `none`. Anything else is rejected and re-asked. `--list` and `--json` do not prompt; with no file they exit with a hint to run `resume setup` first.
+- `resume setup` reruns that chooser at any time and replaces the saved selection. It needs `/dev/tty`; without one it is an error rather than a default.
+- Writes go to a temporary file in the same directory and are renamed into place with mode `0600`, so an interrupted write cannot leave a truncated selection behind.
+- When a release adds an agent the saved file has never seen, the next run says so once on stderr, records it in `known_agents`, and leaves `agents` alone — a new integration never enables itself.
+- Precedence for the scanned set: `-a/--agent`, then `agents` in the config file, then this selection.
 
 ### Diagnostics
 
