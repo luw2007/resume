@@ -12,10 +12,11 @@ whatever status it already has; this runner never invents a Pass. Rows whose
 behaviour is interactive belong to tests/picker_ux_e2e.rs instead.
 
 Usage:
-    python3 docs/qa/run_checks.py [repo-root] [--write]
+    python3 docs/qa/run_checks.py [repo-root] [--write | --retest]
 
-Without --write it reports only. With --write it records status and
-error_notes back into the inventory.
+With neither flag it reports only. `--write` records status and error_notes
+back into the inventory; `--retest` records retest_status instead, leaving the
+original status and findings intact so the two columns can be read together.
 """
 import contextlib
 import csv
@@ -4704,6 +4705,7 @@ def has_opencode_feature(root, binary):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     write = "--write" in sys.argv[1:]
+    retest = "--retest" in sys.argv[1:]
     root = pathlib.Path(args[0] if args else ".").resolve()
     ctx = build_context(root)
     print(f"binary: {ctx['binary']}")
@@ -4738,12 +4740,19 @@ def main():
     print("\n" + ", ".join(f"{k}={v}" for k, v in
                            sorted(Counter(s for s, _ in results.values()).items())))
 
-    if write:
-        write_back(root, results)
+    if write or retest:
+        write_back(root, results, retest)
     return 1 if any(s == "Fail" for s, _ in results.values()) else 0
 
 
-def write_back(root, results):
+def write_back(root, results, retest=False):
+    """Record this run's results.
+
+    `--write` is the first-pass mode: it owns `status` and `error_notes`.
+    `--retest` is the post-fix mode: it owns `retest_status` only, because the
+    point of the retest column is to be readable *against* the original
+    finding, which means the original finding has to survive the rerun.
+    """
     import csv
     path = root / "docs/qa/feature-inventory.csv"
     with path.open(newline="") as fh:
@@ -4754,6 +4763,16 @@ def write_back(root, results):
         if r["feature_id"] not in results:
             continue
         status, note = results[r["feature_id"]]
+        if retest:
+            r["retest_status"] = status
+            # A retest that still fails has to say what is still wrong; one
+            # that passes leaves the Phase 2 note alone as the record of what
+            # was fixed.
+            if status == "Fail" and note:
+                prior = [s.strip() for s in r["error_notes"].split("||") if s.strip()]
+                still = f"STILL FAILING AFTER FIX: {note}"
+                r["error_notes"] = " || ".join([still] + [p for p in prior if p != still])
+            continue
         r["status"] = status
         if status == "Pass":
             # A passing row keeps no findings: a note left over from an
