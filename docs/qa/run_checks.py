@@ -1171,6 +1171,435 @@ def _(fx, ctx):
             "picker; belongs to the PTY harness")
 
 
+# ---------------------------------------------------------------------- pi
+@check("pi-root-resolution-env")
+def _(fx, ctx):
+    other = fx.home / "custom-pi"
+    (other / "sessions/ws").mkdir(parents=True)
+    (other / "sessions/ws/custom.jsonl").write_text(json.dumps({
+        "type": "session", "version": 3, "id": "custom-root-id",
+        "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n")
+    result = fx.run_env("--json", "-a", "pi",
+                        env=fx.env(PI_CODING_AGENT_DIR=str(other)))
+    ids = _ids(json.loads(result.stdout))
+    return expect(
+        ids == {"custom-root-id"},
+        f"PI_CODING_AGENT_DIR was not honoured: {ids}",
+    )
+
+
+@check("pi-session-dir-precedence")
+def _(fx, ctx):
+    sessions = fx.home / "custom-sessions/ws"
+    sessions.mkdir(parents=True)
+    (sessions / "custom.jsonl").write_text(json.dumps({
+        "type": "session", "version": 3, "id": "custom-sessions-id",
+        "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n")
+    result = fx.run_env("--json", "-a", "pi", env=fx.env(
+        PI_CODING_AGENT_SESSION_DIR=str(sessions.parent)))
+    ids = _ids(json.loads(result.stdout))
+    return expect(
+        ids == {"custom-sessions-id"},
+        f"PI_CODING_AGENT_SESSION_DIR did not override the default "
+        f"<agent-root>/sessions: {ids}",
+    )
+
+
+@check("pi-title-precedence")
+def _(fx, ctx):
+    named = fx.home / ".pi/agent/sessions/named"
+    named.mkdir(parents=True)
+    (named / "named.jsonl").write_text(
+        json.dumps({"type": "session", "version": 3, "id": "named-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "session_info", "name": "explicit name"}) + "\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": "ignored body"}}) + "\n")
+    _, payload = fx.json("-a", "pi")
+    titles = {s["id"]: s["title"] for s in payload["sessions"]}
+    return expect(
+        titles.get("named-id") == "explicit name"
+        and titles.get("pi-id") == "pi title",
+        f"titles {titles}; session_info.name must win, otherwise a summary of "
+        f"the first user message",
+    )
+
+
+@check("pi-activity-positive-evidence-only")
+def _(fx, ctx):
+    """Without matching control evidence the answer is Unknown, never a
+    guess of Inactive."""
+    _, payload = fx.json("-a", "pi")
+    activities = {s["activity"] for s in payload["sessions"]}
+    return expect(
+        activities == {"Unknown"},
+        f"absent evidence produced {activities} rather than Unknown only",
+    )
+
+
+@check("pi-broad-workspace-risk")
+def _(fx, ctx):
+    home_session = fx.home / ".pi/agent/sessions/athome"
+    home_session.mkdir(parents=True)
+    (home_session / "athome.jsonl").write_text(json.dumps({
+        "type": "session", "version": 3, "id": "athome-id",
+        "timestamp": 1700000000, "cwd": str(fx.home)}) + "\n")
+    result = fx.run_env("--json", "-a", "pi", cwd=fx.home)
+    found = [s for s in json.loads(result.stdout)["sessions"]
+             if s["id"] == "athome-id"]
+    return expect(
+        found and found[0]["risk"] == "BroadWorkspace",
+        f"a session whose workspace is $HOME reported risk "
+        f"{[s['risk'] for s in found]}",
+    )
+
+
+@check("pi-header-cwd-scope-filtering")
+def _(fx, ctx):
+    """Grouping directory names carry no meaning; only the header cwd does."""
+    shared = fx.home / ".pi/agent/sessions/ws"
+    elsewhere = fx.home / "elsewhere"
+    elsewhere.mkdir()
+    (shared / "outside.jsonl").write_text(json.dumps({
+        "type": "session", "version": 3, "id": "outside-id",
+        "timestamp": 1700000000, "cwd": str(elsewhere)}) + "\n")
+    _, payload = fx.json("-a", "pi")
+    ids = _ids(payload)
+    return expect(
+        ids == {"pi-id"},
+        f"a session sharing the grouping directory but recording a different "
+        f"cwd was kept in scope: {ids}",
+    )
+
+
+@check("pi-header-version-compat")
+def _(fx, ctx):
+    for version in (1, 2, 3):
+        d = fx.home / f".pi/agent/sessions/v{version}"
+        d.mkdir(parents=True)
+        (d / f"v{version}.jsonl").write_text(json.dumps({
+            "type": "session", "version": version, "id": f"v{version}-id",
+            "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n")
+    _, payload = fx.json("-a", "pi")
+    ids = _ids(payload)
+    missing = [f"v{v}-id" for v in (1, 2, 3) if f"v{v}-id" not in ids]
+    return expect(not missing, f"header versions not discovered: {missing}")
+
+
+@check("pi-activity-time-fallback")
+def _(fx, ctx):
+    """Message time beats header time; with neither, file mtime decides."""
+    old, recent = 1_600_000_000, int(subprocess.run(
+        ["date", "+%s"], capture_output=True, text=True).stdout.strip()) - 60
+    fresh_message = fx.home / ".pi/agent/sessions/fresh"
+    fresh_message.mkdir(parents=True)
+    (fresh_message / "fresh.jsonl").write_text(
+        json.dumps({"type": "session", "version": 3, "id": "fresh-id",
+                    "timestamp": old, "cwd": str(fx.workspace)}) + "\n"
+        + json.dumps({"type": "message", "timestamp": recent,
+                      "message": {"role": "user", "content": "recent"}}) + "\n")
+    no_time = fx.home / ".pi/agent/sessions/notime"
+    no_time.mkdir(parents=True)
+    path = no_time / "notime.jsonl"
+    path.write_text(json.dumps({"type": "session", "version": 3,
+                                "id": "notime-id", "cwd": str(fx.workspace)}) + "\n")
+    os.utime(path, (old, old))
+    _, payload = fx.json("-a", "pi", "--since", "10m")
+    ids = _ids(payload)
+    return expect(
+        "fresh-id" in ids and "notime-id" not in ids,
+        f"--since 10m kept {ids}; the message-timestamped session must survive "
+        f"its older header, and the mtime-only one must be filtered out",
+    )
+
+
+@check("pi-dedupe-canonical-locator")
+def _(fx, ctx):
+    real = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    (real.parent / "link-a.jsonl").symlink_to(real)
+    (real.parent / "link-b.jsonl").symlink_to(real)
+    _, same_root = fx.json("-a", "pi")
+    other_root = fx.home / "second-root"
+    (other_root / "sessions/ws").mkdir(parents=True)
+    shutil.copy(real, other_root / "sessions/ws/pi.jsonl")
+    result = fx.run_env("--json", "-a", "pi", env=fx.env(
+        PI_CODING_AGENT_SESSION_DIR=str(other_root / "sessions")))
+    return expect(
+        len([s for s in same_root["sessions"] if s["id"] == "pi-id"]) == 1
+        and "pi-id" in _ids(json.loads(result.stdout)),
+        f"symlinks to one transcript yielded "
+        f"{len([s for s in same_root['sessions'] if s['id'] == 'pi-id'])} sessions",
+    )
+
+
+@check("pi-malformed-record-tolerance")
+def _(fx, ctx):
+    path = fx.home / ".pi/agent/sessions/ws/pi.jsonl"
+    path.write_text(
+        json.dumps({"type": "session", "version": 3, "id": "pi-id",
+                    "timestamp": 1700000000, "cwd": str(fx.workspace)}) + "\n"
+        + "{not json at all\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": "survivor"}}) + "\n")
+    _, payload = fx.json("-a", "pi")
+    found = [s for s in payload["sessions"] if s["id"] == "pi-id"]
+    return expect(
+        found and found[0]["title"] == "survivor",
+        f"a malformed middle record lost the session or its title: {found}",
+    )
+
+
+@check("pi-resume-spec-exact")
+def _(fx, ctx):
+    return "SKIPPED: observing the agent's argv requires a resume; PTY harness"
+
+
+# ------------------------------------------------------------------ claude
+def _claude(fx, key, name, records):
+    d = fx.home / ".claude/projects" / key
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("".join(json.dumps(r) + "\n" for r in records))
+    return d / name
+
+
+@check("claude-root-resolution")
+def _(fx, ctx):
+    other = fx.home / "custom-claude"
+    (other / "projects/ws").mkdir(parents=True)
+    uuid = "55555555-5555-5555-5555-555555555555"
+    (other / f"projects/ws/{uuid}.jsonl").write_text(json.dumps({
+        "type": "user", "sessionId": uuid, "cwd": str(fx.workspace),
+        "message": {"content": "custom root"}}) + "\n")
+    result = fx.run_env("--json", "-a", "claude",
+                        env=fx.env(CLAUDE_CONFIG_DIR=str(other)))
+    ids = _ids(json.loads(result.stdout), "claude")
+    return expect(ids == {uuid}, f"CLAUDE_CONFIG_DIR was not honoured: {ids}")
+
+
+@check("claude-identity-agreement-supported")
+def _(fx, ctx):
+    uuid = "66666666-6666-6666-6666-666666666666"
+    _claude(fx, "agree", f"{uuid.upper()}.jsonl", [
+        {"type": "user", "sessionId": uuid, "cwd": str(fx.workspace),
+         "message": {"content": "agreeing"}}])
+    _, payload = fx.json("-a", "claude")
+    found = [s for s in payload["sessions"] if s["id"].lower() == uuid]
+    return expect(
+        found and found[0]["support"] == "Supported",
+        f"case-insensitive UUID agreement did not yield Supported: {found}",
+    )
+
+
+@check("claude-identity-disagreement-discover-only-or-skip")
+def _(fx, ctx):
+    with_cwd = "77777777-7777-7777-7777-777777777777"
+    _claude(fx, "disagree", f"{with_cwd}.jsonl", [
+        {"type": "user", "sessionId": "aaaaaaaa-7777-7777-7777-777777777777",
+         "cwd": str(fx.workspace), "message": {"content": "kept"}}])
+    _claude(fx, "disagree-nocwd", "88888888-8888-8888-8888-888888888888.jsonl", [
+        {"type": "user", "sessionId": "bbbbbbbb-8888-8888-8888-888888888888",
+         "message": {"content": "dropped"}}])
+    result = fx.run("--json", "--verbose", "-a", "claude")
+    payload = json.loads(result.stdout)
+    kept = [s for s in payload["sessions"]
+            if s["id"] == "aaaaaaaa-7777-7777-7777-777777777777"]
+    ids = _ids(payload, "claude")
+    return expect(
+        kept and kept[0]["support"] == "DiscoverOnly"
+        and "bbbbbbbb-8888-8888-8888-888888888888" not in ids
+        and "claude_identity_disagreement" in result.stderr,
+        f"kept {kept}; ids {ids}; stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("claude-no-session-id-handling")
+def _(fx, ctx):
+    stem = "99999999-9999-9999-9999-999999999999"
+    _claude(fx, "nosid", f"{stem}.jsonl", [
+        {"type": "user", "cwd": str(fx.workspace),
+         "message": {"content": "unconfirmed"}}])
+    _bad_claude_transcripts(fx, 1)
+    result = fx.run("--json", "--verbose", "-a", "claude")
+    payload = json.loads(result.stdout)
+    found = [s for s in payload["sessions"] if s["id"] == stem]
+    return expect(
+        found and found[0]["support"] == "DiscoverOnly"
+        and "claude_no_session_id" in result.stderr,
+        f"filename-only identity gave {found}; stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("claude-weak-identity-diagnostic")
+def _(fx, ctx):
+    _claude(fx, "weak", "notes.jsonl", [
+        {"type": "user", "cwd": str(fx.workspace),
+         "message": {"content": "weak identity"}}])
+    stderr = fx.run("--verbose", "--list", "-a", "claude").stderr
+    return expect(
+        "claude_weak_identity" in stderr,
+        f"a non-UUID filename produced no weak-identity diagnostic: "
+        f"{stderr[:250]!r}",
+    )
+
+
+@check("claude-title-precedence")
+def _(fx, ctx):
+    cases = {
+        "aaaa1111-1111-1111-1111-111111111111": (
+            {"agent-name": "explicit agent", "ai-title": "ai chosen"},
+            "explicit agent"),
+        "bbbb1111-1111-1111-1111-111111111111": (
+            {"ai-title": "ai chosen"}, "ai chosen"),
+        "cccc1111-1111-1111-1111-111111111111": ({}, "summary body"),
+    }
+    for uuid, (extra, _want) in cases.items():
+        record = {"type": "user", "sessionId": uuid, "cwd": str(fx.workspace),
+                  "message": {"content": "summary body"}}
+        record.update(extra)
+        _claude(fx, f"title-{uuid[:4]}", f"{uuid}.jsonl", [record])
+    _, payload = fx.json("-a", "claude")
+    titles = {s["id"]: s["title"] for s in payload["sessions"]}
+    wrong = {u: (titles.get(u), want) for u, (_, want) in cases.items()
+             if titles.get(u) != want}
+    return expect(not wrong, f"title precedence broken, got/want: {wrong}")
+
+
+@check("claude-cwd-authoritative-not-directory-name")
+def _(fx, ctx):
+    uuid = "dddd1111-1111-1111-1111-111111111111"
+    # A key that encodes no path at all. It must not start with '-', which is
+    # Claude's own path encoding and the only form the scope prefilter prunes
+    # (src/integration/claude/discover.rs collect_candidates).
+    _claude(fx, "not.an.encoded.path", f"{uuid}.jsonl", [
+        {"type": "user", "sessionId": uuid, "cwd": str(fx.workspace),
+         "message": {"content": "cwd wins"}}])
+    _, payload = fx.json("-a", "claude")
+    found = [s for s in payload["sessions"] if s["id"] == uuid]
+    return expect(
+        found and found[0]["workspace"]
+        and os.path.realpath(found[0]["workspace"])
+        == os.path.realpath(fx.workspace),
+        f"workspace came from somewhere other than the event cwd: {found}",
+    )
+
+
+@check("claude-encoded-key-prefilter")
+def _(fx, ctx):
+    encoded = "-" + str(fx.home / "far-away").replace("/", "-")
+    pruned = "4b4b1111-1111-1111-1111-111111111111"
+    kept = "5b5b1111-1111-1111-1111-111111111111"
+    # Both transcripts record an in-scope cwd; only the directory names differ,
+    # so any difference in the result is the prefilter's doing.
+    _claude(fx, encoded, f"{pruned}.jsonl", [
+        {"type": "user", "sessionId": pruned, "cwd": str(fx.workspace),
+         "message": {"content": "pruned before reading"}}])
+    _claude(fx, "arbitrary_key", f"{kept}.jsonl", [
+        {"type": "user", "sessionId": kept, "cwd": str(fx.workspace),
+         "message": {"content": "read normally"}}])
+    _, payload = fx.json("-a", "claude")
+    ids = _ids(payload, "claude")
+    return expect(
+        pruned not in ids and kept in ids,
+        f"discovered {ids}; the '-'-encoded out-of-scope key must be pruned "
+        f"unread and the arbitrary key must not be",
+    )
+
+
+@check("claude-subagent-transcripts-excluded")
+def _(fx, ctx):
+    top = "eeee1111-1111-1111-1111-111111111111"
+    nested = "ffff1111-1111-1111-1111-111111111111"
+    _claude(fx, "withsub", f"{top}.jsonl", [
+        {"type": "user", "sessionId": top, "cwd": str(fx.workspace),
+         "message": {"content": "top level"}}])
+    _claude(fx, "withsub/subagents", f"{nested}.jsonl", [
+        {"type": "user", "sessionId": nested, "cwd": str(fx.workspace),
+         "message": {"content": "subagent"}}])
+    _, payload = fx.json("-a", "claude")
+    ids = _ids(payload, "claude")
+    return expect(
+        top in ids and nested not in ids,
+        f"subagent transcript leaked into discovery: {ids}",
+    )
+
+
+@check("claude-tool-result-and-injected-exclusion")
+def _(fx, ctx):
+    uuid = "1a1a1111-1111-1111-1111-111111111111"
+    _claude(fx, "toolonly", f"{uuid}.jsonl", [
+        {"type": "user", "sessionId": uuid, "cwd": str(fx.workspace),
+         "message": {"content": [{"type": "tool_result", "content": "tool noise"}]}},
+        {"type": "user", "sessionId": uuid, "isMeta": True,
+         "message": {"content": "meta noise"}},
+        {"type": "user", "sessionId": uuid,
+         "message": {"content": "real human input"}}])
+    _, payload = fx.json("-a", "claude")
+    found = [s for s in payload["sessions"] if s["id"] == uuid]
+    title = (found[0]["title"] or "") if found else ""
+    return expect(
+        "tool noise" not in title and "meta noise" not in title
+        and "real human input" in title,
+        f"title is {title!r}; tool output and isMeta records must not "
+        f"contribute",
+    )
+
+
+@check("claude-discovery-read-only-guarantee")
+def _(fx, ctx):
+    root = fx.home / ".claude"
+    before = _snapshot(root)
+    fx.run("--list", "-a", "claude")
+    fx.run("--json", "-a", "claude")
+    return expect(_snapshot(root) == before,
+                  "the Claude config root changed during discovery")
+
+
+@check("claude-truncated-malformed-diagnostics")
+def _(fx, ctx):
+    truncated = "2a2a1111-1111-1111-1111-111111111111"
+    path = _claude(fx, "trunc", f"{truncated}.jsonl", [
+        {"type": "user", "sessionId": truncated, "cwd": str(fx.workspace),
+         "message": {"content": "kept despite truncation"}}])
+    with path.open("a") as fh:
+        fh.write('{"type":"user","sessionId":"2a2a')
+    malformed = "3a3a1111-1111-1111-1111-111111111111"
+    mpath = _claude(fx, "malformed", f"{malformed}.jsonl", [
+        {"type": "user", "sessionId": malformed, "cwd": str(fx.workspace),
+         "message": {"content": "first"}}])
+    mpath.write_text(mpath.read_text() + "{ not json }\n" + json.dumps(
+        {"type": "user", "sessionId": malformed,
+         "message": {"content": "second"}}) + "\n")
+    result = fx.run("--json", "--verbose", "-a", "claude")
+    ids = _ids(json.loads(result.stdout), "claude")
+    missing = [c for c in ("claude_truncated", "claude_malformed")
+               if c not in result.stderr]
+    return expect(
+        not missing and {truncated, malformed} <= ids,
+        f"categories absent: {missing}; discovered {ids}",
+    )
+
+
+@check("claude-root-unavailable-diagnostic")
+def _(fx, ctx):
+    projects = fx.home / ".claude/projects"
+    os.chmod(projects, 0o000)
+    try:
+        result = fx.run("--verbose", "--list", "-a", "claude")
+    finally:
+        os.chmod(projects, 0o755)
+    return expect(
+        "claude_root_unavailable" in result.stderr,
+        f"an unreadable projects/ directory produced no diagnostic; "
+        f"exit {result.returncode}, stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("claude-resume-spec-exact", "claude-resume-env-preservation",
+       "claude-missing-workspace-blocks-resume-spec")
+def _(fx, ctx):
+    return "SKIPPED: requires a resume handoff; PTY harness"
+
+
 # ------------------------------------------------------------------- scope
 GIT = shutil.which("git")
 
