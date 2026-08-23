@@ -43,6 +43,7 @@ class Fixture:
     """One isolated HOME plus the `run` wrapper that drives the real binary."""
 
     def __init__(self, root, binary, **knobs):
+        self.binary = binary
         env = dict(os.environ, RESUME_BIN=str(binary))
         env.update({k: "1" for k in knobs if knobs[k]})
         out = subprocess.run(
@@ -61,6 +62,30 @@ class Fixture:
     def json(self, *args):
         result = self.run("--json", *args)
         return result, json.loads(result.stdout) if result.stdout.strip() else None
+
+    def env(self, **overrides):
+        """The wrapper's own environment, read back from the generated script
+        so a Python-side copy cannot drift from fixtures.sh."""
+        env = {}
+        for line in (self.home / "run").read_text().splitlines():
+            m = re.match(r'^([A-Z_]+)=(.*?) *\\$', line)
+            if m:
+                env[m.group(1)] = m.group(2).strip('"')
+        env["TERM"] = "dumb"
+        for key, value in overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        return env
+
+    def run_env(self, *args, env=None, cwd=None):
+        """Drive the binary with a modified environment, bypassing the wrapper."""
+        return subprocess.run(
+            [str(self.binary), *args], capture_output=True, text=True,
+            env=env if env is not None else self.env(),
+            cwd=str(cwd or self.workspace),
+        )
 
     def cmux_log(self):
         path = self.home / "cmux.log"
@@ -122,6 +147,468 @@ def _(fx, ctx):
         result.returncode == 2 and "nope" in result.stderr,
         f"exit {result.returncode}, stderr {result.stderr[:120]!r}",
     )
+
+
+def _pi_session(fx, name, session_id, cwd, title="t", timestamp=1700000000):
+    """A pi transcript recording `cwd` as its workspace, for scope tests."""
+    d = fx.home / ".pi/agent/sessions" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.jsonl").write_text(
+        json.dumps({"type": "session", "version": 3, "id": session_id,
+                    "timestamp": timestamp, "cwd": str(cwd)}) + "\n"
+        + json.dumps({"type": "message",
+                      "message": {"role": "user", "content": title}}) + "\n"
+    )
+
+
+def _ids(payload, agent="pi"):
+    return {s["id"] for s in payload["sessions"] if s["agent"] == agent}
+
+
+@check("cli-default-picker")
+def _(fx, ctx):
+    return "SKIPPED: opening the picker is interactive; belongs to the PTY harness"
+
+
+@check("cli-directory-arg")
+def _(fx, ctx):
+    other = fx.home / "other"
+    other.mkdir()
+    _pi_session(fx, "other", "other-id", other)
+    _, payload = fx.json(str(other))
+    missing = fx.run(str(fx.home / "nonexistent"), "--list")
+    return expect(
+        _ids(payload) == {"other-id"} and missing.returncode == 2,
+        f"scoped ids {_ids(payload)} (want {{'other-id'}}); "
+        f"missing-directory exit {missing.returncode} (want 2)",
+    )
+
+
+@check("cli-up-flag")
+def _(fx, ctx):
+    parent, deep = fx.home, fx.workspace / "deep"
+    deep.mkdir()
+    _pi_session(fx, "parent", "parent-id", parent)
+    _pi_session(fx, "deep", "deep-id", deep)
+    _, without = fx.json()
+    _, with_up = fx.json("-U", "1")
+    return expect(
+        _ids(without) == {"pi-id"} and _ids(with_up) == {"pi-id", "parent-id"},
+        f"default {_ids(without)} (want {{'pi-id'}}); "
+        f"-U 1 {_ids(with_up)} (want pi-id + parent-id, no descendant)",
+    )
+
+
+@check("cli-up-all")
+def _(fx, ctx):
+    sibling = fx.home / "sibling"
+    sibling.mkdir()
+    _pi_session(fx, "parent", "parent-id", fx.home)
+    _pi_session(fx, "sibling", "sibling-id", sibling)
+    _, payload = fx.json("-U", "all")
+    ids = _ids(payload)
+    return expect(
+        {"pi-id", "parent-id"} <= ids and "sibling-id" not in ids,
+        f"-U all returned {ids}",
+    )
+
+
+@check("cli-down-flag")
+def _(fx, ctx):
+    one = fx.workspace / "one"
+    three = one / "two/three"
+    three.mkdir(parents=True)
+    _pi_session(fx, "one", "depth1-id", one)
+    _pi_session(fx, "three", "depth3-id", three)
+    _, payload = fx.json("-D", "2")
+    ids = _ids(payload)
+    return expect(
+        {"pi-id", "depth1-id"} <= ids and "depth3-id" not in ids,
+        f"-D 2 returned {ids}; depth 3 must be excluded",
+    )
+
+
+@check("cli-down-all")
+def _(fx, ctx):
+    deep = fx.workspace / "a/b/c/d"
+    deep.mkdir(parents=True)
+    _pi_session(fx, "deep", "deep-id", deep)
+    _, payload = fx.json("-D", "all")
+    return expect("deep-id" in _ids(payload), f"-D all returned {_ids(payload)}")
+
+
+@check("cli-agent-flag-repeat-replaces")
+def _(fx, ctx):
+    _, payload = fx.json("-a", "pi", "-a", "codex")
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(agents == {"pi", "codex"}, f"agents {agents}")
+
+
+@check("cli-agent-case-insensitive")
+def _(fx, ctx):
+    _, lower = fx.json("-a", "pi")
+    _, upper = fx.json("-a", "PI")
+    return expect(lower == upper, "`-a PI` and `-a pi` produced different output")
+
+
+@check("cli-list-flag", "exitcode-0-success")
+def _(fx, ctx):
+    first = fx.run("--list")
+    second = fx.run("--list")
+    escapes = "\x1b[" in first.stdout
+    return expect(
+        first.returncode == 0 and first.stdout == second.stdout and not escapes,
+        f"exit {first.returncode}, stable={first.stdout == second.stdout}, "
+        f"terminal escapes present={escapes}",
+    )
+
+
+@check("cli-json-flag")
+def _(fx, ctx):
+    result = fx.run("--json")
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError as error:
+        return f"stdout is not one JSON document: {error}"
+    return expect(payload.get("schemaVersion") == 1,
+                  f"schemaVersion {payload.get('schemaVersion')!r}")
+
+
+@check("cli-list-json-both-run-discovery")
+def _(fx, ctx):
+    listing = fx.run("--list", "-a", "pi").stdout
+    _, payload = fx.json("-a", "pi")
+    titles = [s["title"] for s in payload["sessions"]]
+    return expect(
+        payload["sessions"] and all(t in listing for t in titles if t),
+        f"--list is missing sessions the JSON reports: {titles}",
+    )
+
+
+@check("cli-verbose-flag")
+def _(fx, ctx):
+    _bad_claude_transcripts(fx, 1)
+    plain = fx.run("--list").stderr
+    verbose = fx.run("--verbose", "--list").stderr
+    return expect(
+        "claude_no_session_id" in plain and len(verbose) > len(plain)
+        and "/" in verbose,
+        f"plain {plain!r} vs verbose {verbose!r}",
+    )
+
+
+@check("cli-config-flag")
+def _(fx, ctx):
+    path = fx.home / "elsewhere.toml"
+    path.write_text('agents = ["pi"]\n')
+    _, payload = fx.json("--config", str(path))
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(agents == {"pi"}, f"--config at a nonstandard path gave {agents}")
+
+
+@check("cli-confirm-always-flag", "cli-no-confirm-flag", "config-confirm-always-field")
+def _(fx, ctx):
+    return ("SKIPPED: the confirmation prompt only appears after selecting a row; "
+            "belongs to the PTY harness")
+
+
+@check("cli-confirm-conflict")
+def _(fx, ctx):
+    result = fx.run("--confirm-always", "--no-confirm", "--list")
+    return expect(
+        result.returncode == 2 and "cannot be used with" in result.stderr,
+        f"exit {result.returncode}, stderr {result.stderr[:120]!r}",
+    )
+
+
+@check("cli-since-duration", "since-fallback-mtime")
+def _(fx, ctx):
+    """A transcript with no in-band time falls back to file mtime."""
+    _pi_session(fx, "stale", "stale-id", fx.workspace)
+    stale = fx.home / ".pi/agent/sessions/stale/stale.jsonl"
+    old = 1_600_000_000
+    os.utime(stale, (old, old))
+    _, recent = fx.json("--since", "10m")
+    _, everything = fx.json("--since", "all")
+    return expect(
+        "stale-id" not in _ids(recent) and "stale-id" in _ids(everything),
+        f"--since 10m gave {_ids(recent)}; --since all gave {_ids(everything)}",
+    )
+
+
+@check("cli-since-date")
+def _(fx, ctx):
+    old = 1_600_000_000  # 2020-09, before the cutoff below
+    _pi_session(fx, "stale", "stale-id", fx.workspace, timestamp=old)
+    stale = fx.home / ".pi/agent/sessions/stale/stale.jsonl"
+    os.utime(stale, (old, old))
+    _, payload = fx.json("--since", "2021-01-01")
+    bad_date = fx.run("--since", "2026-13-40", "--list")
+    return expect(
+        "stale-id" not in _ids(payload) and bad_date.returncode == 2,
+        f"cutoff kept {_ids(payload)}; invalid date exit {bad_date.returncode}",
+    )
+
+
+@check("cli-since-all")
+def _(fx, ctx):
+    _, absent = fx.json()
+    _, everything = fx.json("--since", "all")
+    return expect(absent == everything,
+                  "`--since all` differs from omitting --since")
+
+
+@check("cli-config-subcommand-example", "config-example-matches-schema")
+def _(fx, ctx):
+    result = fx.run("config", "example")
+    path = fx.home / "example.toml"
+    path.write_text(result.stdout)
+    loaded = fx.run("--config", str(path), "--list")
+    readme = (ctx["root"] / "README.md").read_text()
+    fields = re.findall(r"^(\w+) = ", result.stdout, re.M)
+    undocumented = [f for f in fields if f not in readme]
+    # The example is what users copy, so an agent missing from its `agents`
+    # list is silently dropped the moment the file is adopted.
+    listed = set(re.findall(r'"([a-z]+)"', re.search(
+        r"^agents = \[([^\]]*)\]", result.stdout, re.M).group(1)))
+    missing = sorted(set(ctx["agents"]) - listed)
+    return expect(
+        result.returncode == 0 and loaded.returncode == 0
+        and not undocumented and not missing,
+        f"example exit {result.returncode}, reload exit {loaded.returncode}, "
+        f"fields absent from README: {undocumented}, "
+        f"supported agents absent from the example `agents` list: {missing}",
+    )
+
+
+@check("cli-completions-bash", "cli-completions-zsh", "cli-completions-fish",
+       "cli-completions-precede-startup")
+def _(fx, ctx):
+    problems = []
+    for shell, marker in (("bash", "complete"), ("zsh", "_resume"),
+                          ("fish", "complete -c resume")):
+        # An empty environment: completions must precede any config or HOME
+        # lookup, so no variable may be required to reach this output.
+        result = fx.run_env("completions", shell, env={})
+        if result.returncode != 0 or marker not in result.stdout:
+            problems.append(f"{shell}: exit {result.returncode}, "
+                            f"marker present {marker in result.stdout}")
+    return expect(not problems, "; ".join(problems))
+
+
+@check("cli-man-flag")
+def _(fx, ctx):
+    bare = fx.run_env("--man", env={})
+    conflicts = [fx.run("--man", "--json"), fx.run("--man", str(fx.home))]
+    return expect(
+        bare.returncode == 0 and "RESUME(1)" in bare.stdout
+        and all(c.returncode == 2 for c in conflicts),
+        f"--man exit {bare.returncode}, conflict exits "
+        f"{[c.returncode for c in conflicts]}",
+    )
+
+
+@check("cli-help-three-layers")
+def _(fx, ctx):
+    short = fx.run("-h").stdout
+    long = fx.run("--help").stdout
+    man = fx.run("--man").stdout
+    return expect(
+        len(short) < len(long) < len(man)
+        and "--man" in short and "COMMON ERRORS" in long,
+        f"lengths {len(short)}/{len(long)}/{len(man)}; "
+        f"-h points at --man: {'--man' in short}; "
+        f"--help has COMMON ERRORS: {'COMMON ERRORS' in long}",
+    )
+
+
+@check("cli-error-catalog-mechanics")
+def _(fx, ctx):
+    bad_config = fx.home / "bad.toml"
+    bad_config.write_text("mystery = true\n")
+    # E1001 and E1003 reach the user only as their catalog `parser_hint`,
+    # because clap owns the wording of a value-parser rejection. Read the
+    # hints out of the catalog so this check cannot drift from it.
+    catalog = (ctx["root"] / "src/errors.rs").read_text()
+    hints = dict(zip(
+        re.findall(r'code: "(E\d+)"', catalog),
+        [m or None for m in re.findall(
+            r'parser_hint: (?:Some\(\s*"([^"]+)"|None)', catalog)],
+    ))
+    cases = [
+        (["-U", "1", "-D", "2", "--list"], "cannot be used with", False),
+        (["--since", "yesterday", "--list"], hints["E1001"], False),
+        (["-U", "-1", "--list"], hints["E1003"], False),
+        (["--config", str(bad_config), "--list"], "E1004", True),
+        (["--list", "--confirm-always", "--no-confirm"], "cannot be used with", False),
+    ]
+    problems = []
+    for args, marker, want_block in cases:
+        result = fx.run(*args)
+        text = result.stderr
+        if result.returncode != 2:
+            problems.append(f"{args}: exit {result.returncode}")
+        if marker not in text:
+            problems.append(f"{args}: stderr lacks {marker!r}: {text[:100]!r}")
+        if want_block is False and re.search(r"ERROR \[E\d+\]", text):
+            problems.append(f"{args}: unexpected E-code block: {text[:80]!r}")
+        if want_block is True and ("Trigger:" not in text or "Fix:" not in text):
+            problems.append(f"{args}: not the four-line block: {text[:120]!r}")
+    return expect(not problems, "; ".join(problems))
+
+
+@check("exitcode-1-error")
+def _(fx, ctx):
+    broken = Fixture(ctx["root"], ctx["binary"], QA_NO_OPENCODE=True)
+    settings = broken.home / ".resume/settings.json"
+    settings.write_text(json.dumps({"schema_version": 1, "agents": ["opencode"],
+                                    "known_agents": ["pi", "claude", "codex",
+                                                     "omp", "opencode"]}))
+    result = broken.run("--list")
+    shutil.rmtree(broken.home, ignore_errors=True)
+    return expect(result.returncode == 1,
+                  f"the only selected integration failed but exit was "
+                  f"{result.returncode}, want 1")
+
+
+@check("exitcode-2-usage")
+def _(fx, ctx):
+    bad_config = fx.home / "bad.toml"
+    bad_config.write_text("mystery = true\n")
+    cases = [["--list", "--agent", "bogus"],
+             [str(fx.home / "nonexistent"), "--list"],
+             ["--config", str(bad_config), "--list"]]
+    codes = [fx.run(*c).returncode for c in cases]
+    return expect(codes == [2, 2, 2], f"exit codes {codes} for {cases}")
+
+
+@check("exitcode-130-interrupt")
+def _(fx, ctx):
+    return "SKIPPED: Ctrl+C in the picker is interactive; belongs to the PTY harness"
+
+
+# ------------------------------------------------------------------ config
+def _write_config(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+@check("config-precedence-explicit", "config-no-merge")
+def _(fx, ctx):
+    _write_config(fx.home / "xdg/config/resume/config.toml",
+                  'agents = ["claude"]\nsince = "1m"\n')
+    _write_config(fx.home / ".config/resume/config.toml", 'agents = ["codex"]\n')
+    explicit = fx.home / "explicit.toml"
+    _write_config(explicit, 'agents = ["pi"]\n')
+    _, payload = fx.json("--config", str(explicit))
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(
+        agents == {"pi"},
+        f"explicit config gave {agents}; lower-precedence files must not merge "
+        f"(a merged `since = \"1m\"` would also have emptied the result)",
+    )
+
+
+@check("config-precedence-xdg")
+def _(fx, ctx):
+    _write_config(fx.home / "xdg/config/resume/config.toml", 'agents = ["claude"]\n')
+    _write_config(fx.home / ".config/resume/config.toml", 'agents = ["codex"]\n')
+    _, payload = fx.json()
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(agents == {"claude"}, f"XDG config lost precedence: {agents}")
+
+
+@check("config-precedence-home")
+def _(fx, ctx):
+    _write_config(fx.home / ".config/resume/config.toml", 'agents = ["codex"]\n')
+    result = fx.run_env("--json", env=fx.env(XDG_CONFIG_HOME=None))
+    payload = json.loads(result.stdout)
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(agents == {"codex"},
+                  f"with no XDG_CONFIG_HOME, ~/.config config gave {agents}")
+
+
+@check("config-unknown-field-rejected", "config-parse-error-reports-line-and-field")
+def _(fx, ctx):
+    path = fx.home / "unknown.toml"
+    _write_config(path, "mystery = true\n")
+    result = fx.run("--config", str(path), "--list")
+    return expect(
+        result.returncode == 2 and "line 1" in result.stderr
+        and "mystery" in result.stderr,
+        f"exit {result.returncode}, stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("config-invalid-value-rejected")
+def _(fx, ctx):
+    path = fx.home / "invalid.toml"
+    _write_config(path, "preview_position = 'left'\n")
+    result = fx.run("--config", str(path), "--list")
+    return expect(
+        result.returncode == 2 and "preview_position" in result.stderr,
+        f"exit {result.returncode}, stderr {result.stderr[:200]!r}",
+    )
+
+
+@check("config-since-field")
+def _(fx, ctx):
+    _pi_session(fx, "stale", "stale-id", fx.workspace)
+    stale = fx.home / ".pi/agent/sessions/stale/stale.jsonl"
+    os.utime(stale, (1_600_000_000, 1_600_000_000))
+    path = fx.home / "since.toml"
+    _write_config(path, 'since = "7d"\n')
+    _, filtered = fx.json("--config", str(path))
+    _, overridden = fx.json("--config", str(path), "--since", "all")
+    return expect(
+        "stale-id" not in _ids(filtered) and "stale-id" in _ids(overridden),
+        f"config cutoff kept {_ids(filtered)}; --since all gave {_ids(overridden)}",
+    )
+
+
+@check("config-documented-fields-load")
+def _(fx, ctx):
+    path = fx.home / "full.toml"
+    _write_config(path, 'agents = ["pi"]\nsince = "all"\nconfirm_always = true\n'
+                        'preview = "visible"\npreview_position = "bottom"\n'
+                        'verbose = true\n')
+    _bad_claude_transcripts(fx, 1)
+    result = fx.run("--config", str(path), "--list")
+    _, payload = fx.json("--config", str(path))
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(
+        result.returncode == 0 and agents == {"pi"},
+        f"exit {result.returncode}, agents {agents} (want just pi)",
+    )
+
+
+@check("config-agents-default")
+def _(fx, ctx):
+    _, payload = fx.json()
+    agents = {s["agent"] for s in payload["sessions"]}
+    return expect(
+        {"pi", "claude", "codex", "omp"} <= agents,
+        f"with no config file, discovery covered only {agents}",
+    )
+
+
+@check("config-verbose-field")
+def _(fx, ctx):
+    _bad_claude_transcripts(fx, 1)
+    path = fx.home / "verbose.toml"
+    _write_config(path, "verbose = true\n")
+    quiet = fx.run("--list").stderr
+    loud = fx.run("--config", str(path), "--list").stderr
+    return expect(
+        len(loud) > len(quiet) and "/" in loud,
+        f"config verbose had no effect: {quiet!r} vs {loud!r}",
+    )
+
+
+@check("config-preview-field", "config-preview-position-field")
+def _(fx, ctx):
+    return ("SKIPPED: the preview pane only exists inside the picker; "
+            "belongs to the PTY harness")
 
 
 # ---------------------------------------------------------------- opencode
