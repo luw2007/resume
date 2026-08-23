@@ -24,7 +24,7 @@ use crate::{
     preview::{jsonl::Bounds, text},
     runtime::CancelToken,
     scope::{DefaultScope, Direction, Scope},
-    session::{Diagnostic, ResumeSpec, Session, SupportStatus},
+    session::{ActivityStatus, Diagnostic, ResumeSpec, Session, SupportStatus},
     settings,
 };
 
@@ -766,9 +766,15 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
     }
     let (live, mut errors) = omp::correlate_live(&ctx.procs, &roots);
     let mut records = Vec::new();
+    // OMP is the only integration that scans more than one root, so it is the
+    // only one that has to decide what a partial failure means. One failing
+    // profile is a diagnostic and the rest still count; every root failing is
+    // the integration failing, same as the single-root integrations.
+    let mut scanned_any = false;
     for root in roots {
         match omp::discover(&omp::DiscoverConfig::new(root.clone(), scope)) {
             Ok(outcome) => {
+                scanned_any = true;
                 errors.extend(count_errors("omp_skipped", outcome.skipped_files));
                 records.extend(outcome.parsed.into_iter().map(|parsed| {
                     let spec = parsed.resume_spec(&root);
@@ -789,7 +795,11 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
             }),
         }
     }
-    AgentDiscovery::ok(records, errors)
+    if scanned_any {
+        AgentDiscovery::ok(records, errors)
+    } else {
+        AgentDiscovery::failed_with_errors(errors)
+    }
 }
 
 fn discover_opencode(scope: &Scope) -> AgentDiscovery {
@@ -820,7 +830,7 @@ fn discover_opencode(scope: &Scope) -> AgentDiscovery {
                 .collect();
             AgentDiscovery::ok(records, errors)
         }
-        Ok(None) => AgentDiscovery::failed("opencode_root_unavailable"),
+        Ok(None) => AgentDiscovery::failed(opencode::NO_SESSIONS_CATEGORY),
         Err(_) => AgentDiscovery::failed("opencode_discovery_failed"),
     }
 }
@@ -1132,33 +1142,49 @@ struct JsonError<'a> {
     category: &'a str,
     count: usize,
 }
+/// The `activity` label for `--json`.
+///
+/// `SupportStatus` and `RiskStatus` are field-less, so their `Debug` output is
+/// already the documented label; `ActivityStatus` carries an observation
+/// timestamp, and rendering it the same way leaks Rust struct syntax and a
+/// wall-clock time into a machine-readable field that is documented to hold
+/// `Active`, `Inactive`, or `Unknown`.
+fn activity_label(activity: &ActivityStatus) -> &'static str {
+    match activity {
+        ActivityStatus::Active { .. } => "Active",
+        ActivityStatus::Inactive { .. } => "Inactive",
+        ActivityStatus::Unknown => "Unknown",
+    }
+}
+
+fn json_session(r: &CandidateRecord) -> JsonSession {
+    JsonSession {
+        agent: r.session.key.agent.to_string_lossy().into_owned(),
+        profile: r
+            .session
+            .key
+            .profile
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        id: r.session.resumable_id.to_string_lossy().into_owned(),
+        title: r
+            .session
+            .title
+            .as_deref()
+            .map(|t| text::normalize(t, text::Mode::Normalized)),
+        workspace: r
+            .session
+            .workspace
+            .workspace()
+            .map(|p| p.display().to_string()),
+        support: format!("{:?}", r.session.support),
+        activity: activity_label(&r.session.activity).to_string(),
+        risk: format!("{:?}", r.session.risk),
+    }
+}
+
 fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
-    let sessions = records
-        .iter()
-        .map(|r| JsonSession {
-            agent: r.session.key.agent.to_string_lossy().into_owned(),
-            profile: r
-                .session
-                .key
-                .profile
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            id: r.session.resumable_id.to_string_lossy().into_owned(),
-            title: r
-                .session
-                .title
-                .as_deref()
-                .map(|t| text::normalize(t, text::Mode::Normalized)),
-            workspace: r
-                .session
-                .workspace
-                .workspace()
-                .map(|p| p.display().to_string()),
-            support: format!("{:?}", r.session.support),
-            activity: format!("{:?}", r.session.activity),
-            risk: format!("{:?}", r.session.risk),
-        })
-        .collect();
+    let sessions = records.iter().map(json_session).collect();
     let errors_guard = state.errors.lock().unwrap();
     let aggregated = aggregate_diagnostics(&errors_guard, false);
     let errors = aggregated
@@ -1302,6 +1328,45 @@ mod tests {
     #[test]
     fn empty_list_has_human_readable_fallback() {
         assert_eq!(empty_list_message(&[]), Some("No Sessions found in Scope."));
+    }
+
+    /// session-status-supported-active: `--json`'s `activity` is documented to
+    /// hold `Active`, `Inactive`, or `Unknown`. Rendering the enum with `{:?}`
+    /// emitted `Active { observed_at: SystemTime { tv_sec: .., tv_nsec: .. } }`
+    /// instead, so no consumer could match the documented value and the field
+    /// carried a wall-clock time nothing asked for.
+    #[test]
+    fn json_activity_is_the_bare_label_for_every_variant() {
+        let observed_at = std::time::SystemTime::now();
+        for (activity, expected) in [
+            (ActivityStatus::Active { observed_at }, "Active"),
+            (ActivityStatus::Inactive { observed_at }, "Inactive"),
+            (ActivityStatus::Unknown, "Unknown"),
+        ] {
+            let record = CandidateRecord {
+                session: Session {
+                    key: crate::session::SessionKey {
+                        agent: "codex".into(),
+                        effective_root: "/r".into(),
+                        profile: None,
+                        native_locator: "/t".into(),
+                    },
+                    resumable_id: "id".into(),
+                    title: None,
+                    updated_at: None,
+                    workspace: WorkspaceEvidence::Recorded {
+                        workspace: "/workspace".into(),
+                        historical_git_identity: None,
+                    },
+                    support: SupportStatus::Supported,
+                    activity,
+                    risk: RiskStatus::Normal,
+                },
+                spec: None,
+                evidence: None,
+            };
+            assert_eq!(json_session(&record).activity, expected);
+        }
     }
 
     #[test]

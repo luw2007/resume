@@ -853,6 +853,68 @@ fn omp_discovers_default_and_every_named_profile_in_one_run() {
 }
 
 #[test]
+fn opencode_distinguishes_a_feature_off_build_from_a_missing_database() {
+    // opencode-feature-off-vs-no-data: both cases produce zero Sessions, and
+    // both used to print `opencode_root_unavailable`, so "this build cannot
+    // read OpenCode" was indistinguishable from "this machine has no OpenCode
+    // data" -- the first is fixed by rebuilding, the second is not.
+    let (tmp, ws) = fixtures();
+    let output = run_with_env(tmp.path(), &ws, &["--json", "-a", "opencode"], &[]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let categories: Vec<&str> = value["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["category"].as_str().unwrap())
+        .collect();
+    let expected = if cfg!(feature = "opencode") {
+        "opencode_root_unavailable"
+    } else {
+        "opencode_disabled"
+    };
+    assert!(
+        categories.contains(&expected),
+        "expected {expected} among {categories:?}"
+    );
+}
+
+#[test]
+fn omp_marks_the_integration_failed_when_every_profile_root_is_unscannable() {
+    // output-list-all-integrations-fail: `discover_omp` scans several profile
+    // roots and returned `AgentDiscovery::ok` unconditionally, so a run where
+    // every OMP root failed still counted as a successful integration. That is
+    // the one thing keeping `successful_integrations` above zero, so `--list`
+    // exited 0 while reporting that nothing had worked.
+    let (tmp, ws) = fixtures();
+    let agent_dir = tmp.path().join(".omp/agent");
+    let mut locked = fs::metadata(&agent_dir).unwrap().permissions();
+    locked.set_mode(0o000);
+    fs::set_permissions(&agent_dir, locked).unwrap();
+    let output = run_with_env(
+        tmp.path(),
+        &ws,
+        &["--list", "--agent", "omp"],
+        // The default profile's agent root prefers PI_CODING_AGENT_DIR, so it
+        // has to point at the directory being locked for the scan to fail.
+        &[("PI_CODING_AGENT_DIR", agent_dir.as_path())],
+    );
+    let mut unlocked = fs::metadata(&agent_dir).unwrap().permissions();
+    unlocked.set_mode(0o755);
+    fs::set_permissions(&agent_dir, unlocked).unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("omp_discovery_failed"),
+        "expected the scan failure to be diagnosed, got: {stderr}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "every selected integration failed, so the run must exit 1: {stderr}"
+    );
+}
+
+#[test]
 fn omp_profile_env_selecting_a_named_profile_does_not_suppress_the_default() {
     // `discover_omp`'s `base_roots` already reflects OMP_PROFILE/PI_PROFILE
     // env selection, so before the fix, setting OMP_PROFILE to a named

@@ -69,6 +69,10 @@ pub struct DiscoverOutcome {
     pub skipped_rows: usize,
 }
 
+/// Diagnostic category for `Ok(None)` in this build: the database file is
+/// genuinely absent, matching every other integration's missing-root handling.
+pub const NO_SESSIONS_CATEGORY: &str = "opencode_root_unavailable";
+
 /// Discover OpenCode sessions from the SQLite database beneath
 /// `effective_root`. Opens the database read-only and never writes,
 /// migrates, or checkpoints it. Returns `Ok(None)` when the database file
