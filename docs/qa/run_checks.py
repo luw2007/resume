@@ -102,7 +102,122 @@ def expect(condition, message):
     return None if condition else message
 
 
+def _detached(fx, *args, env=None, timeout=30):
+    """Run the binary in a session of its own, where /dev/tty cannot open.
+
+    A pipe is not enough: the code that wants a terminal opens `/dev/tty`
+    rather than looking at its own descriptors, so it still finds the
+    developer's terminal behind a redirect. Returns (exit code, output).
+    """
+    detach = (
+        "import os,sys\n"
+        "os.setsid()\n"                      # a new session has no /dev/tty
+        "out = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n"
+        "os.dup2(out, 1); os.dup2(out, 2)\n"
+        "os.dup2(os.open(os.devnull, os.O_RDONLY), 0)\n"
+        "os.execve(sys.argv[1], [sys.argv[1], *sys.argv[3:]], os.environ)\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / "out"
+        result = subprocess.run(
+            [sys.executable, "-c", detach, str(fx.binary), str(out), *args],
+            capture_output=True, text=True, env=env if env is not None else fx.env(),
+            cwd=str(fx.workspace), timeout=timeout)
+        text = out.read_text() if out.is_file() else result.stderr
+    return result.returncode, text
+
+
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[]P][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[()][0-9A-B]|\x1b[=><]")
+
+
+CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
+OSC = re.compile(r"\x1b[]P][^\x07\x1b]*(?:\x07|\x1b\\)?")
+
+
+def render(raw, rows, cols):
+    """Replay cursor-addressed output onto a character grid.
+
+    Stripping escape sequences is enough to look for a message, but not to
+    assert on the picker: tuikit paints by jumping the cursor, so the columns
+    of a row arrive out of order and interleaved with the rows around them.
+    Only the subset tuikit actually emits is interpreted — absolute and
+    relative cursor moves, the two erase commands, and the C0 controls.
+    """
+    grid = [[" "] * cols for _ in range(rows)]
+    row = col = 0
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\x1b":
+            m = CSI.match(raw, i)
+            if m:
+                nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
+                final = m.group(2)
+                first = nums[0] if nums else 0
+                if final in "Hf":
+                    row = (nums[0] - 1) if nums else 0
+                    col = (nums[1] - 1) if len(nums) > 1 else 0
+                elif final == "A":
+                    row -= max(1, first)
+                elif final == "B":
+                    row += max(1, first)
+                elif final == "C":
+                    col += max(1, first)
+                elif final == "D":
+                    col -= max(1, first)
+                elif final == "G":
+                    col = max(1, first) - 1
+                elif final == "J":
+                    blank = [" "] * cols
+                    if first == 2:
+                        grid = [list(blank) for _ in range(rows)]
+                    elif first == 1:
+                        for r in range(row):
+                            grid[r] = list(blank)
+                        grid[row][:col + 1] = [" "] * (col + 1)
+                    else:
+                        grid[row][col:] = [" "] * (cols - col)
+                        for r in range(row + 1, rows):
+                            grid[r] = list(blank)
+                elif final == "K":
+                    if first == 1:
+                        grid[row][:col + 1] = [" "] * (col + 1)
+                    elif first == 2:
+                        grid[row] = [" "] * cols
+                    else:
+                        grid[row][col:] = [" "] * (cols - col)
+                i = m.end()
+            elif OSC.match(raw, i):
+                i = OSC.match(raw, i).end()
+            else:  # \x1b(B, \x1b=, \x1b>, \x1bM, ...
+                i += 3 if i + 1 < n and raw[i + 1] in "()#" else 2
+        elif ch == "\r":
+            col, i = 0, i + 1
+        elif ch == "\n":
+            row, col, i = row + 1, 0, i + 1
+            if row >= rows:
+                grid.pop(0)
+                grid.append([" "] * cols)
+                row = rows - 1
+        elif ch == "\b":
+            col, i = col - 1, i + 1
+        elif ch == "\t":
+            col, i = (col // 8 + 1) * 8, i + 1
+        elif ch >= " ":
+            if col >= cols:
+                row, col = row + 1, 0
+            if row >= rows:
+                grid.pop(0)
+                grid.append([" "] * cols)
+                row = rows - 1
+            grid[max(0, row)][col] = ch
+            col, i = col + 1, i + 1
+        else:
+            i += 1
+        # col may sit one past the margin: that is the pending-wrap state a
+        # real terminal keeps, and the next printable character wraps.
+        row, col = max(0, min(row, rows - 1)), max(0, min(col, cols))
+    return ["".join(line) for line in grid]
 
 
 class PtyTimeout(Exception):
@@ -118,7 +233,7 @@ class Pty:
     """
 
     def __init__(self, fx, *args, env=None, cwd=None, rows=30, cols=120,
-                 term="xterm-256color"):
+                 term="xterm-256color", stdin=None):
         env = dict(fx.env() if env is None else env)
         env["TERM"] = term
         cwd = str(cwd or fx.workspace)
@@ -127,16 +242,34 @@ class Pty:
         if pid == 0:
             try:
                 os.chdir(cwd)
+                if stdin is not None:  # keystrokes still arrive over /dev/tty
+                    os.dup2(os.open(str(stdin), os.O_RDONLY), 0)
                 os.execve(argv[0], argv, env)
             except BaseException:
                 os._exit(127)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.pid, self.fd, self.raw, self.status = pid, fd, "", None
+        self.rows, self.cols = rows, cols
 
     @property
     def screen(self):
         """Output with escape sequences removed, for substring matching."""
         return ANSI.sub("", self.raw).replace("\r\n", "\n")
+
+    @property
+    def lines(self):
+        """The visible grid, for asserting on layout rather than content."""
+        return [line.rstrip() for line in render(self.raw, self.rows, self.cols)]
+
+    @property
+    def wrapped(self):
+        """The grid as one string, padding intact, so a row that ran past the
+        right margin can still be measured across the wrap."""
+        return "".join(render(self.raw, self.rows, self.cols))
+
+    def find(self, pattern):
+        """Every visible line matching `pattern`, in top-to-bottom order."""
+        return [line for line in self.lines if re.search(pattern, line)]
 
     def _drain(self, timeout):
         ready, _, _ = select.select([self.fd], [], [], timeout)
@@ -188,6 +321,12 @@ class Pty:
         self.status = (os.WEXITSTATUS(status) if os.WIFEXITED(status)
                        else 128 + os.WTERMSIG(status))
         return self.status
+
+    def alive(self):
+        """True while the child has neither exited nor been reaped."""
+        if self.status is not None:
+            return False
+        return os.waitpid(self.pid, os.WNOHANG) == (0, 0)
 
     def close(self):
         if self.status is None:
@@ -2588,26 +2727,11 @@ def _(fx, ctx):
 
 @check("setup-no-terminal-error")
 def _(fx, ctx):
-    """setsid detaches the controlling terminal, so /dev/tty cannot open."""
-    detach = (
-        "import os,sys\n"
-        "os.setsid()\n"                      # a new session has no /dev/tty
-        "out = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n"
-        "os.dup2(out, 1); os.dup2(out, 2)\n"
-        "os.dup2(os.open(os.devnull, os.O_RDONLY), 0)\n"
-        "os.execve(sys.argv[1], [sys.argv[1], 'setup'], os.environ)\n"
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        out = pathlib.Path(tmp) / "out"
-        result = subprocess.run(
-            [sys.executable, "-c", detach, str(fx.binary), str(out)],
-            capture_output=True, text=True, env=fx.env(),
-            cwd=str(fx.workspace), timeout=30)
-        text = out.read_text() if out.is_file() else result.stderr
+    code, text = _detached(fx, "setup")
     return expect(
-        result.returncode != 0 and "no controlling terminal" in text
+        code != 0 and "no controlling terminal" in text
         and "resume setup" in text and "interactive terminal" in text,
-        f"exit {result.returncode}, output {text[:250]!r}",
+        f"exit {code}, output {text[:250]!r}",
     )
 
 
@@ -3059,6 +3183,550 @@ def _(fx, ctx):
     return expect(not missing, f"bound but undocumented in the spec: {missing}")
 
 
+# ------------------------------------------------------------------- picker
+# Everything below drives the tabbed picker through a real pseudoterminal:
+# these rows are unreachable through a pipe, because Skim opens /dev/tty
+# itself and the layout only exists once something paints it.
+
+ROW_HEADER = r"^\s*UPDATED\s+AGENT\[PROFILE\]\s+TITLE\s+BRANCH\s*$"
+PAGE = r"PAGE (\d+)/(\d+)"
+
+KEYS = {
+    "ctrl-o": "\x0f", "ctrl-r": "\x12", "ctrl-c": "\x03", "esc": "\x1b",
+    "enter": "\r", "tab": "\t", "shift-tab": "\x1b[Z",
+    "left": "\x1b[D", "right": "\x1b[C",
+    "alt-left": "\x1b[1;3D", "alt-right": "\x1b[1;3C",
+    "alt-p": "\x1bp", "alt-n": "\x1bn",
+}
+
+
+def _picker(fx, *args, cols=120, rows=30, env=None, stdin=None, timeout=25):
+    """Open the picker and wait until it has painted its header line."""
+    pty = Pty(fx, *args, cols=cols, rows=rows, env=env, stdin=stdin)
+    try:
+        pty.expect(PAGE, timeout=timeout)
+    except BaseException:
+        pty.close()
+        raise
+    return pty
+
+
+def _key(pty, name, settle=1.0):
+    return pty.send(KEYS[name], settle=settle)
+
+
+def _status(pty):
+    """Tab names, active tab, page numbers and hint, read off the header."""
+    line = next((l for l in pty.lines if re.search(PAGE, l)), None)
+    if line is None:
+        return None
+    m = re.search(PAGE, line)
+    tokens = re.sub(r"\([^)]*\)", "", line[:m.start()]).split()
+    return {
+        "tabs": [t.strip("[]") for t in tokens],
+        "tab": next((t.strip("[]") for t in tokens if t.startswith("[")), None),
+        "page": int(m.group(1)),
+        "pages": int(m.group(2)),
+        "hint": line[m.start():].strip(),
+        "line": line.strip(),
+    }
+
+
+def _rows(pty):
+    """The candidate rows, which sit above the column header."""
+    lines = pty.lines
+    end = next((i for i, l in enumerate(lines) if re.match(ROW_HEADER, l)), 0)
+    return [l for l in lines[:end] if l.strip()]
+
+
+def _count(pty):
+    """How many candidates the current view holds, from Skim's own counter.
+
+    Reading the rows is not the same thing: a page of 50 cannot fit on a
+    30-line terminal, and the counter is what the user sees for the total.
+    """
+    for line in pty.lines:
+        m = re.match(r"^\s*(\d+)/(\d+)\b", line)
+        if m:
+            return int(m.group(2))
+    return None
+
+
+def _settled(pty, predicate, timeout=20, poll=0.2):
+    """Poll the terminal until `predicate` is truthy, then return its value.
+
+    The picker paints its header before the first candidate arrives and grows
+    a Codex tab whenever the background scan lands, so anything read straight
+    after `expect` can be a half-drawn screen.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() > deadline:
+            return value
+        pty._drain(poll)
+
+
+def _stable(pty, read, timeout=20, hold=0.8, poll=0.2):
+    """Read until the value has been non-empty and unchanged for `hold`.
+
+    Skim streams a page's candidates in rather than starting with all of
+    them, so both the empty screen it opens with and the first counter it
+    prints are partial answers, not the total.
+    """
+    deadline = time.monotonic() + timeout
+    value, since = None, time.monotonic()
+    while True:
+        current = read()
+        if current != value:
+            value, since = current, time.monotonic()
+        elif value and time.monotonic() - since >= hold:
+            return value
+        if time.monotonic() > deadline:
+            return value
+        pty._drain(poll)
+
+
+def _await_tab(pty, name, timeout=30):
+    """Wait for a background agent's tab, redrawing until it appears.
+
+    `run_tabbed_picker` re-reads the candidate snapshot once per navigation
+    and never mid-render, so a tab that lands behind the user's back only
+    shows up on the next redraw. Right-then-Left is the cheapest redraw that
+    always works: Alt+N is only bound away from the newest page, and both
+    steps reset to page 0, which is where a freshly opened tab already is.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if name in (_status(pty) or {"tabs": []})["tabs"]:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        _key(pty, "right", settle=0.4)
+        _key(pty, "left", settle=0.4)
+
+
+def _pi_corpus(fx, count, *, prefix="bulk", base=1_700_000_000):
+    """`count` pi sessions with strictly increasing modification times, so the
+    rank order they must appear in is known independently of the picker.
+
+    The session the shared fixture ships is removed first: it was written just
+    now, so it would sort newest and shift every count by one.
+    """
+    shutil.rmtree(fx.home / ".pi/agent/sessions/ws", ignore_errors=True)
+    made = []
+    for i in range(count):
+        name = f"{prefix}{i:03d}"
+        _pi_session(fx, name, f"{name}-id", fx.workspace, title=f"title {i:03d}",
+                    timestamp=base + i)
+        path = fx.home / ".pi/agent/sessions" / name / f"{name}.jsonl"
+        os.utime(path, (base + i, base + i))
+        made.append(f"{name}-id")
+    return made
+
+
+@check("cli-default-picker", "picker-tabs-per-agent")
+def _(fx, ctx):
+    """Bare `resume` opens the picker; tab 0 is All and every agent holding a
+    session gets exactly one tab of its own."""
+    with _picker(fx) as pty:
+        # Codex is discovered in the background, so wait for its tab to land.
+        _await_tab(pty, "codex")
+        status = _status(pty)
+        _key(pty, "ctrl-c")
+        pty.wait()
+    agents = {s["agent"] for s in json.loads(fx.run("--json").stdout)["sessions"]}
+    return expect(
+        status["tabs"][0] == "All" and status["tab"] == "All"
+        and sorted(status["tabs"][1:]) == sorted(agents),
+        f"tabs {status['tabs']} (active {status['tab']}) for agents "
+        f"{sorted(agents)}",
+    )
+
+
+@check("picker-preview-hidden-default", "picker-ctrl-o-toggle",
+       "picker-preview-dual-section")
+def _(fx, ctx):
+    """One Ctrl+O sequence settles the default visibility, the toggle, and the
+    two sections the production preview always renders."""
+    with _picker(fx) as pty:
+        before = "\n".join(pty.lines)
+        _key(pty, "ctrl-o")
+        shown = pty.lines
+        _key(pty, "ctrl-o")
+        after = "\n".join(pty.lines)
+        _key(pty, "ctrl-c")
+        pty.wait()
+    text = "\n".join(shown)
+    return expect(
+        "# normalized" not in before and "# normalized" not in after
+        and "# normalized (terminal-safe)" in text
+        and "# raw (still terminal-safe, unfiltered)" in text,
+        f"hidden by default: {'# normalized' not in before}; hidden again: "
+        f"{'# normalized' not in after}; sections while shown: "
+        f"{[l.strip() for l in shown if '#' in l]}",
+    )
+
+
+@check("picker-preview-position-auto", "picker-preview-toggle")
+def _(fx, ctx):
+    """Auto puts the pane on the right only at 100 columns or more; below that
+    it goes to the bottom, which shows up as the section starting at column 0
+    rather than beside the rows."""
+    offsets = {}
+    for cols in (120, 80):
+        with _picker(fx, cols=cols) as pty:
+            _key(pty, "ctrl-o")
+            line = next((l for l in pty.lines
+                         if "# normalized (terminal-safe)" in l), None)
+            offsets[cols] = None if line is None else line.index("#")
+            _key(pty, "ctrl-c")
+            pty.wait()
+    return expect(
+        offsets[120] is not None and offsets[120] > 0 and offsets[80] == 0,
+        f"the preview section began at column {offsets} by terminal width "
+        f"(a right pane starts beside the rows, a bottom pane at column 0)",
+    )
+
+
+@check("picker-ctrl-r-noop", "picker-ctrl-r-ignored")
+def _(fx, ctx):
+    """Ctrl+R is bound to `ignore`, so it must not reload, exit, or disturb
+    the query, tab, or page."""
+    with _picker(fx) as pty:
+        _key(pty, "tab")
+        pty.send("title", settle=1.0)
+        before = (_status(pty), _rows(pty), pty.lines[-1])
+        _key(pty, "ctrl-r")
+        after = (_status(pty), _rows(pty), pty.lines[-1])
+        alive = pty.alive()
+        _key(pty, "ctrl-c")
+        pty.wait()
+    return expect(
+        alive and before == after,
+        f"still running: {alive}; before {before[0]} {before[2]!r}; "
+        f"after {after[0]} {after[2]!r}",
+    )
+
+
+@check("picker-esc-cancel")
+def _(fx, ctx):
+    with _picker(fx) as pty:
+        _key(pty, "esc", settle=0.8)
+        code = pty.wait()
+    return expect(code == 0, f"Esc exited {code}, want 0")
+
+
+@check("picker-ctrl-c-interrupt", "exitcode-130-interrupt")
+def _(fx, ctx):
+    with _picker(fx) as pty:
+        _key(pty, "ctrl-c", settle=0.8)
+        code = pty.wait()
+    return expect(code == 130, f"Ctrl+C exited {code}, want 130")
+
+
+@check("picker-terminal-too-small")
+def _(fx, ctx):
+    pty = Pty(fx, rows=8, cols=40)
+    try:
+        code = pty.wait()
+        screen = pty.screen
+    finally:
+        pty.close()
+    return expect(
+        code == 2 and "terminal too small" in screen and "minimum 60x10" in screen,
+        f"exit {code} (want 2), screen {screen.strip()[-200:]!r}",
+    )
+
+
+@check("picker-redirected-stdin-still-works")
+def _(fx, ctx):
+    """Skim reads keystrokes from /dev/tty, so a redirected stdin must not
+    stop the picker opening or responding."""
+    with _picker(fx, stdin="/dev/null") as pty:
+        rows = _settled(pty, lambda: _rows(pty))
+        _key(pty, "tab")
+        switched = _status(pty)["tab"]
+        _key(pty, "ctrl-c")
+        code = pty.wait()
+    return expect(
+        rows and switched != "All" and code == 130,
+        f"rows {len(rows)}, tab after Tab {switched!r}, exit {code}",
+    )
+
+
+@check("picker-tab-switch-keys", "picker-tabbed-view-tabs-and-pages")
+def _(fx, ctx):
+    """All six switch keys move one tab, wrapping at both ends."""
+    with _picker(fx) as pty:
+        _await_tab(pty, "codex")
+        tabs = _status(pty)["tabs"]
+        forward, backward = [], []
+        for _ in range(len(tabs)):
+            _key(pty, "tab")
+            forward.append(_status(pty)["tab"])
+        for _ in range(len(tabs)):
+            _key(pty, "shift-tab")
+            backward.append(_status(pty)["tab"])
+        singles = {}
+        for name in ("right", "alt-right", "left", "alt-left"):
+            was = _status(pty)["tab"]
+            _key(pty, name)
+            singles[name] = (was, _status(pty)["tab"])
+        _key(pty, "ctrl-c")
+        pty.wait()
+    step = lambda pair, delta: (tabs.index(pair[1])
+                                == (tabs.index(pair[0]) + delta) % len(tabs))
+    return expect(
+        forward == tabs[1:] + tabs[:1]
+        and backward == list(reversed(tabs))[:-1] + [tabs[0]]
+        and all(step(singles[k], +1) for k in ("right", "alt-right"))
+        and all(step(singles[k], -1) for k in ("left", "alt-left")),
+        f"tabs {tabs}; Tab cycle {forward}; Shift+Tab cycle {backward}; "
+        f"single steps {singles}",
+    )
+
+
+@check("picker-paging-keys", "picker-newest-page-is-full")
+def _(fx, ctx):
+    """Page 1 always holds the newest PAGE_SIZE rows; the short page is the
+    oldest one, and both ends clamp rather than wrap."""
+    size = int(re.search(r"PAGE_SIZE: usize = (\d+)",
+                         (ctx["root"] / "src/picker.rs").read_text()).group(1))
+    _pi_corpus(fx, size + 3)
+    with _picker(fx, "--agent", "pi") as pty:
+        newest = _stable(pty, lambda: _count(pty))
+        first = (_status(pty), newest)
+        _key(pty, "alt-n")  # already newest: a no-op redraw
+        clamped_newest = _status(pty)["page"]
+        _key(pty, "alt-p")
+        oldest = _stable(pty, lambda: _count(pty))
+        second = (_status(pty), oldest)
+        _key(pty, "alt-p")  # already oldest
+        clamped_oldest = _status(pty)["page"]
+        _key(pty, "ctrl-c")
+        pty.wait()
+    return expect(
+        first[0]["page"] == 1 and first[0]["pages"] == 2 and first[1] == size
+        and clamped_newest == 1 and second[0]["page"] == 2 and second[1] == 3
+        and clamped_oldest == 2,
+        f"page 1 held {first[1]} of {size} candidates ({first[0]['line']!r}); "
+        f"page 2 held {second[1]} of 3; Alt+N on the newest page gave page "
+        f"{clamped_newest}, Alt+P on the oldest gave page {clamped_oldest}",
+    )
+
+
+@check("picker-page-clamped-on-shrink")
+def _(fx, ctx):
+    """Paging deep into a large tab and then switching to a single-page tab
+    must land on that tab's last page, not past its end."""
+    size = int(re.search(r"PAGE_SIZE: usize = (\d+)",
+                         (ctx["root"] / "src/picker.rs").read_text()).group(1))
+    _pi_corpus(fx, size + 3)
+    with _picker(fx) as pty:
+        _key(pty, "alt-p")
+        deep = _status(pty)
+        while _status(pty)["tab"] != "claude":
+            _key(pty, "tab")
+        small = _status(pty)
+        rows = _rows(pty)
+        _key(pty, "ctrl-c")
+        pty.wait()
+    return expect(
+        deep["page"] == 2 and small["pages"] == 1 and small["page"] == 1 and rows,
+        f"left the All tab on page {deep['page']}/{deep['pages']}, arrived at "
+        f"{small['tab']} page {small['page']}/{small['pages']} showing "
+        f"{len(rows)} rows",
+    )
+
+
+@check("picker-rank-ordering")
+def _(fx, ctx):
+    """Rows ascend by rank, so the most recently active session is the bottom
+    row of the newest page, and the order is stable across runs."""
+    _pi_corpus(fx, 6)
+    orders = []
+    for _ in range(2):
+        with _picker(fx, "--agent", "pi") as pty:
+            rows = _settled(pty, lambda: _rows(pty) if len(_rows(pty)) == 6 else None)
+            orders.append([l.split()[-2] for l in rows or []])
+            _key(pty, "ctrl-c")
+            pty.wait()
+    listed = [l.split()[-2] for l in fx.run("--list", "--agent", "pi").stdout.splitlines()
+              if l.strip()]
+    return expect(
+        orders[0] == orders[1] and orders[0] == listed[::-1]
+        and orders[0][-1] == "005",
+        f"picker order {orders[0]}; rerun {orders[1]}; --list order {listed} "
+        f"(the picker ascends, so it is --list reversed and the newest "
+        f"fixture session, 'title 005', is the bottom row)",
+    )
+
+
+@check("picker-tabbed-view-waits-for-discovery", "codex-background-discovery",
+       "codex-progress-after-picker", "codex-results-merge-on-navigation")
+def _(fx, ctx):
+    """The picker opens on the synchronous agents while Codex is still
+    scanning, says so in its header, merges Codex's rows when they land, and
+    only prints Codex's progress line once the screen is its own again."""
+    for i in range(300):
+        _rollout(fx, f"slow-{i:03d}", fx.workspace, day=f"2026/03/{i % 28 + 1:02d}")
+    with _picker(fx) as pty:
+        opening = _status(pty)
+        _await_tab(pty, "codex", timeout=60)
+        landed = _status(pty)
+        while _status(pty)["tab"] != "codex":
+            _key(pty, "tab")
+        merged = len(_rows(pty))
+        during = pty.screen
+        _key(pty, "esc", settle=0.8)
+        pty.wait()
+        after = pty.screen
+    return expect(
+        "still scanning" in opening["line"] and "codex" not in opening["tabs"]
+        and "codex" in landed["tabs"] and "still scanning" not in landed["line"]
+        and merged > 0
+        and "codex scanned" not in during and "codex scanned" in after,
+        f"header on open {opening['line']!r}; after Codex landed "
+        f"{landed['line']!r}; codex tab showed {merged} rows; progress line "
+        f"printed before the picker closed: {'codex scanned' in during}",
+    )
+
+
+@check("picker-background-wait-message", "codex-sole-agent-synchronous")
+def _(fx, ctx):
+    """With Codex the only configured agent there is nothing to show while it
+    scans, so it is discovered synchronously and no waiting line is printed."""
+    with _picker(fx, "--agent", "codex") as pty:
+        opened = pty.screen
+        status = _status(pty)
+        _key(pty, "ctrl-c")
+        pty.wait()
+    return expect(
+        "waiting for codex" not in opened and status["tabs"] == ["All", "codex"]
+        and "still scanning" not in status["line"],
+        f"screen {opened.strip()[:200]!r}; header {status['line']!r}",
+    )
+
+
+@check("picker-tab-tracked-by-name")
+def _(fx, ctx):
+    """A tab arriving behind the user's back must not shift the selection: the
+    current tab is tracked by agent name, not by index."""
+    for i in range(300):
+        _rollout(fx, f"slow-{i:03d}", fx.workspace, day=f"2026/03/{i % 28 + 1:02d}")
+    with _picker(fx) as pty:
+        before = _status(pty)
+        _key(pty, "tab")
+        chosen = _status(pty)["tab"]
+        _await_tab(pty, "codex", timeout=60)
+        _key(pty, "ctrl-o")   # a redraw that is not a tab switch
+        after = _status(pty)
+        _key(pty, "ctrl-c")
+        pty.wait()
+    return expect(
+        "codex" not in before["tabs"] and "codex" in after["tabs"]
+        and after["tab"] == chosen,
+        f"selected {chosen!r} before Codex landed; tabs went {before['tabs']} "
+        f"-> {after['tabs']} and the selection ended on {after['tab']!r}",
+    )
+
+
+LEADING = 10 + 1 + 18 + 1  # the updated and agent columns, plus their spaces
+
+
+def _title_width(text, marker="unknown    pi "):
+    """Recover the title column width from a rendered row: the branch column
+    starts one space after it, at a fixed offset from the row's start."""
+    start = text.index(marker)
+    return text.index("no-branch", start) - start - LEADING - 1
+
+
+@check("picker-row-format")
+def _(fx, ctx):
+    """Four columns, with the branch always starting at the same place, and
+    the picker header naming them."""
+    with _picker(fx) as pty:
+        header = [l.strip() for l in pty.lines if re.match(ROW_HEADER, l)]
+        _key(pty, "ctrl-c")
+        pty.wait()
+    _, text = _detached(fx, "--list")
+    listed = [l for l in text.splitlines() if "no-branch" in l]
+    starts = {l.index("no-branch") for l in listed}
+    shapes = {(l[:10].strip() != "", l[10] == " ", l[LEADING - 1] == " ") for l in listed}
+    return expect(
+        header == ["UPDATED  AGENT[PROFILE]  TITLE  BRANCH"]
+        and len(starts) == 1 and shapes == {(True, True, True)},
+        f"picker header {header}; branch column {starts} (want one shared "
+        f"offset across {len(listed)} rows); column shapes {shapes}",
+    )
+
+
+@check("picker-title-column-width-adaptive")
+def _(fx, ctx):
+    """With no terminal to measure, the title column is the documented
+    default; with one, it follows the width, clamped at both ends."""
+    _, piped = _detached(fx, "--list")
+    widths = {}
+    for cols in (200, 120, 70):
+        pty = Pty(fx, "--list", cols=cols)
+        try:
+            pty.wait()
+            widths[cols] = _title_width(pty.wrapped)
+        finally:
+            pty.close()
+    return expect(
+        _title_width(piped) == 48 and widths == {200: 60, 120: 60, 70: 40},
+        f"detached title width {_title_width(piped)} (want the documented 48); "
+        f"by terminal width {widths} (want 60, 60, 40: clamped at "
+        f"TITLE_WIDTH_MAX twice, then width-derived)",
+    )
+
+
+@check("picker-row-branch-placeholder")
+def _(fx, ctx):
+    """A git workspace shows its branch; anything else shows `no-branch`."""
+    if GIT is None:
+        return "SKIPPED: git is not installed"
+    # Both live under the workspace, so `-D all` brings them into Scope.
+    repo = fx.workspace / "on-a-branch"
+    repo.mkdir()
+    _init_repo(repo)
+    _git(repo, "checkout", "-q", "-b", "qa-branch")
+    _pi_session(fx, "branched", "branched-id", repo, title="lives-in-a-repo")
+    plain = fx.workspace / "not-a-repo"
+    plain.mkdir()
+    _pi_session(fx, "plain", "plain-id", plain, title="lives-anywhere-else")
+    result = fx.run_env("--list", "--agent", "pi", "-D", "all", env=_with_git(fx))
+    listed = [l.split() for l in result.stdout.splitlines() if l.strip()]
+    branches = {row[-2]: row[-1] for row in listed}
+    return expect(
+        branches.get("lives-in-a-repo") == "qa-branch"
+        and branches.get("lives-anywhere-else") == "no-branch",
+        f"title -> branch column: {branches}",
+    )
+
+
+@check("picker-selection-identity-stable")
+def _(fx, ctx):
+    """Filtering reorders what is on screen; Enter must still resume the row
+    that was highlighted, identified by an opaque key rather than a position."""
+    made = _pi_corpus(fx, 6)
+    with _picker(fx, "--agent", "pi") as pty:
+        pty.send("003", settle=1.0)
+        rows = _rows(pty)
+        _key(pty, "enter", settle=2.0)
+        pty.wait()
+    launched = fx.cmux_log()
+    # pi resumes by transcript path, so the launched argv carries the session
+    # directory name rather than the native id.
+    return expect(
+        len(rows) == 1 and "title 003" in rows[0]
+        and any("bulk003/bulk003.jsonl" in line for line in launched),
+        f"filtered rows {rows}; the fake agent was invoked as {launched}",
+    )
+
+
 # --------------------------------------------------------------------- main
 def build_context(root):
     binary = root / "target/debug/resume"
@@ -3102,8 +3770,11 @@ def main():
     print(f"opencode feature linked: {ctx['opencode_feature']}")
     print(f"supported agents: {ctx['agents']}\n")
 
+    only = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--only=")]
     results = {}
     for fid, fn in CHECKS.items():
+        if only and not any(o in fid for o in only):
+            continue
         fx = Fixture(root, ctx["binary"])
         try:
             problem = fn(fx, ctx)
@@ -3144,6 +3815,11 @@ def write_back(root, results):
             continue
         status, note = results[r["feature_id"]]
         r["status"] = status
+        if status == "Pass":
+            # A passing row keeps no findings: a note left over from an
+            # earlier run would read as an open defect.
+            r["error_notes"] = ""
+            continue
         if not note:
             continue
         # Re-running the suite must not stack identical notes: keep the newest
