@@ -37,11 +37,16 @@ impl ImportBadge {
             "imported from {}",
             safe_badge_token(&self.source_kind).unwrap_or("unknown")
         )];
-        if let Some(id) = self.origin_id.as_deref().and_then(safe_badge_token) {
-            // Show only a short prefix of the origin ID to avoid impersonating
-            // it as a resumable locator.
+        if let Some(id) = self.origin_id.as_deref() {
+            // Show only a short, terminal-safe prefix of the origin ID to
+            // avoid impersonating it as a resumable locator. The safety
+            // filter runs on the truncated prefix, not the full (possibly
+            // much longer, e.g. a 36-byte UUID) recorded ID, so a long but
+            // otherwise safe ID still yields a badge instead of vanishing.
             let short: String = id.chars().take(8).collect();
-            parts.push(format!("origin:{short}"));
+            if let Some(safe) = safe_badge_token(&short) {
+                parts.push(format!("origin:{safe}"));
+            }
         }
         parts.join(" ")
     }

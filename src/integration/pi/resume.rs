@@ -20,18 +20,10 @@ impl ParsedSession {
     pub fn resume_spec(&self, roots: &EffectiveRoots) -> ResumeSpec {
         let mut argv: Vec<OsString> = Vec::with_capacity(4);
         argv.push(OsString::from("--session"));
-        let transcript_path = self
-            .transcript_path
-            .canonicalize()
-            .unwrap_or_else(|_| self.transcript_path.clone());
-        argv.push(transcript_path.into_os_string());
+        argv.push(absolutize(&self.transcript_path).into_os_string());
         if roots.custom_session_root {
-            let session_root = roots
-                .session_root
-                .canonicalize()
-                .unwrap_or_else(|_| roots.session_root.clone());
             argv.push(OsString::from("--session-dir"));
-            argv.push(session_root.into_os_string());
+            argv.push(absolutize(&roots.session_root).into_os_string());
         }
         let cwd = self.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
         ResumeSpec {
@@ -40,6 +32,21 @@ impl ParsedSession {
             cwd,
             env: Vec::new(),
         }
+    }
+}
+
+/// Make `path` absolute without resolving symlinks. Unlike
+/// `Path::canonicalize`, this never follows a symlinked ancestor (e.g.
+/// macOS's `/var` -> `/private/var`), matching Claude/Codex/OMP's
+/// verbatim-workspace-path contract; falls back to the original path if the
+/// process's current directory is unavailable.
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 

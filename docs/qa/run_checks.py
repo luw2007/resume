@@ -1169,20 +1169,29 @@ def _(fx, ctx):
 
 @check("session-status-unsupported")
 def _(fx, ctx):
-    """`Unsupported` must be unreachable: declaration and tests only."""
+    """`Unsupported` must never be constructed: declaration, tests, and a
+    display-only match arm (formatting an existing value, per CONTEXT.md's
+    "reserved for a future integration" note) are the only allowed hits."""
     live = []
     for path in (ctx["root"] / "src").rglob("*.rs"):
         text = path.read_text()
         head = text.split("#[cfg(test)]")[0]
         for n, line in enumerate(head.splitlines(), 1):
-            if "SupportStatus::Unsupported" in line:
-                live.append(f"{path.relative_to(ctx['root'])}:{n}")
-    return expect(not live, f"production code can produce Unsupported at {live}")
+            idx = line.find("SupportStatus::Unsupported")
+            if idx == -1:
+                continue
+            after = line[idx + len("SupportStatus::Unsupported"):].lstrip()
+            if after.startswith("=>"):
+                continue  # match-arm pattern: formats an existing value, never constructs one
+            live.append(f"{path.relative_to(ctx['root'])}:{n}")
+    return expect(not live, f"production code can construct Unsupported at {live}")
 
 
 @check("session-status-unavailable")
 def _(fx, ctx):
-    """A recorded workspace that no longer exists reads as Unavailable."""
+    """A recorded workspace that no longer exists reads as Unavailable via
+    `--json`'s `support` field, and its `--list`/picker row (only it) carries
+    the `[Unavailable]` suffix (`support_label`, src/app.rs)."""
     gone = fx.workspace / "gone"
     gone.mkdir()
     d = fx.home / ".pi/agent/sessions/gone"
@@ -1195,9 +1204,13 @@ def _(fx, ctx):
     _, payload = fx.json("-D", "1")
     found = [s for s in payload["sessions"] if s["id"] == "gone-id"]
     listing = fx.run("-D", "1", "--list").stdout
+    lines = listing.splitlines()
+    gone_lines = [ln for ln in lines if "<untitled>" in ln]
+    other_lines = [ln for ln in lines if "<untitled>" not in ln]
     return expect(
-        found and all(s["support"] == "Unavailable" for s in found)
-        and "UNAVAILABLE" not in listing.upper(),
+        bool(found) and all(s["support"] == "Unavailable" for s in found)
+        and bool(gone_lines) and all("[Unavailable]" in ln for ln in gone_lines)
+        and not any("[Unavailable]" in ln for ln in other_lines),
         f"support {[s['support'] for s in found]}; --list said {listing!r}",
     )
 
@@ -2260,8 +2273,12 @@ def _(fx, ctx):
         ["cargo", "test", "--locked", "--features", "codex-sqlite", "--lib",
          "--quiet", "--", "integration::codex::sqlite::tests"],
         cwd=ctx["root"], capture_output=True, text=True)
+    # "0 passed" as a bare substring false-positives on any count ending in
+    # 0 (e.g. "30 passed" contains "0 passed"); match the ok-result line's
+    # leading passed count instead.
+    ran = re.search(r"test result: ok\. (\d+) passed", result.stdout)
     return expect(
-        result.returncode == 0 and "0 passed" not in result.stdout,
+        result.returncode == 0 and ran is not None and int(ran.group(1)) > 0,
         f"the assert_readonly-backed suite did not pass: "
         f"{(result.stdout + result.stderr)[-400:]}",
     )
@@ -3932,12 +3949,25 @@ def _(fx, ctx):
 
 @check("codex-resume-spec-exact")
 def _(fx, ctx):
-    """Codex resumes as `-C <workspace> resume <id>`."""
+    """Codex resumes as `-C <workspace> resume <id>`, using the workspace
+    path verbatim -- not symlink-resolved, matching Claude/Pi/OMP's
+    non-canonicalizing contract (src/integration/codex/discover.rs
+    resolve_workspace_cwd). The launched process's actual OS-level cwd is
+    compared by realpath, not by string, because whether the observing
+    shell's inherited $PWD happens to already be resolved is independent
+    of what resume put on Codex's argv."""
     code, screen = _resume(fx, None, "--agent", "codex")
-    want = f"codex -C {_real(fx.workspace)} resume codex-id"
+    want_argv = f"codex -C {fx.workspace} resume codex-id"
+    launched = _launched(fx)
+    ok = (
+        len(launched) == 1
+        and launched[0][0] == want_argv
+        and launched[0][1] is not None
+        and os.path.realpath(launched[0][1]) == os.path.realpath(str(fx.workspace))
+    )
     return expect(
-        _launched(fx) == [(want, _real(fx.workspace))],
-        f"exit {code}; launched {_launched(fx)}; want {want!r}; "
+        ok,
+        f"exit {code}; launched {launched}; want argv {want_argv!r}; "
         f"tail {screen[-200:]!r}",
     )
 
