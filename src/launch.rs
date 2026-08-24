@@ -901,7 +901,7 @@ mod tests {
             r##"#!/bin/sh
 printf '%s\n' "$*" >> "{}"
 if [ "$1" = identify ]; then printf '{{"caller":{{"workspace_id":"W","surface_id":"S"}},"app_cli_path":"{}"}}\n'
-elif [ "$1" = workspace ]; then current=$(<{}); printf '%s' "{{\"workspaces\":[{{\"id\":\"W\",\"current_directory\":\"$current\"}}]}}"
+elif [ "$1" = workspace ]; then read -r current < "{}"; printf '%s' "{{\"workspaces\":[{{\"id\":\"W\",\"current_directory\":\"$current\"}}]}}"
 elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; printf '%s' "{}" > '{}'; fi
 "##,
             log.display(),
