@@ -387,7 +387,8 @@ def _(fx, ctx):
 def _(fx, ctx):
     result = fx.run("-U", "1", "-D", "1", "--list")
     return expect(
-        result.returncode == 2 and "cannot be used with" in result.stderr,
+        result.returncode == 2
+        and result.stderr.startswith("ERROR [E1002] CONFLICTING_DIRECTION:"),
         f"exit {result.returncode}, stderr {result.stderr[:120]!r}",
     )
 
@@ -697,7 +698,7 @@ def _(fx, ctx):
             r'parser_hint: (?:Some\(\s*"([^"]+)"|None)', catalog)],
     ))
     cases = [
-        (["-U", "1", "-D", "2", "--list"], "cannot be used with", False),
+        (["-U", "1", "-D", "2", "--list"], "ERROR [E1002] CONFLICTING_DIRECTION", True),
         (["--since", "yesterday", "--list"], hints["E1001"], False),
         (["-U", "-1", "--list"], hints["E1003"], False),
         (["--config", str(bad_config), "--list"], "E1004", True),
