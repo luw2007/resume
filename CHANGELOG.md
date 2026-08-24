@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.5 - 2026-08-24
+
+### Fixed
+
+- Pi's `resume_spec` canonicalized the transcript and `--session-dir` paths, resolving filesystem symlinks (e.g. macOS's `/var -> /private/var`) into the resume argv -- the same anti-pattern the 0.3.4 Codex workspace fix explicitly rejected, reproduced here for Pi. Paths are now made absolute without resolving symlinks, matching Codex/Claude/OMP's verbatim-path contract.
+- OMP's imported-Session badge validated the full, un-truncated `origin_id` against its 32-byte safety cap before truncating to the displayed 8-character prefix, so any origin ID longer than 32 bytes (a 36-byte UUID, or any realistic long session ID) silently dropped the whole `origin:` fragment instead of showing the intended safe prefix. The safety check now runs on the already-truncated prefix.
+- OMP discovery's home-relative directory prefilter compared an uncanonicalized `$HOME` against the canonical Scope base, so a symlinked `$HOME` (common on Linux hosts with home mounted elsewhere) could make every OMP Session invisible. `$HOME` is now canonicalized before the comparison.
+
+### Added
+
+- Added a real-binary QA regression suite (`docs/qa/run_checks.py`, `docs/qa/check_inventory.py`) that drives the compiled `resume` binary against isolated fixtures for the full `docs/qa/feature-inventory.csv` behavior inventory, plus a citation-integrity checker that verifies every inventory row's file:line references still point at the symbol they cite.
+
 ## 0.3.4 - 2026-08-24
 
 ### Fixed
