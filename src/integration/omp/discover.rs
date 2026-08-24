@@ -24,9 +24,8 @@ pub struct DiscoverConfig<'a> {
     pub scope: &'a Scope,
     /// Bounds for the JSONL reader. Discovery uses a record cap.
     pub bounds: Bounds,
-    /// Home directory for the grouped-directory-name prefilter (OMP encodes
-    /// home-relative Workspace paths). Tests override; production uses `$HOME`.
-    pub home: Option<PathBuf>,
+    /// Canonical home directory for the grouped-directory-name prefilter.
+    home: Option<PathBuf>,
 }
 
 impl<'a> DiscoverConfig<'a> {
@@ -40,8 +39,17 @@ impl<'a> DiscoverConfig<'a> {
             roots,
             scope,
             bounds,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: None,
         }
+        .with_home(std::env::var_os("HOME").map(PathBuf::from))
+    }
+
+    /// Set the home directory used by OMP's home-relative directory prefilter.
+    /// Canonicalization keeps it comparable with the canonical Scope base when
+    /// `$HOME` is a symlink, as on Linux hosts with data volumes mounted elsewhere.
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home.map(|path| path.canonicalize().unwrap_or(path));
+        self
     }
 }
 

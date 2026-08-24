@@ -240,9 +240,32 @@ fn home_relative_grouped_directory_is_kept() {
         ],
     );
     let scope = fx.scope_exact_workspace();
-    let mut cfg = DiscoverConfig::new(fx.roots_default(), &scope);
-    cfg.home = Some(fx.home());
+    let cfg = DiscoverConfig::new(fx.roots_default(), &scope).with_home(Some(fx.home()));
     let outcome = omp::discover(&cfg).unwrap();
+    assert_eq!(outcome.parsed.len(), 1);
+    assert_eq!(outcome.pruned_dirs, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn home_relative_grouped_directory_is_kept_when_home_is_a_symlink() {
+    let fx = Fixture::new();
+    let symlink_home = fx.home().join("home-link");
+    std::os::unix::fs::symlink(fx.home(), &symlink_home).unwrap();
+    fx.write(
+        &fx.default_agent_root,
+        "-workspace",
+        "rel-symlink-home.jsonl",
+        &[
+            header_v3("rel-symlink-home", &fx.workspace, 1700000000),
+            user_message_string("rel", 1700000010),
+        ],
+    );
+    let scope = fx.scope_exact_workspace();
+    let cfg = DiscoverConfig::new(fx.roots_default(), &scope).with_home(Some(symlink_home));
+
+    let outcome = omp::discover(&cfg).unwrap();
+
     assert_eq!(outcome.parsed.len(), 1);
     assert_eq!(outcome.pruned_dirs, 0);
 }
