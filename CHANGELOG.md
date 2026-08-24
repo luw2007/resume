@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.4 - 2026-08-24
+
+### Fixed
+
+- `--up`/`--down` conflicts were fully absorbed by clap's own `conflicts_with`, so `--man`'s documented four-line `ERROR [E1002] CONFLICTING_DIRECTION` block never actually rendered; the conflict is now checked and reported through resume's own error catalog.
+- Session ordering, terminal safety, and diagnostics: `compare_sessions` had drifted to a timestamp-only comparator, silently dropping the documented Active-first/Inactive/Unknown priority (the picker's `sort_rank` now matches); Git branch labels are now sanitized through the terminal-safe text pipeline (a malicious branch name could otherwise spoof output via bidi control characters); the verbose diagnostics base64-redaction loop corrupted adjacent multibyte UTF-8 text; `errors::Report::fmt` no longer lets a multiline error detail break the documented four-line ERROR block; `--list`/`--json` no longer panic on a closed stdout pipe (e.g. `resume --list | head -1`); `preview::PreviewItem::render` now sanitizes content and the filesystem-derived path again at its own display boundary.
+- Codex: workspace `cwd` was canonicalized (following filesystem symlinks such as macOS's `/var -> /private/var`), producing a different `workspace` value than Claude/Pi/OMP for the same logical directory; it now keeps the recorded path verbatim like the other integrations. `extract_import` (Codex and OMP) aborted badge extraction for an entire transcript on the first record missing a `payload` key instead of skipping just that record and continuing; both import badges now also sanitize their text through a safe-token filter. Codex's schema-detection heuristic could pick an unrelated table exposing only a generic `id`/rollout-path column; it now also requires an enrichment column.
+- Pi: `resume_spec` could emit a relative transcript or `--session-dir` path in the resume argv under a relative discovery root, violating the exact-resume contract; both paths are now canonicalized before argv construction.
+- Claude: a projects root that exists but can't be resolved (e.g. permission-denied) was silently treated as absent instead of surfacing `claude_root_unavailable`.
+- OMP: named profiles with `PI_CODING_AGENT_DIR` set (which only applies to the default profile) incorrectly skipped their own `XDG_STATE_HOME` breadcrumb lookup; message attribution now also checks a nested `meta.source` envelope, not just the top-level injected/automated flags.
+- `Scope::canonical_base` silently accepted a canonicalized path that isn't a directory instead of rejecting it as a usage error, contradicting `--man`'s documented contract.
+
+### Changed
+
+- Corrected several `--help`/`--man`/README/`docs/product-design.md` drift items found during a full 190-row feature-inventory QA re-audit: the default Git Scope is the current worktree only (`--all-worktrees` widens it, not the reverse); `config example`'s emitted `agents` is a conservative starter selection, not the actual runtime default (which is `Settings::default()`'s full agent set); `opencode` was missing from the documented valid-agent list; `XDG_CONFIG_HOME` is only used when the file exists, not unconditionally; a stale `opencode_disabled` diagnostic category was documented but never emitted (both a missing and a feature-off database already report `opencode_root_unavailable`); and the interactive picker opens once Pi/Claude/OMP discovery completes with Codex still scanning in the background, not after full discovery as README previously said.
+
 ## 0.3.3 - 2026-08-23
 
 ### Added
