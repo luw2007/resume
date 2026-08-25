@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.6 - 2026-08-24
+
+### Fixed
+
+- CI: the cmux workspace handoff test's embedded fake-`cmux` shell script used bash's `$(<file)` fast-read extension, which `dash` (Ubuntu's default `/bin/sh`) does not support -- it silently expanded to nothing, so the `workspace` subcommand's reported `current_directory` came back empty and the production handoff's read-back check correctly rejected the mismatch, failing `cargo test` on `ubuntu-latest` CI (invisible locally on macOS, whose `/bin/sh` tolerates the bash extension). This predates 0.3.5's own work. Replaced with the POSIX `read -r current < "<path>"` builtin, which is portable across `dash`/`bash` and needs no external `cat` binary (the test deliberately narrows `PATH` to only its fake executables).
+
 ## 0.3.5 - 2026-08-24
 
 ### Fixed
