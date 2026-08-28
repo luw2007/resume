@@ -1,7 +1,8 @@
 //! Top-level discovery, picker/list output, revalidation, confirmation, and exec orchestration.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    ffi::OsStr,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
@@ -1328,7 +1329,94 @@ fn relation_graph(records: &[CandidateRecord]) -> RelationGraph {
             });
         }
     }
+    add_execution_children(&mut graph, records);
     graph
+}
+
+fn add_execution_children(graph: &mut RelationGraph, records: &[CandidateRecord]) {
+    let session_nodes: BTreeMap<_, _> = records
+        .iter()
+        .map(|record| {
+            (
+                record.session.key.clone(),
+                NodeKey::Session(record.session.key.clone()),
+            )
+        })
+        .collect();
+
+    let claude_roots: BTreeSet<_> = records
+        .iter()
+        .filter(|record| record.session.key.agent == OsStr::new(claude::AGENT))
+        .map(|record| record.session.key.effective_root.clone())
+        .collect();
+    for root in claude_roots {
+        let by_id: BTreeMap<_, _> = records
+            .iter()
+            .filter(|record| {
+                record.session.key.agent == OsStr::new(claude::AGENT)
+                    && record.session.key.effective_root == root
+            })
+            .map(|record| {
+                (
+                    record.session.resumable_id.to_string_lossy().into_owned(),
+                    record.session.key.clone(),
+                )
+            })
+            .collect();
+        for child in claude::children::discover_children(&root.join("projects")).children {
+            let Some(parent_key) = by_id.get(&child.parent_id) else {
+                continue;
+            };
+            let child_key = NodeKey::Related(RelatedNodeKey {
+                kind: RelatedNodeKind::AgentExecution,
+                agent: claude::AGENT.into(),
+                native_locator: child.locator.into_os_string(),
+            });
+            graph.add_edge(RelationEdge {
+                parent: session_nodes[parent_key].clone(),
+                child: child_key,
+                kind: RelationKind::Spawned,
+                source: EvidenceSource::NativeTranscript,
+            });
+        }
+    }
+
+    let omp_roots: BTreeSet<_> = records
+        .iter()
+        .filter(|record| record.session.key.agent == OsStr::new(omp::AGENT))
+        .map(|record| record.session.key.effective_root.clone())
+        .collect();
+    for root in omp_roots {
+        let by_locator: BTreeMap<_, _> = records
+            .iter()
+            .filter(|record| {
+                record.session.key.agent == OsStr::new(omp::AGENT)
+                    && record.session.key.effective_root == root
+            })
+            .map(|record| {
+                (
+                    record.session.key.native_locator.clone(),
+                    record.session.key.clone(),
+                )
+            })
+            .collect();
+        for child in omp::children::discover_children(&root).children {
+            let Some(parent_key) = by_locator.get(child.parent_locator.as_os_str()) else {
+                continue;
+            };
+            let child_key = NodeKey::Related(RelatedNodeKey {
+                kind: RelatedNodeKind::AgentExecution,
+                agent: omp::AGENT.into(),
+                native_locator: child.locator.into_os_string(),
+            });
+            graph.add_edge(RelationEdge {
+                parent: session_nodes[parent_key].clone(),
+                child: child_key,
+                kind: RelationKind::Spawned,
+                source: EvidenceSource::NativeLayout,
+            });
+        }
+    }
 }
 
 fn node_label(key: &NodeKey, records: &[CandidateRecord]) -> String {
@@ -1347,11 +1435,21 @@ fn node_label(key: &NodeKey, records: &[CandidateRecord]) -> String {
                 )
             })
             .unwrap_or_else(|| "session".into()),
-        NodeKey::Related(key) => format!(
-            "{} {} [missing]",
-            key.agent.to_string_lossy(),
-            key.native_locator.to_string_lossy()
-        ),
+        NodeKey::Related(key) => match key.kind {
+            RelatedNodeKind::AgentExecution => format!(
+                "{}/task {}",
+                key.agent.to_string_lossy(),
+                Path::new(&key.native_locator)
+                    .file_stem()
+                    .unwrap_or(key.native_locator.as_os_str())
+                    .to_string_lossy()
+            ),
+            RelatedNodeKind::MissingSession => format!(
+                "{} {} [missing]",
+                key.agent.to_string_lossy(),
+                key.native_locator.to_string_lossy()
+            ),
+        },
     }
 }
 
