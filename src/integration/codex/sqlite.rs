@@ -158,19 +158,25 @@ pub fn thread_spawn_edges(effective_root: &Path) -> ThreadSpawnEdgesOutcome {
             return ThreadSpawnEdgesOutcome::Degraded { category: "locked" };
         }
         Err(OpenError::Corrupt) => {
-            return ThreadSpawnEdgesOutcome::Degraded { category: "corrupt" };
+            return ThreadSpawnEdgesOutcome::Degraded {
+                category: "corrupt",
+            };
         }
         Err(OpenError::Other(_)) => {
-            return ThreadSpawnEdgesOutcome::Degraded { category: "unreadable" };
+            return ThreadSpawnEdgesOutcome::Degraded {
+                category: "unreadable",
+            };
         }
     };
 
     match read_thread_spawn_edges(&conn) {
         Ok(edges) => ThreadSpawnEdgesOutcome::Used(edges),
-        Err(DetectError::Corrupt) => ThreadSpawnEdgesOutcome::Degraded { category: "corrupt" },
-        Err(DetectError::Other(_)) => {
-            ThreadSpawnEdgesOutcome::Degraded { category: "unsupported_schema" }
-        }
+        Err(DetectError::Corrupt) => ThreadSpawnEdgesOutcome::Degraded {
+            category: "corrupt",
+        },
+        Err(DetectError::Other(_)) => ThreadSpawnEdgesOutcome::Degraded {
+            category: "unsupported_schema",
+        },
     }
 }
 
@@ -180,7 +186,9 @@ fn read_thread_spawn_edges(conn: &Connection) -> Result<Vec<ThreadSpawnEdge>, De
         .iter()
         .all(|required| columns.iter().any(|column| column == required))
     {
-        return Err(DetectError::Other("missing thread_spawn_edges schema".into()));
+        return Err(DetectError::Other(
+            "missing thread_spawn_edges schema".into(),
+        ));
     }
 
     let mut statement = conn

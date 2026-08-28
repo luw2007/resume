@@ -1520,7 +1520,10 @@ fn thread_spawn_edges_absent_or_degraded_do_not_affect_rollout_sessions() {
         )],
     );
 
-    assert_eq!(thread_spawn_edges(home.path()), ThreadSpawnEdgesOutcome::Absent);
+    assert_eq!(
+        thread_spawn_edges(home.path()),
+        ThreadSpawnEdgesOutcome::Absent
+    );
     let (absent_sessions, _) = discover_enriched(home.path());
     assert_eq!(absent_sessions.len(), 1);
 
@@ -1531,5 +1534,8 @@ fn thread_spawn_edges_absent_or_degraded_do_not_affect_rollout_sessions() {
     ));
     let (degraded_sessions, _) = discover_enriched(home.path());
     assert_eq!(degraded_sessions.len(), 1);
-    assert_eq!(degraded_sessions[0].resumable_id.to_str(), Some("edge-fallback-id"));
+    assert_eq!(
+        degraded_sessions[0].resumable_id.to_str(),
+        Some("edge-fallback-id")
+    );
 }

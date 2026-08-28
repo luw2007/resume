@@ -123,10 +123,7 @@ mod tests {
             project(&graph).roots,
             vec![
                 node("a", vec![branch(node("shared", vec![]))]),
-                node(
-                    "b",
-                    vec![branch(TreeNode::Reference(key("shared")))],
-                ),
+                node("b", vec![branch(TreeNode::Reference(key("shared")))],),
             ]
         );
     }

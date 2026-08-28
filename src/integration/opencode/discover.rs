@@ -217,7 +217,11 @@ mod tests {
         )
         .unwrap();
         let outcome = discover(dir.path()).unwrap().unwrap();
-        let child = outcome.parsed.iter().find(|session| session.id == "ses_child").unwrap();
+        let child = outcome
+            .parsed
+            .iter()
+            .find(|session| session.id == "ses_child")
+            .unwrap();
         assert_eq!(child.parent_id.as_deref(), Some("ses_1"));
     }
 

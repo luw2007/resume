@@ -57,7 +57,11 @@ pub fn discover_children(projects_dir: &Path) -> ChildDiscovery {
 }
 
 /// Scan `<workspace-key>/subagents/*.jsonl` for child execution records.
-fn discover_subagents_in_workspace(workspace_key_dir: &Path, confined_root: &Path, result: &mut ChildDiscovery) {
+fn discover_subagents_in_workspace(
+    workspace_key_dir: &Path,
+    confined_root: &Path,
+    result: &mut ChildDiscovery,
+) {
     let subagents_dir = workspace_key_dir.join("subagents");
     let entries = match std::fs::read_dir(&subagents_dir) {
         Ok(e) => e,
@@ -73,7 +77,11 @@ fn discover_subagents_in_workspace(workspace_key_dir: &Path, confined_root: &Pat
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        if !entry.file_type().map(|t| t.is_file() || t.is_symlink()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .map(|t| t.is_file() || t.is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
         match parse_child_transcript(&path, confined_root, &parent_uuids) {
@@ -95,7 +103,11 @@ fn collect_parent_uuids(workspace_key_dir: &Path) -> Vec<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        if !entry.file_type().map(|t| t.is_file() || t.is_symlink()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .map(|t| t.is_file() || t.is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {

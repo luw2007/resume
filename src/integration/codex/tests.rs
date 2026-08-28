@@ -1308,14 +1308,16 @@ fn rollout_preserves_structured_subagent_spawn_source_and_exact_parent() {
         &home.path().canonicalize().unwrap(),
         &Bounds::default(),
     )
-        .unwrap()
-        .unwrap();
-    assert_eq!(parsed.parent_thread_id.as_deref(), Some("parent-thread-exact"));
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        parsed.parent_thread_id.as_deref(),
+        Some("parent-thread-exact")
+    );
     assert_eq!(parsed.thread_source.as_deref(), Some("subagent"));
     assert_eq!(parsed.source, None);
     assert_eq!(
-        parsed.structured_source.as_ref().unwrap()["subagent"]["thread_spawn"]
-            ["parent_thread_id"],
+        parsed.structured_source.as_ref().unwrap()["subagent"]["thread_spawn"]["parent_thread_id"],
         "parent-thread-exact"
     );
 }

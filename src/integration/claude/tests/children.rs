@@ -35,16 +35,14 @@ fn discovers_subagent_with_parent_session_id() {
     // Subagent transcript with explicit parent link
     write_jsonl(
         &ws_dir.join("subagents").join("child-001.jsonl"),
-        &[
-            json!({
-                "type": "user",
-                "parentSessionId": parent_uuid,
-                "sessionId": "child-session-id",
-                "cwd": "/home/user/work/sub",
-                "agentName": "code-reviewer",
-                "message": {"role": "user", "content": "review this"}
-            }),
-        ],
+        &[json!({
+            "type": "user",
+            "parentSessionId": parent_uuid,
+            "sessionId": "child-session-id",
+            "cwd": "/home/user/work/sub",
+            "agentName": "code-reviewer",
+            "message": {"role": "user", "content": "review this"}
+        })],
     );
 
     let result = discover_children(&projects);
@@ -136,8 +134,7 @@ fn children_never_appear_in_top_level_sessions() {
     );
 
     // Child discovery finds it
-    let children =
-        discover_children(&root_dir.join("projects"));
+    let children = discover_children(&root_dir.join("projects"));
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].parent_id, parent_uuid);
 }
@@ -170,6 +167,9 @@ fn malformed_child_transcript_isolated_as_diagnostic() {
         );
     } else {
         // File was unparseable → diagnostic
-        assert!(!result.diagnostics.is_empty(), "malformed file produced diagnostic");
+        assert!(
+            !result.diagnostics.is_empty(),
+            "malformed file produced diagnostic"
+        );
     }
 }

@@ -63,8 +63,8 @@
 
 pub const AGENT: &str = "omp";
 
-pub mod children;
 mod activity;
+pub mod children;
 mod discover;
 mod format;
 mod resume;

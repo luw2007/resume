@@ -105,7 +105,10 @@ fn malformed_child_isolated_as_diagnostic() {
             "malformed file detected via has_activity=false or diagnostic"
         );
     } else {
-        assert!(!result.diagnostics.is_empty(), "malformed file produced diagnostic");
+        assert!(
+            !result.diagnostics.is_empty(),
+            "malformed file produced diagnostic"
+        );
     }
 }
 
@@ -145,8 +148,5 @@ fn child_with_import_badge_preserves_structured_metadata() {
     let badge = child.import.as_ref().expect("import badge present");
     assert_eq!(badge.source_kind, "claude");
     assert_eq!(badge.origin_id.as_deref(), Some("orig-uuid-1234"));
-    assert_eq!(
-        badge.origin_cwd,
-        Some(PathBuf::from("/original/path"))
-    );
+    assert_eq!(badge.origin_cwd, Some(PathBuf::from("/original/path")));
 }

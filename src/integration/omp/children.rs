@@ -5,9 +5,9 @@
 //! children live under `abc/*.jsonl`. These are NOT independent Sessions and
 //! never surface as resumable.
 
+use super::format::ImportBadge;
 use crate::preview::jsonl::{self, Bounds};
 use crate::session::Diagnostic;
-use super::format::ImportBadge;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -94,9 +94,9 @@ fn discover_children_recursive(dir: &Path, confined_root: &Path, result: &mut Ch
         let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Only recurse into workspace-encoded dirs (start with '-') or
         // structural dirs, not into child dirs we already handled.
-        let is_child_of_parent = parent_files.iter().any(|p| {
-            p.file_stem().and_then(|s| s.to_str()) == Some(name)
-        });
+        let is_child_of_parent = parent_files
+            .iter()
+            .any(|p| p.file_stem().and_then(|s| s.to_str()) == Some(name));
         if !is_child_of_parent {
             discover_children_recursive(d, confined_root, result);
         }
@@ -119,7 +119,11 @@ fn parse_child_dir(
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        if !entry.file_type().map(|t| t.is_file() || t.is_symlink()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .map(|t| t.is_file() || t.is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
         match parse_child_file(&path, parent_path, confined_root) {
@@ -204,10 +208,7 @@ fn parse_child_file(
 
     // Fallback name from filename
     if name.is_none() {
-        name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(String::from);
+        name = path.file_stem().and_then(|s| s.to_str()).map(String::from);
     }
 
     Ok(ChildExecution {
