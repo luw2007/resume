@@ -140,6 +140,12 @@ OPTIONS
         usage error, because list mode never opens a confirmation prompt and
         silently ignoring the flag would be worse than refusing it.
 
+    --tree
+        Show recorded Session relationships as a tree. Without --list or
+        --json, opens an interactive tree view. With --list, prints the
+        static tree to stdout. With --json, prints the relationship graph
+        as JSON.
+
     --json
         Print one compact JSON v1 document to stdout and exit. Implies
         --list, so `resume --list --json` is accepted and redundant.
@@ -465,6 +471,16 @@ EXAMPLES
         resume --json --verbose 2> diagnostics.log
             Keep stdout parseable while capturing verbose diagnostics.
 
+    Tree
+        resume --tree
+            Show Session relationships as an interactive tree.
+
+        resume --tree --list
+            Print the Session relationship tree to stdout and exit.
+
+        resume --tree --json
+            Print the Session relationship graph as JSON to stdout.
+
     Configuration
         resume config example
             Print a commented example configuration file.
@@ -715,5 +731,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn man_page_documents_tree_option() {
+        let page = super::page();
+        assert!(page.contains("--tree"), "man page missing --tree");
+        assert!(
+            page.contains("resume --tree"),
+            "man page missing tree example"
+        );
+        assert!(
+            page.contains("resume --tree --list"),
+            "man page missing tree --list example"
+        );
+        assert!(
+            page.contains("resume --tree --json"),
+            "man page missing tree --json example"
+        );
     }
 }

@@ -209,6 +209,9 @@ EXAMPLES
   resume --up all            Search every ancestor directory too
   resume -a codex --since 7d Recent Codex Sessions only
   resume --json              Machine-readable JSON v1 on stdout
+  resume --tree              Interactive Session relationship tree
+  resume --tree --list       Static tree to stdout
+  resume --tree --json       Graph JSON to stdout
 
 `resume --help` has full descriptions; `resume --man` has the manual.\
 ",
@@ -238,6 +241,15 @@ COMMON EXAMPLES
 
   resume --json | jq '.sessions[] | .agent, .title'
       Print JSON v1 and post-process it. --json implies --list.
+
+  resume --tree
+      Show Session relationships as an interactive tree.
+
+  resume --tree --list
+      Print the Session relationship tree to stdout and exit.
+
+  resume --tree --json
+      Print the Session relationship graph as JSON to stdout.
 
   resume setup
       Choose the agent integrations to scan and save the selection.
@@ -317,6 +329,8 @@ pub struct Cli {
     )]
     pub since: Option<Since>,
 
+    #[arg(long, help = "Show recorded Session relationships as a tree")]
+    pub tree: bool,
     #[arg(long, help = "Print the plain table instead of opening the picker")]
     pub list: bool,
     #[arg(long, help = "Print JSON v1 to stdout; implies --list")]
@@ -358,6 +372,7 @@ impl Cli {
             || self.all_worktrees
             || !self.agent.is_empty()
             || self.since.is_some()
+            || self.tree
             || self.list
             || self.json
             || self.verbose
@@ -434,6 +449,7 @@ mod tests {
             "Include descendant directories down to N edges, or all",
             "Only this agent; repeatable; replaces configured agents",
             "Only Sessions active at or after this cutoff",
+            "Show recorded Session relationships as a tree",
             "Print the plain table instead of opening the picker",
             "Print JSON v1 to stdout; implies --list",
             "Include redacted paths and error chains in diagnostics",
@@ -704,9 +720,55 @@ mod tests {
             vec!["resume", "--list", "--json"],
             vec!["resume", "--up", "1"],
             vec!["resume", "--confirm-always"],
+            vec!["resume", "--tree"],
+            vec!["resume", "--tree", "--list"],
+            vec!["resume", "--tree", "--json"],
         ] {
             let cli = Cli::try_parse_from(argv.clone()).unwrap();
             assert!(cli.validate().is_ok(), "{argv:?}");
         }
+    }
+
+    #[test]
+    fn tree_parses_as_bool_flag() {
+        let cli = Cli::try_parse_from(["resume", "--tree"]).unwrap();
+        assert!(cli.tree);
+        assert!(!cli.list);
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn tree_with_list_and_json_parse() {
+        let cli = Cli::try_parse_from(["resume", "--tree", "--list"]).unwrap();
+        assert!(cli.tree);
+        assert!(cli.list);
+
+        let cli = Cli::try_parse_from(["resume", "--tree", "--json"]).unwrap();
+        assert!(cli.tree);
+        assert!(cli.json);
+    }
+
+    #[test]
+    fn tree_is_a_session_query_option() {
+        // --tree alongside config/completions/setup must be rejected
+        // because it is a Session-query option.
+        for argv in [
+            vec!["resume", "--tree", "config", "example"],
+            vec!["resume", "--tree", "completions", "bash"],
+            vec!["resume", "--tree", "setup"],
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap();
+            assert_eq!(cli.validate().unwrap_err().exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn tree_is_exclusive_with_man() {
+        assert_eq!(
+            Cli::try_parse_from(["resume", "--man", "--tree"])
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
     }
 }
