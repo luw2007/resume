@@ -74,6 +74,7 @@ mod tests {
             directory: workspace.path().to_path_buf(),
             title: Some("Fix the bug".to_string()),
             updated_at: None,
+            parent_id: None,
         };
         let capture = tempfile::NamedTempFile::new().unwrap();
         let capture_path = capture.path().to_path_buf();
