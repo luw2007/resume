@@ -653,7 +653,7 @@ fn build_tabbed_options(
         .tac(true)
         .multi(false)
         .header(Some(format!(
-            "{tabs}{pending_note}  PAGE {}/{}{older_note}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
+            "Ctrl-O Preview  {tabs}{pending_note}  PAGE {}/{}{older_note}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
             page.index + 1,
             page.total,
             older_note = older_note.unwrap_or_default(),
@@ -1074,6 +1074,40 @@ mod tests {
             options.header
         );
     }
+    #[test]
+    fn tabbed_picker_header_advertises_preview_toggle_and_keeps_binding() {
+        let options = build_tabbed_options(
+            0,
+            &["pi"],
+            PageInfo {
+                index: 0,
+                total: 1,
+                candidates: 1,
+            },
+            PreviewMode::Hidden,
+            PreviewPosition::Auto,
+            None,
+        );
+        assert!(
+            options
+                .header
+                .as_deref()
+                .is_some_and(|h| h.contains("Ctrl-O Preview")),
+            "header={:?}",
+            options.header
+        );
+        assert!(
+            options.bind.iter().any(|b| b == "ctrl-o:toggle-preview"),
+            "bind={:?}",
+            options.bind
+        );
+        assert!(
+            options.preview_window.ends_with(":hidden"),
+            "preview_window={:?}",
+            options.preview_window
+        );
+    }
+
     #[test]
     fn tabbed_picker_header_includes_session_columns() {
         let options = build_tabbed_options(
