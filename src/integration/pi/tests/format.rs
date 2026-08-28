@@ -255,6 +255,21 @@ fn extracts_parent_session_id() {
     assert_eq!(outcome.parsed[0].parent.as_deref(), Some("parent-id"));
 }
 
+#[test]
+fn absent_parent_session_stays_none() {
+    let fx = Fixture::new();
+    fx.write_grouped(
+        &fx.encoded_ws(),
+        "no-parent.jsonl",
+        &[
+            header_v3("no-parent", &fx.workspace, 1700000000),
+            user_message_string("root session", 1700000010),
+        ],
+    );
+    let outcome = fx.discover_default();
+    assert!(outcome.parsed[0].parent.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // Scope filtering: custom flat roots filter by header cwd
 // ---------------------------------------------------------------------------

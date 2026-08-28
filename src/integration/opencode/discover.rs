@@ -24,6 +24,8 @@ pub struct ParsedSession {
     pub directory: PathBuf,
     pub title: Option<String>,
     pub updated_at: Option<SystemTime>,
+    /// Native `session.parent_id` value; `None` for top-level sessions.
+    pub parent_id: Option<String>,
 }
 
 impl ParsedSession {
@@ -87,7 +89,7 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
     let conn = open_readonly(&path)?;
     let mut outcome = DiscoverOutcome::default();
     let mut stmt = conn.prepare(
-        "select id, directory, title, time_updated from session order by time_updated desc",
+        "select id, directory, title, time_updated, parent_id from session order by time_updated desc",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -95,6 +97,7 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
         let directory: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
         let title: Option<String> = row.get(2)?;
         let updated_millis: Option<i64> = row.get(3)?;
+        let parent_id: Option<String> = row.get(4)?;
         let directory = PathBuf::from(directory);
         if !directory.is_absolute() {
             outcome.skipped_rows += 1;
@@ -105,6 +108,7 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
             directory,
             title: title.filter(|title| !title.is_empty()),
             updated_at: updated_millis.and_then(millis_to_system_time),
+            parent_id,
         });
     }
     Ok(Some(outcome))
@@ -160,7 +164,8 @@ mod tests {
                  directory text not null,
                  title text not null,
                  time_created integer not null,
-                 time_updated integer not null
+                 time_updated integer not null,
+                 parent_id text
              );",
         )
         .unwrap();
@@ -196,6 +201,24 @@ mod tests {
         assert_eq!(session.directory, PathBuf::from("/Users/test/work"));
         assert_eq!(session.title.as_deref(), Some("Fix the bug"));
         assert!(session.updated_at.is_some());
+        assert!(session.parent_id.is_none());
+    }
+
+    #[test]
+    fn preserves_native_parent_id() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join(super::super::roots::DB_FILENAME);
+        create_test_db(&db);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "insert into session (id, project_id, directory, title, time_created, time_updated, parent_id)
+             values ('ses_child', 'proj_1', '/Users/test/work', 'Subtask', 1700000000000, 1700000200000, 'ses_1')",
+            [],
+        )
+        .unwrap();
+        let outcome = discover(dir.path()).unwrap().unwrap();
+        let child = outcome.parsed.iter().find(|session| session.id == "ses_child").unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("ses_1"));
     }
 
     #[test]
