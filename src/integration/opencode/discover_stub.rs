@@ -24,6 +24,7 @@ pub struct ParsedSession {
     pub directory: std::path::PathBuf,
     pub title: Option<String>,
     pub updated_at: Option<SystemTime>,
+    pub parent_id: Option<String>,
 }
 
 impl ParsedSession {

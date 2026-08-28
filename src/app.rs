@@ -1,7 +1,7 @@
 //! Top-level discovery, picker/list output, revalidation, confirmation, and exec orchestration.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
@@ -22,8 +22,10 @@ use crate::{
     launch::{self, LaunchEvidence},
     picker::{CandidateKey, PickerCandidate, PickerOutcome},
     preview::{jsonl::Bounds, text},
+    relation::{EvidenceSource, NodeKey, RelatedNodeKey, RelatedNodeKind, RelationEdge, RelationGraph, RelationKind},
     runtime::CancelToken,
     scope::{DefaultScope, Direction, Scope},
+    tree::{self, TreeNode},
     session::{ActivityStatus, Diagnostic, ResumeSpec, Session, SupportStatus},
     settings,
 };
@@ -38,6 +40,15 @@ struct CandidateRecord {
     session: Session,
     spec: Option<ResumeSpec>,
     evidence: Option<LaunchEvidence>,
+    relations: Vec<NativeRelation>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeRelation {
+    parent_agent: String,
+    parent_id: String,
+    kind: RelationKind,
+    source: EvidenceSource,
 }
 
 #[derive(Default)]
@@ -153,9 +164,17 @@ pub fn run(cli: Cli) -> i32 {
         let (records, state) = discover_all(&options, scope, discovery_ctx);
         if cli.json {
             print_diagnostics(&state, options.verbose);
-            print_json(&records, &state);
+            if cli.tree {
+                print_tree_json(&records, &state);
+            } else {
+                print_json(&records, &state);
+            }
         } else {
-            print_list(&records);
+            if cli.tree {
+                print_tree_list(&records);
+            } else {
+                print_list(&records);
+            }
             print_diagnostics(&state, options.verbose);
         }
         return discovery_exit(&records, &state, options.agents.is_empty());
@@ -445,7 +464,14 @@ fn merge_records(
         let mut map = map.lock().unwrap();
         for record in records {
             let key = CandidateKey(next_key.fetch_add(1, Ordering::SeqCst));
-            new_candidates.push(picker_candidate(key.clone(), &record.session));
+            let mut candidate = picker_candidate(key.clone(), &record.session);
+            if let Some(relation) = record.relations.first() {
+                let breadcrumb = format!("{} {} › ", relation.parent_agent, relation.parent_id);
+                candidate.display = format!("{breadcrumb}{}", candidate.display);
+                candidate.search_text = format!("{breadcrumb}{}", candidate.search_text);
+                candidate.preview = format!("RELATION\n{breadcrumb}{}\n\n{}", record.session.resumable_id.to_string_lossy(), candidate.preview);
+            }
+            new_candidates.push(candidate);
             map.insert(key, record);
         }
     }
@@ -600,7 +626,13 @@ fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         pi::activity_status(&parsed, None),
                     );
                     normalize_availability(&mut session);
-                    record(session, spec)
+                    let relations = parsed.parent.as_ref().map(|parent_id| NativeRelation {
+                        parent_agent: pi::AGENT.into(),
+                        parent_id: parent_id.clone(),
+                        kind: RelationKind::ForkedFrom,
+                        source: EvidenceSource::NativeTranscript,
+                    }).into_iter().collect();
+                    record_with_relations(session, spec, relations)
                 })
                 .collect();
             AgentDiscovery::ok(records, count_errors("pi_skipped", outcome.skipped_files))
@@ -698,6 +730,16 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                 if let Some(rollout) = codex_transcript_path(&session) {
                     session.activity = codex::activity::activity_status(&rollout, Some(activity));
                 }
+                let relations = codex_transcript_path(&session)
+                    .and_then(|path| codex::parse_rollout_file(&path, &root, &Bounds::default()).ok())
+                    .flatten()
+                    .and_then(|parsed| parsed.parent_thread_id.map(|parent_id| NativeRelation {
+                        parent_agent: codex::AGENT.into(),
+                        parent_id,
+                        kind: RelationKind::Spawned,
+                        source: EvidenceSource::NativeTranscript,
+                    }))
+                    .into_iter().collect();
                 let spec = codex::resume_spec(&session, &default_root);
                 let evidence = codex_transcript_path(&session)
                     .and_then(|path| LaunchEvidence::capture_with_transcript(&session, path).ok());
@@ -705,6 +747,7 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                     session,
                     spec: Some(spec),
                     evidence,
+                    relations,
                 })
             }
             codex::DiscoveredSession::Error { error, .. } => {
@@ -778,13 +821,19 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                 errors.extend(count_errors("omp_skipped", outcome.skipped_files));
                 records.extend(outcome.parsed.into_iter().map(|parsed| {
                     let spec = parsed.resume_spec(&root);
+                    let relations = parsed.import.as_ref().and_then(|import| import.origin_id.as_ref().map(|parent_id| NativeRelation {
+                        parent_agent: import.source_kind.clone(),
+                        parent_id: parent_id.clone(),
+                        kind: RelationKind::ImportedFrom,
+                        source: EvidenceSource::NativeTranscript,
+                    })).into_iter().collect();
                     let mut session = parsed.clone().into_session(
                         &root,
                         omp::risk_status(&parsed, home().as_deref()),
                         omp::activity_status(&parsed, live.for_transcript(&parsed.transcript_path)),
                     );
                     normalize_availability(&mut session);
-                    record(session, spec)
+                    record_with_relations(session, spec, relations)
                 }));
             }
             Err(_) => errors.push(Diagnostic {
@@ -821,10 +870,17 @@ fn discover_opencode(scope: &Scope) -> AgentDiscovery {
                     let transcript = opencode::transcript_path(&root);
                     let evidence =
                         LaunchEvidence::capture_with_transcript(&session, transcript).ok();
+                    let relations = parsed.parent_id.as_ref().map(|parent_id| NativeRelation {
+                        parent_agent: opencode::AGENT.into(),
+                        parent_id: parent_id.clone(),
+                        kind: RelationKind::ForkedFrom,
+                        source: EvidenceSource::NativeDatabase,
+                    }).into_iter().collect();
                     Some(CandidateRecord {
                         session,
                         spec: Some(spec),
                         evidence,
+                        relations,
                     })
                 })
                 .collect();
@@ -856,8 +912,10 @@ fn codex_transcript_path(session: &Session) -> Option<PathBuf> {
     }
 }
 
-fn record(session: Session, spec: ResumeSpec) -> CandidateRecord {
-    record_optional(session, Some(spec))
+fn record_with_relations(session: Session, spec: ResumeSpec, relations: Vec<NativeRelation>) -> CandidateRecord {
+    let mut record = record_optional(session, Some(spec));
+    record.relations = relations;
+    record
 }
 fn record_optional(session: Session, spec: Option<ResumeSpec>) -> CandidateRecord {
     let evidence = if session.support == SupportStatus::Supported {
@@ -869,6 +927,7 @@ fn record_optional(session: Session, spec: Option<ResumeSpec>) -> CandidateRecor
         session,
         spec,
         evidence,
+        relations: Vec::new(),
     }
 }
 fn normalize_availability(session: &mut Session) {
@@ -1202,6 +1261,81 @@ fn print_json(records: &[CandidateRecord], state: &DiscoveryState) {
     .expect("JSON serialization");
     let _ = writeln!(io::stdout(), "{output}");
 }
+fn relation_graph(records: &[CandidateRecord]) -> RelationGraph {
+    let mut graph = RelationGraph::new();
+    let mut sessions = BTreeMap::new();
+    for record in records {
+        graph.add_node(NodeKey::Session(record.session.key.clone()));
+        sessions.insert((record.session.key.agent.to_string_lossy().into_owned(), record.session.resumable_id.to_string_lossy().into_owned()), record.session.key.clone());
+    }
+    for record in records {
+        for relation in &record.relations {
+            let parent = sessions.get(&(relation.parent_agent.clone(), relation.parent_id.clone()))
+                .cloned().map(NodeKey::Session).unwrap_or_else(|| NodeKey::Related(RelatedNodeKey {
+                    kind: RelatedNodeKind::MissingSession,
+                    agent: relation.parent_agent.clone().into(),
+                    native_locator: relation.parent_id.clone().into(),
+                }));
+            graph.add_edge(RelationEdge {
+                parent,
+                child: NodeKey::Session(record.session.key.clone()),
+                kind: relation.kind,
+                source: relation.source,
+            });
+        }
+    }
+    graph
+}
+
+fn node_label(key: &NodeKey, records: &[CandidateRecord]) -> String {
+    match key {
+        NodeKey::Session(key) => records.iter().find(|r| &r.session.key == key)
+            .map(|r| format!("{} {}", r.session.key.agent.to_string_lossy(), r.session.title.as_deref().unwrap_or(&r.session.resumable_id.to_string_lossy())))
+            .unwrap_or_else(|| "session".into()),
+        NodeKey::Related(key) => format!("{} {} [missing]", key.agent.to_string_lossy(), key.native_locator.to_string_lossy()),
+    }
+}
+
+fn write_tree_node(out: &mut dyn Write, node: &TreeNode, records: &[CandidateRecord], prefix: &str, last: bool, root: bool) -> io::Result<()> {
+    let (key, children, reference) = match node {
+        TreeNode::Node { key, children } => (key, Some(children), false),
+        TreeNode::Reference(key) => (key, None, true),
+    };
+    if root { writeln!(out, "{}{}", node_label(key, records), if reference { " ↩" } else { "" })?; }
+    else { writeln!(out, "{prefix}{}─ {}{}", if last { "└" } else { "├" }, node_label(key, records), if reference { " ↩" } else { "" })?; }
+    if let Some(children) = children {
+        let child_prefix = if root { String::new() } else { format!("{prefix}{}  ", if last { " " } else { "│" }) };
+        for (index, branch) in children.iter().enumerate() {
+            write_tree_node(out, &branch.node, records, &child_prefix, index + 1 == children.len(), false)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_tree_list(records: &[CandidateRecord]) {
+    let projection = tree::project(&relation_graph(records));
+    let mut stdout = io::stdout().lock();
+    for root in &projection.roots { if write_tree_node(&mut stdout, root, records, "", true, true).is_err() { return; } }
+}
+
+#[derive(Serialize)]
+struct JsonRelation { parent: String, child: String, kind: String, source: String }
+#[derive(Serialize)]
+struct TreeJsonOutput<'a> { #[serde(rename = "schemaVersion")] schema_version: u8, sessions: Vec<TreeJsonSession>, related: Vec<JsonRelated>, relations: Vec<JsonRelation>, errors: Vec<JsonError<'a>> }
+#[derive(Serialize)]
+struct TreeJsonSession { #[serde(rename = "nodeId")] node_id: String, #[serde(flatten)] session: JsonSession }
+#[derive(Serialize)]
+struct JsonRelated { id: String, agent: String, kind: String }
+fn node_id(key: &NodeKey) -> String { match key { NodeKey::Session(k) => format!("session:{}:{}", k.agent.to_string_lossy(), k.native_locator.to_string_lossy()), NodeKey::Related(k) => format!("related:{}:{}", k.agent.to_string_lossy(), k.native_locator.to_string_lossy()) } }
+fn print_tree_json(records: &[CandidateRecord], state: &DiscoveryState) {
+    let graph = relation_graph(records);
+    let related = graph.nodes().filter_map(|node| match node { NodeKey::Related(k) => Some(JsonRelated { id: node_id(node), agent: k.agent.to_string_lossy().into_owned(), kind: format!("{:?}", k.kind) }), _ => None }).collect();
+    let relations = graph.edges().map(|edge| JsonRelation { parent: node_id(&edge.parent), child: node_id(&edge.child), kind: format!("{:?}", edge.kind), source: format!("{:?}", edge.source) }).collect();
+    let errors_guard = state.errors.lock().unwrap();
+    let output = TreeJsonOutput { schema_version: 1, sessions: records.iter().map(|record| TreeJsonSession { node_id: node_id(&NodeKey::Session(record.session.key.clone())), session: json_session(record) }).collect(), related, relations, errors: errors_guard.iter().map(|e| JsonError { category: e.category, count: e.count }).collect() };
+    if let Ok(output) = serde_json::to_string_pretty(&output) { let _ = writeln!(io::stdout(), "{output}"); }
+}
+
 fn print_list(records: &[CandidateRecord]) {
     if let Some(message) = empty_list_message(records) {
         let _ = writeln!(io::stdout(), "{message}");
@@ -1364,6 +1498,7 @@ mod tests {
                 },
                 spec: None,
                 evidence: None,
+                relations: Vec::new(),
             };
             assert_eq!(json_session(&record).activity, expected);
         }
@@ -1548,6 +1683,7 @@ mod tests {
                 session: session_with(support),
                 spec: None,
                 evidence: None,
+                relations: Vec::new(),
             };
             assert_eq!(
                 resume_selected(record, &options),
@@ -1560,6 +1696,7 @@ mod tests {
             session: session_with(SupportStatus::Supported),
             spec: None,
             evidence: None,
+            relations: Vec::new(),
         };
         assert_eq!(
             resume_selected(record, &options),
