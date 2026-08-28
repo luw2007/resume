@@ -187,22 +187,20 @@ fn parse_child_file(
         }
 
         // title record
-        if rec_type == Some("title") {
-            if name.is_none() {
-                name = record
-                    .get("title")
-                    .or_else(|| record.get("text"))
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| s.trim().to_string());
-            }
+        if rec_type == Some("title") && name.is_none() {
+            name = record
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string());
         }
 
         // foreign import badge on the child itself
-        if rec_type == Some("session") && import.is_none() {
-            if let Some(fi) = record.get("foreign_session_import") {
-                import = super::format::parse_import_pub(fi);
-            }
+        if rec_type == Some("session")
+            && import.is_none()
+            && let Some(fi) = record.get("foreign_session_import")
+        {
+            import = super::format::parse_import_pub(fi);
         }
     }
 

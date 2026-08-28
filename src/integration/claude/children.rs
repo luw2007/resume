@@ -182,20 +182,19 @@ fn parse_child_transcript(
         }
     }
 
-    // Fallback parent: if no parentSessionId embedded, use the single parent
-    // UUID from the workspace-key dir (only when exactly one exists, to avoid
-    // ambiguity).
-    let parent_id = parent_id.unwrap_or_else(|| {
-        if parent_uuids.len() == 1 {
-            parent_uuids[0].clone()
-        } else {
-            // Use the child's own filename stem as a last-resort link marker.
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        }
-    });
+    // A child without explicit parent metadata is linkable only when the
+    // containing workspace directory has exactly one top-level Session.
+    let parent_id =
+        parent_id.or_else(|| (parent_uuids.len() == 1).then(|| parent_uuids[0].clone()));
+
+    let Some(parent_id) = parent_id else {
+        return Err(Diagnostic {
+            category: "claude_subagent_parent_ambiguous",
+            count: 1,
+            verbose_path: Some(path.to_path_buf()),
+            verbose_chain: None,
+        });
+    };
 
     Ok(ChildExecution {
         parent_id,
