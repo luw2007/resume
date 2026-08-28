@@ -14,28 +14,6 @@ Switch between Pi, Claude Code, Codex, OMP, and OpenCode sessions from a single 
 | Safety | Read-only discovery; no migration, no session rewrite, no telemetry |
 | Platform | macOS and Linux (Homebrew tap or Cargo) |
 
----
-
-### Cross-agent discovery
-
-One project-scoped view replaces five separate agent commands. Discovery runs in parallel — Pi, Claude, and OMP complete first; Codex streams in on its tab after the next navigation.
-
-![Cross-agent session discovery across Pi, Claude Code, Codex, and OMP](docs/assets/cross-agent.gif)
-
-### Project-scoped filtering
-
-Sessions are scoped to your current worktree by default. Use `--up` / `--down` for explicit directory distance, `--all-worktrees` for linked trees, or `--since` to filter by activity window.
-
-![Project-scoped session filtering with directory distance](docs/assets/project-scope.gif)
-
-### Preview and native resume
-
-Toggle Preview with Ctrl-O to inspect session metadata before resuming. Selection triggers the agent's own native resume command in its recorded workspace — correct environment, correct profile, correct isolation.
-
-![Session preview and native agent resume handoff](docs/assets/preview-resume.gif)
-
----
-
 ## Install
 
 ### Homebrew (recommended)
@@ -51,10 +29,30 @@ The tap installs a prebuilt binary and shell completions on macOS or Linux.
 Rust 1.91 or newer is required:
 
 ```sh
-cargo install --git https://github.com/luw2007/resume
+cargo install --git https://github.com/luw2007/resume --features opencode
 ```
 
 The `resume` crate is not currently published to crates.io. GitHub Releases also provide prebuilt archives for macOS and Linux.
+
+---
+
+### Cross-agent discovery
+
+This example shows Pi, OMP, OpenCode, and Codex sessions in one project-scoped view as discovery results arrive.
+
+![Example cross-agent discovery showing Pi, OMP, OpenCode, and Codex sessions](docs/assets/cross-agent.gif)
+
+### Project-scoped filtering
+
+Sessions are scoped to your current worktree by default. Use `--up` / `--down` for explicit directory distance, `--all-worktrees` for linked trees, or `--since` to filter by activity window.
+
+![Project-scoped session filtering with directory distance](docs/assets/project-scope.gif)
+
+### Preview and native resume
+
+Toggle Preview with Ctrl-O to inspect session metadata before resuming. Selection triggers the agent's own native resume command in its recorded workspace, preserving supported root/profile overrides.
+
+![Session preview and native agent resume handoff](docs/assets/preview-resume.gif)
 
 ## Quick start
 
