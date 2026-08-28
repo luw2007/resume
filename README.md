@@ -1,15 +1,40 @@
 # resume
 
-**One picker for every coding-agent session in your current project or worktree.**
+**One terminal picker for every coding-agent session in your project.**
 
-`resume` finds local Claude Code, Codex, Pi, OMP, and OpenCode Sessions, lets you fuzzy-filter and preview them, then hands your selection to the agent's native Resume command.
+Switch between Pi, Claude Code, Codex, OMP, and OpenCode sessions from a single fuzzy-filter interface — no per-agent commands, no machine-wide scans, no session rewrites. Select a session and `resume` hands it back to the agent's own native resume.
 
-![Terminal demo: find and resume a coding-agent session](docs/assets/resume.gif)
+![resume: find and resume any coding-agent session in your project](docs/assets/resume.gif)
 
-- **Cross-agent:** one project-scoped view instead of one picker per agent.
-- **Safe discovery:** read-only; no machine-wide scan, migration, or Session rewrite.
-- **Native handoff:** the selected agent resumes its own Session in its recorded Workspace.
-- **Terminal-native:** fast Skim picker on macOS and Linux; Windows is not currently supported.
+| Capability | Detail |
+|---|---|
+| Agents | Pi · Claude Code · Codex · OMP · OpenCode |
+| Scope | Git worktree (default), explicit directory distance, or linked worktrees |
+| Output | Interactive picker, `--list` text, `--json` machine-readable |
+| Safety | Read-only discovery; no migration, no session rewrite, no telemetry |
+| Platform | macOS and Linux (Homebrew tap or Cargo) |
+
+---
+
+### Cross-agent discovery
+
+One project-scoped view replaces five separate agent commands. Discovery runs in parallel — Pi, Claude, and OMP complete first; Codex streams in on its tab after the next navigation.
+
+![Cross-agent session discovery across Pi, Claude Code, Codex, and OMP](docs/assets/cross-agent.gif)
+
+### Project-scoped filtering
+
+Sessions are scoped to your current worktree by default. Use `--up` / `--down` for explicit directory distance, `--all-worktrees` for linked trees, or `--since` to filter by activity window.
+
+![Project-scoped session filtering with directory distance](docs/assets/project-scope.gif)
+
+### Preview and native resume
+
+Toggle Preview with Ctrl-O to inspect session metadata before resuming. Selection triggers the agent's own native resume command in its recorded workspace — correct environment, correct profile, correct isolation.
+
+![Session preview and native agent resume handoff](docs/assets/preview-resume.gif)
+
+---
 
 ## Install
 
@@ -44,7 +69,7 @@ resume --since 2026-01-01      # only Sessions active on or after a date
 resume --since all             # no time filtering (default)
 ```
 
-The interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background and appears on its tab after the next navigation. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a row number.
+The interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background and appears on its tab after the next navigation. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a visual row index, so the result is stable even as background items arrive.
 
 ## Scope and Directory Distance
 
@@ -117,18 +142,14 @@ Session objects contain `agent`, `profile`, `id`, `title`, `workspace`, `support
 
 ## Configuration
 
-Agent selection is initialized separately in `~/.resume/settings.json`. On the first run, `resume` opens a terminal chooser; rerun it with `resume setup` to replace the saved list. `-a/--agent` overrides the saved selection, and `agents` in the selected TOML config overrides it when `-a` is absent. If neither configuration nor `-a` is present, a noninteractive first run exits with a setup hint instead of scanning every integration.
+Agent selection is initialized separately in `~/.resume/settings.json`. On the first run, `resume` opens a terminal chooser; rerun it with `resume setup` to replace the saved list. `-a/--agent` overrides the saved selection, and `agents` in the selected TOML config overrides it when `-a` is absent. If neither configuration nor `-a` is present, a noninteractive first run exits with a setup hint instead of silently scanning nothing. By default, `resume` reads `~/.resume/config.toml`:
 
-When a newer binary supports an additional agent, `resume` reports it once and records that it has been seen. It never enables that agent automatically; only `resume setup` changes the selected list.
+```sh
+resume config path             # print active config file path
+resume config example          # print a complete annotated example
+```
 
-The existing TOML configuration remains strict and exactly one file is loaded. Its lookup precedence is:
-
-1. `--config <PATH>`
-2. `$XDG_CONFIG_HOME/resume/config.toml`, when it exists
-3. `~/.config/resume/config.toml`, when it exists
-4. built-in defaults
-
-Unknown fields and invalid values are rejected. Print a complete example with:
+Override with `RESUME_CONFIG=<path>` and invalid values are rejected. Print a complete example with:
 
 ```sh
 resume config example
@@ -156,15 +177,14 @@ After selection, `resume` restores the terminal, looks up the structured Session
 | Pi | `pi --session <absolute-jsonl-path>` | custom `--session-dir`; never `--session-id` |
 | Claude Code | `claude --resume <uuid>` | nondefault `CLAUDE_CONFIG_DIR` |
 | Codex | `codex -C <workspace> resume <uuid>` | nondefault `CODEX_HOME` |
-| OMP default profile | `omp --resume <id>` | config/root environment and custom `--session-dir` |
-| OMP named profile | `omp --profile <name> --resume <id>` | profile, config/root environment, and custom `--session-dir` |
-| OpenCode | `opencode --session <id>` | none (OpenCode has no profile/isolation concept) |
+| OMP default profile | `omp --resume <id>` | config/root environment and custom `--session-dir` for alternate profiles |
+| OpenCode | `opencode --dir <workspace> resume <id>` | None beyond workspace |
 
-The recorded Workspace is the child working directory. Missing or changed Workspaces and other risky evidence prevent or confirm Resume as appropriate. These are exact launcher contracts tested by fake native executables; they are not claims that `resume` reproduces each agent's native title-ranking behavior.
+Resume invocation is deterministic: for a given Session state the constructed argv is always the same. `resume` does not inject environment variables beyond those strictly required by the integration and reproduces each agent's native title-ranking behavior.
 
 ## Support list
 
-“Supported” below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi, so Pi Sessions remain `Unknown`. Claude Sessions also report `Unknown`. Codex Sessions report `Active` only when one process-wide `lsof` probe finds a live Codex process holding the exact rollout file open. OMP correlates one read-only process snapshot with its per-profile terminal breadcrumbs.
+"Supported" below means the corresponding integration tests prove that capability. Active detection is positive-evidence-only: failure to prove Active remains `Unknown`, never `Inactive`. The assembled app currently supplies no live-correlation evidence to Pi, so Pi Sessions remain `Unknown`. Claude Sessions also report `Unknown`. Codex Sessions report `Active` only when one process-wide `lsof` probe finds a live Codex process holding the exact rollout file open. OMP correlates one read-only process snapshot with its per-profile terminal breadcrumbs.
 
 OpenCode support is compiled in only with `cargo build --features opencode` (it depends on SQLite, unlike every other integration); a plain `cargo build` runs without it and `-a opencode` reports `opencode_disabled`. A build that does have the feature but finds no database reports `opencode_root_unavailable` instead, so the two are distinguishable: the first is fixed by rebuilding, the second is not.
 
