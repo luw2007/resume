@@ -2,6 +2,20 @@ use std::path::Path;
 
 use super::ParsedSession;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadSpawnEdge {
+    pub parent_thread_id: String,
+    pub child_thread_id: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadSpawnEdgesOutcome {
+    Absent,
+    Used(Vec<ThreadSpawnEdge>),
+    Degraded { category: &'static str },
+}
+
 /// Coarse outcome mirroring the feature-on [`sqlite::SqliteOutcome`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SqliteOutcome {
@@ -39,4 +53,9 @@ pub fn enrich(_sessions: &mut [ParsedSession], _effective_root: &Path) -> Sqlite
 /// Path the DB would occupy, for symmetry with the feature-on module.
 pub fn state_db_path(effective_root: &Path) -> std::path::PathBuf {
     effective_root.join("state_5.sqlite")
+}
+
+/// SQLite support is compiled out, so the optional projection is absent.
+pub fn thread_spawn_edges(_effective_root: &Path) -> ThreadSpawnEdgesOutcome {
+    ThreadSpawnEdgesOutcome::Absent
 }

@@ -415,8 +415,14 @@ pub struct ParsedSession {
     pub cli_version: Option<String>,
     /// `session_meta.payload.originator`, if present.
     pub originator: Option<String>,
-    /// `session_meta.payload.source`, if present (e.g. "interactive").
+    /// String-valued `session_meta.payload.source`, if present (e.g. "interactive").
+    /// Structured source records are preserved separately in [`Self::structured_source`].
     pub source: Option<String>,
+    /// The exact `session_meta.payload.source` value when it is an object or
+    /// array. Newer Codex rollouts use this to describe subagent
+    /// `thread_spawn` provenance; retaining the JSON structure avoids reducing
+    /// authoritative relationship evidence to an inferred badge.
+    pub structured_source: Option<Value>,
     /// `session_meta.payload.thread_source`, if present.
     pub thread_source: Option<String>,
     /// `session_meta.payload.parent_thread_id`, if present.
@@ -650,6 +656,10 @@ pub(crate) fn parse_rollout_records(
             .get("source")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        structured_source: payload
+            .get("source")
+            .filter(|source| source.is_object() || source.is_array())
+            .cloned(),
         thread_source: payload
             .get("thread_source")
             .and_then(Value::as_str)

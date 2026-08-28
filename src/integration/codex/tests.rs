@@ -1276,6 +1276,51 @@ fn import_badge_rejects_untrusted_source_kind_text() {
 }
 
 #[test]
+fn rollout_preserves_structured_subagent_spawn_source_and_exact_parent() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let path = write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-subagent.jsonl",
+        &[json!({
+            "type": "session_meta",
+            "payload": {
+                "id": "child-thread",
+                "cwd": workspace.canonicalize().unwrap().to_str().unwrap(),
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": "parent-thread-exact",
+                            "depth": 1,
+                            "agent_role": "reviewer"
+                        }
+                    }
+                },
+                "thread_source": "subagent",
+                "parent_thread_id": "parent-thread-exact"
+            }
+        })],
+    );
+
+    let parsed = parse_rollout_file(
+        &path,
+        &home.path().canonicalize().unwrap(),
+        &Bounds::default(),
+    )
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.parent_thread_id.as_deref(), Some("parent-thread-exact"));
+    assert_eq!(parsed.thread_source.as_deref(), Some("subagent"));
+    assert_eq!(parsed.source, None);
+    assert_eq!(
+        parsed.structured_source.as_ref().unwrap()["subagent"]["thread_spawn"]
+            ["parent_thread_id"],
+        "parent-thread-exact"
+    );
+}
+
+#[test]
 fn thread_metadata_does_not_display_remote_or_path() {
     let home = codex_home();
     let workspace = home.path().join("ws");

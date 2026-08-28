@@ -47,7 +47,7 @@ use crate::preview::message::{Attachment, UserMessage};
 
 /// Schema version. Bump on any incompatible entry-shape change; an old file
 /// is discarded wholesale on load rather than migrated.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const CACHE_FILE_NAME: &str = "codex-discovery-v1.json";
 
 #[derive(Serialize, Deserialize, Default)]
@@ -78,6 +78,7 @@ struct CachedParsedSession {
     cli_version: Option<String>,
     originator: Option<String>,
     source: Option<String>,
+    structured_source: Option<serde_json::Value>,
     thread_source: Option<String>,
     parent_thread_id: Option<String>,
     model_provider: Option<String>,
@@ -278,6 +279,7 @@ fn to_cached(parsed: &ParsedSession) -> CachedParsedSession {
         cli_version: parsed.cli_version.clone(),
         originator: parsed.originator.clone(),
         source: parsed.source.clone(),
+        structured_source: parsed.structured_source.clone(),
         thread_source: parsed.thread_source.clone(),
         parent_thread_id: parsed.parent_thread_id.clone(),
         model_provider: parsed.model_provider.clone(),
@@ -302,6 +304,7 @@ fn from_cached(rollout_path: PathBuf, cached: CachedParsedSession) -> ParsedSess
         cli_version: cached.cli_version,
         originator: cached.originator,
         source: cached.source,
+        structured_source: cached.structured_source,
         thread_source: cached.thread_source,
         parent_thread_id: cached.parent_thread_id,
         model_provider: cached.model_provider,
@@ -403,9 +406,12 @@ mod tests {
             timestamp: Some("2026-01-01T00:00:00Z".into()),
             cli_version: Some("0.1.0".into()),
             originator: Some("cli".into()),
-            source: Some("interactive".into()),
-            thread_source: None,
-            parent_thread_id: None,
+            source: None,
+            structured_source: Some(serde_json::json!({
+                "subagent": { "thread_spawn": { "parent_thread_id": "parent-1" } }
+            })),
+            thread_source: Some("subagent".into()),
+            parent_thread_id: Some("parent-1".into()),
             model_provider: Some("openai".into()),
             archived: true,
             user_messages: vec![UserMessage {
@@ -444,6 +450,8 @@ mod tests {
         let hit = cache.lookup(&rollout).expect("cache hit").expect("session");
         assert_eq!(hit.id, original.id);
         assert_eq!(hit.cwd, original.cwd);
+        assert_eq!(hit.structured_source, original.structured_source);
+        assert_eq!(hit.parent_thread_id, original.parent_thread_id);
         assert_eq!(hit.user_messages, original.user_messages);
         assert_eq!(hit.import.unwrap().to_display(), "imported from claude");
         assert_eq!(hit.malformed_middle, 2);

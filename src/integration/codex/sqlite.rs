@@ -62,6 +62,23 @@ use super::ParsedSession;
 /// Filename of the Codex state database beneath the effective `CODEX_HOME`.
 pub const STATE_DB_FILENAME: &str = "state_5.sqlite";
 
+/// An authoritative parent/child relationship projected by Codex into
+/// `state_5.sqlite.thread_spawn_edges`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadSpawnEdge {
+    pub parent_thread_id: String,
+    pub child_thread_id: String,
+    pub status: String,
+}
+
+/// Result of consulting the optional spawn-edge projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadSpawnEdgesOutcome {
+    Absent,
+    Used(Vec<ThreadSpawnEdge>),
+    Degraded { category: &'static str },
+}
+
 /// Busy timeout applied to the read-only connection. Short so discovery does
 /// not stall on a locked/writing DB; a busy DB degrades to "no enrichment".
 const BUSY_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -121,6 +138,68 @@ impl SqliteOutcome {
 /// Path to the state DB beneath an effective root.
 pub fn state_db_path(effective_root: &Path) -> PathBuf {
     effective_root.join(STATE_DB_FILENAME)
+}
+
+/// Query Codex's optional spawn-edge projection without affecting discovery.
+///
+/// The table is detected explicitly and all three columns must be present.
+/// An absent database returns [`ThreadSpawnEdgesOutcome::Absent`]; an absent
+/// table, changed schema, lock, or corrupt database degrades to no edges. No
+/// edge is inferred from cwd, title, or timestamps.
+pub fn thread_spawn_edges(effective_root: &Path) -> ThreadSpawnEdgesOutcome {
+    let db_path = state_db_path(effective_root);
+    if !db_path.is_file() {
+        return ThreadSpawnEdgesOutcome::Absent;
+    }
+
+    let conn = match open_readonly(&db_path) {
+        Ok(conn) => conn,
+        Err(OpenError::Locked) => {
+            return ThreadSpawnEdgesOutcome::Degraded { category: "locked" };
+        }
+        Err(OpenError::Corrupt) => {
+            return ThreadSpawnEdgesOutcome::Degraded { category: "corrupt" };
+        }
+        Err(OpenError::Other(_)) => {
+            return ThreadSpawnEdgesOutcome::Degraded { category: "unreadable" };
+        }
+    };
+
+    match read_thread_spawn_edges(&conn) {
+        Ok(edges) => ThreadSpawnEdgesOutcome::Used(edges),
+        Err(DetectError::Corrupt) => ThreadSpawnEdgesOutcome::Degraded { category: "corrupt" },
+        Err(DetectError::Other(_)) => {
+            ThreadSpawnEdgesOutcome::Degraded { category: "unsupported_schema" }
+        }
+    }
+}
+
+fn read_thread_spawn_edges(conn: &Connection) -> Result<Vec<ThreadSpawnEdge>, DetectError> {
+    let columns = table_columns(conn, "thread_spawn_edges")?;
+    if !["parent_thread_id", "child_thread_id", "status"]
+        .iter()
+        .all(|required| columns.iter().any(|column| column == required))
+    {
+        return Err(DetectError::Other("missing thread_spawn_edges schema".into()));
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT parent_thread_id, child_thread_id, status \
+             FROM thread_spawn_edges ORDER BY parent_thread_id, child_thread_id",
+        )
+        .map_err(|error| detect_err(&error))?;
+    statement
+        .query_map([], |row| {
+            Ok(ThreadSpawnEdge {
+                parent_thread_id: row.get(0)?,
+                child_thread_id: row.get(1)?,
+                status: row.get(2)?,
+            })
+        })
+        .map_err(|error| detect_err(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| detect_err(&error))
 }
 
 /// Enrich a slice of parsed sessions from the optional state DB.

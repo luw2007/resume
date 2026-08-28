@@ -1467,3 +1467,69 @@ fn enrich_fills_title_only_when_jsonl_has_no_user_messages() {
     // Sanity: the helper field is the only thing set; identity untouched.
     assert_eq!(sessions[0].id, id);
 }
+
+#[test]
+fn thread_spawn_edges_are_queried_read_only() {
+    let home = codex_home();
+    let db_path = state_db_path(home.path());
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE thread_spawn_edges (
+            parent_thread_id TEXT NOT NULL,
+            child_thread_id TEXT NOT NULL PRIMARY KEY,
+            status TEXT NOT NULL
+        );
+        INSERT INTO thread_spawn_edges VALUES ('parent-b', 'child-b', 'closed');
+        INSERT INTO thread_spawn_edges VALUES ('parent-a', 'child-a', 'open');",
+    )
+    .unwrap();
+    drop(conn);
+    let before = snapshot::snapshot_dir(home.path(), true).unwrap();
+
+    let outcome = thread_spawn_edges(home.path());
+    assert_eq!(
+        outcome,
+        ThreadSpawnEdgesOutcome::Used(vec![
+            ThreadSpawnEdge {
+                parent_thread_id: "parent-a".into(),
+                child_thread_id: "child-a".into(),
+                status: "open".into(),
+            },
+            ThreadSpawnEdge {
+                parent_thread_id: "parent-b".into(),
+                child_thread_id: "child-b".into(),
+                status: "closed".into(),
+            },
+        ])
+    );
+    let after = snapshot::snapshot_dir(home.path(), true).unwrap();
+    snapshot::assert_unchanged(&before, &after);
+}
+
+#[test]
+fn thread_spawn_edges_absent_or_degraded_do_not_affect_rollout_sessions() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-edge-fallback.jsonl",
+        &[session_meta(
+            "edge-fallback-id",
+            workspace.canonicalize().unwrap().to_str().unwrap(),
+        )],
+    );
+
+    assert_eq!(thread_spawn_edges(home.path()), ThreadSpawnEdgesOutcome::Absent);
+    let (absent_sessions, _) = discover_enriched(home.path());
+    assert_eq!(absent_sessions.len(), 1);
+
+    fs::write(state_db_path(home.path()), b"not sqlite").unwrap();
+    assert!(matches!(
+        thread_spawn_edges(home.path()),
+        ThreadSpawnEdgesOutcome::Degraded { .. }
+    ));
+    let (degraded_sessions, _) = discover_enriched(home.path());
+    assert_eq!(degraded_sessions.len(), 1);
+    assert_eq!(degraded_sessions[0].resumable_id.to_str(), Some("edge-fallback-id"));
+}
