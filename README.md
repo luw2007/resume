@@ -1,12 +1,27 @@
 # resume
 
-**Find and resume the right coding-agent session from your current project or worktree.**
+**One picker for every coding-agent session in your current project or worktree.**
 
-`resume` discovers local Pi, Claude Code, Codex, and OMP Sessions in a directory-derived Scope, lets you inspect and fuzzy-filter them in a Skim picker, and then replaces itself with the selected agent's native Resume command. Discovery and Preview are read-only. It never performs a machine-wide scan.
+`resume` finds local Claude Code, Codex, Pi, OMP, and OpenCode Sessions, lets you fuzzy-filter and preview them, then hands your selection to the agent's native Resume command.
 
-> v0.3.1 targets macOS and Linux terminals. Windows support is not claimed.
+![Terminal demo: find and resume a coding-agent session](docs/assets/resume.gif)
+
+- **Cross-agent:** one project-scoped view instead of one picker per agent.
+- **Safe discovery:** read-only; no machine-wide scan, migration, or Session rewrite.
+- **Native handoff:** the selected agent resumes its own Session in its recorded Workspace.
+- **Terminal-native:** fast Skim picker on macOS and Linux; Windows is not currently supported.
 
 ## Install
+
+### Homebrew (recommended)
+
+```sh
+brew install luw2007/tap/resume
+```
+
+The tap installs a prebuilt binary and shell completions on macOS or Linux.
+
+### Cargo
 
 Rust 1.91 or newer is required:
 
@@ -14,7 +29,7 @@ Rust 1.91 or newer is required:
 cargo install --git https://github.com/luw2007/resume
 ```
 
-The `resume` crate is not currently published to crates.io; install from Git or a release artifact.
+The `resume` crate is not currently published to crates.io. GitHub Releases also provide prebuilt archives for macOS and Linux.
 
 ## Quick start
 
