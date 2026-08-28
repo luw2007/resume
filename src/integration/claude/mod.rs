@@ -32,6 +32,7 @@
 //! No authoritative active marker was found. Activity is [`crate::session::ActivityStatus::Unknown`]
 //! absent a future validated positive process/session association.
 
+pub mod children;
 mod discover;
 mod format;
 mod resume;
