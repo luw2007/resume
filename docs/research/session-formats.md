@@ -31,6 +31,8 @@ Records use `{timestamp, type, payload}`. The normal first record is `type = "se
 
 Use `payload.id`, not the filename or unrelated `payload.session_id`, as the stable ID. Use primary `payload.cwd`; `workspace_roots` are additional roots, not the Resume directory.
 
+`--tree` uses only native structured relation evidence. A rollout's validated `session_meta.payload.parent_thread_id` creates a `Spawned` relation to its Codex parent with `NativeTranscript` evidence. If the referenced parent is absent from discovered Workspace Sessions, `--tree` retains a relation-only missing-parent node; it does not invent a resumable Session. Free-text mentions and proximity do not create this relation.
+
 User input may be represented twice: as `event_msg` with `payload.type = "user_message"`, and as a user `response_item` message with `input_text` or attachment blocks. The adapter must deduplicate these representations and exclude system/developer injection.
 
 ### Resume and activity
@@ -59,6 +61,8 @@ There is no file-level schema version. Heterogeneous events include `user`, `ass
 Accept only a top-level UUID-named transcript whose embedded `sessionId` agrees. Per-event `uuid` is not the resumable Session ID.
 
 User content may be a string or typed blocks. Include human text; exclude `tool_result`. Titles may be present as `agent-name`/`agentName` and `ai-title`/`aiTitle`; explicit name should precede generated title, with first valid user input as fallback. This precedence needs an isolated behavioral fixture because the native picker precedence was not safely invoked.
+
+Nested `projects/<workspace-key>/<parent-session-uuid>/subagents/*.jsonl` files are relation-only child executions, not independently resumable Workspace Sessions. Parent association derives from the child's `parentSessionId` or `parent_session_id`; otherwise it falls back only when the workspace-key directory contains exactly one sibling top-level transcript whose filename stem is a UUID, and the resulting parent ID must match a discovered Session.
 
 ### Resume and activity
 
@@ -119,6 +123,8 @@ JSONL normally begins with a padded title record (`type = "title"`, `v = 1`) fol
 User messages are typed envelopes with `message.role = "user"`, block content, and attribution. Use attribution to remove agent-injected inputs. `title_change` records update title state.
 
 Imported Sessions receive a new OMP ID and a `foreign_session_import` custom entry containing source kind, origin ID/path/cwd. Resume the OMP header ID; show only a safe origin badge by default.
+
+OMP's exact confined native subagent layout is `<parent-file-stem>/<child>.jsonl` beside `<parent-file-stem>.jsonl`. A file in that layout becomes a relation-only child execution in `--tree`, never an independently resumable Workspace Session. Discovery rejects non-normal or escaping paths, non-JSONL children, and files outside that exact layout. Child ID, cwd, agent/name, and import badge may optionally come from the header; a valid v3 header is not required.
 
 ### Resume and activity
 

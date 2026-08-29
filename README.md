@@ -10,7 +10,7 @@ Switch between Pi, Claude Code, Codex, OMP, and OpenCode sessions from a single 
 |---|---|
 | Agents | Pi · Claude Code · Codex · OMP · OpenCode |
 | Scope | Git worktree (default), explicit directory distance, or linked worktrees |
-| Output | Interactive picker, `--list` text, `--json` machine-readable |
+| Output | Interactive picker, relationship `--tree`, `--list` text, `--json` machine-readable |
 | Safety | Read-only discovery; no migration, no session rewrite, no telemetry |
 | Platform | macOS and Linux (Homebrew tap or Cargo) |
 
@@ -61,11 +61,14 @@ resume                         # picker for the default Scope
 resume /path/to/worktree       # derive Scope from another directory
 resume --list                  # stable text listing after discovery completes
 resume --json                  # machine-readable v1 output
+resume --tree                  # explicit native relationships
 resume -a pi -a codex          # replace the configured agent list
 resume --since 7d              # only Sessions active in the last 7 days
 resume --since 2026-01-01      # only Sessions active on or after a date
 resume --since all             # no time filtering (default)
 ```
+
+The tree shows explicit native relationships and never guesses from paths, titles, Workspace equality, or timestamps.
 
 The interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background and appears on its tab after the next navigation. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a visual row index, so the result is stable even as background items arrive.
 

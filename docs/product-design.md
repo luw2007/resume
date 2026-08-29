@@ -114,6 +114,12 @@ Within one integration, duplicate `(agent, isolation provenance, native ID)` rec
 
 Cross-agent records never deduplicate, even when one was imported from another agent. A known import relationship may be shown as a badge and used to place related entries near one another.
 
+### Relationship evidence and tree projection
+
+Relationship edges require explicit native evidence and are never inferred from directory, title, Workspace, or time proximity. Session nodes are distinct from relation-only evidence nodes, which can represent missing parents or non-resumable child executions. Every relation retains its kind and evidence source.
+
+Tree projection is deterministic: it expands each node fully once, uses references for later occurrences, multiple parents, and cycles, and keeps rootless cycles printable. Relations never merge Resume targets or make evidence-only nodes resumable.
+
 ### Decision metadata
 
 The main list provides:
