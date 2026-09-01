@@ -70,17 +70,15 @@ pub struct DiscoverOutcome {
 }
 
 /// Discover OMP sessions under the effective session root. Reads JSONL
-/// read-only through the shared reader, parses the title sidecar + v3 header
-/// (never assuming the header is the first record), and filters by header
-/// `cwd` through Scope. Never invokes OMP or migrates files.
+/// read-only through the shared reader and parses the title sidecar + v3
+/// header (never assuming the header is the first record). Never invokes OMP
+/// or migrates files.
 ///
-/// Discovery scans `.jsonl` files one level (or more) under the session root.
-/// In the default grouped layout, encoded Workspace directory names are
-/// always dash-prefixed and serve as a lossy Scope prefilter: a directory
-/// whose name cannot correspond to any in-Scope Workspace is skipped without
-/// reading its files (`Scope::may_contain_session_dir`). Custom session
-/// roots (`custom_session_root`) are never pruned. Header `cwd` stays
-/// authoritative for every file that is read.
+/// In the default grouped layout, the encoded Workspace directory is the
+/// authoritative Scope source. This preserves project identity when a session
+/// directory is moved across machines and its header retains the old absolute
+/// `cwd`. Files outside a grouped directory, including custom session roots,
+/// fall back to header `cwd`.
 pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
     let session_root = config.roots.session_root.clone();
     let confined_root = session_root
@@ -112,15 +110,25 @@ pub fn discover(config: &DiscoverConfig<'_>) -> io::Result<DiscoverOutcome> {
         }
         seen.push(dedupe_key);
 
-        // Scope filtering via authoritative header cwd.
-        match &parsed.workspace {
-            Some(workspace) if !config.scope.contains_workspace(workspace) => {
-                outcome.out_of_scope += 1;
-                continue;
-            }
-            Some(_) => {}
-            None => {
-                // Missing Workspace: surfaced for diagnosis (Unavailable).
+        let grouped_in_scope = !config.roots.custom_session_root
+            && jsonl_path
+                .strip_prefix(&config.roots.session_root)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .and_then(|component| component.as_os_str().to_str())
+                .is_some_and(|name| {
+                    name.starts_with('-')
+                        && config
+                            .scope
+                            .may_contain_session_dir(name, config.home.as_deref())
+                });
+        if !grouped_in_scope {
+            match &parsed.workspace {
+                Some(workspace) if !config.scope.contains_workspace(workspace) => {
+                    outcome.out_of_scope += 1;
+                    continue;
+                }
+                Some(_) | None => {}
             }
         }
 

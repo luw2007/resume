@@ -185,9 +185,8 @@ fn out_of_scope_workspace_excluded() {
     let fx = Fixture::new();
     let other_ws = fx.home().join("other-ws");
     fs::create_dir_all(&other_ws).unwrap();
-    fx.write(
+    fx.write_flat(
         &fx.default_agent_root,
-        &fx.encoded_ws(),
         "other.jsonl",
         &[
             header_v3("other", &other_ws, 1700000000),
@@ -197,6 +196,25 @@ fn out_of_scope_workspace_excluded() {
     let outcome = fx.discover(fx.roots_default());
     assert_eq!(outcome.parsed.len(), 0);
     assert_eq!(outcome.out_of_scope, 1);
+}
+
+#[test]
+fn grouped_directory_overrides_migrated_header_cwd() {
+    let fx = Fixture::new();
+    let mac_workspace = Path::new("/Users/luwei.will/workspace");
+    fx.write(
+        &fx.default_agent_root,
+        &fx.encoded_ws(),
+        "migrated.jsonl",
+        &[
+            header_v3("migrated", mac_workspace, 1700000000),
+            user_message_string("migrated", 1700000010),
+        ],
+    );
+
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(outcome.parsed.len(), 1);
+    assert_eq!(outcome.out_of_scope, 0);
 }
 #[test]
 fn out_of_scope_grouped_directory_is_pruned_without_reading_files() {
