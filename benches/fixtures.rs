@@ -257,10 +257,10 @@ fn write_big_claude_transcript(path: &Path, uuid: &str, cwd: &str, target_mb: us
 
 /// Build a synthetic OpenCode SQLite database at `<root>/opencode.db` with
 /// `sessions` rows in the `session` table, matching the schema the discover
-/// function queries (`id`, `directory`, `title`, `time_updated`). Directories
-/// fan in across 20 distinct workspaces under `root` (same shape as the other
-/// generators), and timestamps are monotonically decreasing so the
-/// `ORDER BY time_updated DESC` in discover exercises the sort path.
+/// function queries (`id`, `directory`, `title`, `time_updated`, `parent_id`).
+/// Directories fan in across 20 distinct workspaces under `root` (same shape
+/// as the other generators), and timestamps are monotonically decreasing so
+/// the `ORDER BY time_updated DESC` in discover exercises the sort path.
 ///
 /// Requires the `opencode` cargo feature (links `rusqlite`); feature-gated
 /// so `cargo bench` without the feature still compiles.
@@ -279,7 +279,8 @@ pub fn opencode_db(root: &Path, sessions: usize) {
             id text primary key,
             directory text not null,
             title text,
-            time_updated integer
+            time_updated integer,
+            parent_id text
         )",
     )
     .expect("create session table");
