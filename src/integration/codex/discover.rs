@@ -730,6 +730,12 @@ pub fn build_session(parsed: ParsedSession) -> Session {
         key,
         resumable_id: OsString::from(parsed.id.clone()),
         title,
+        // No dedicated tail read: the precise final model/token counters
+        // live in `turn_context`/`token_count` records past the bounded
+        // early-read window (see PERFORMANCE.md); `model_provider` is
+        // already part of the header this parser reads regardless.
+        final_model: parsed.model_provider.clone(),
+        tokens: None,
         workspace,
         updated_at: parsed
             .sqlite_activity_time

@@ -292,6 +292,26 @@ fn assistant_message(text: &str) -> Value {
     })
 }
 
+fn assistant_message_with_usage(model: &str, total_tokens: u64, timestamp: u64) -> Value {
+    json!({
+        "type": "message",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "usage": { "totalTokens": total_tokens },
+        }
+    })
+}
+
+fn model_change_record(model: &str, timestamp: u64) -> Value {
+    json!({
+        "type": "model_change",
+        "timestamp": timestamp,
+        "model": model,
+    })
+}
+
 fn foreign_import(source_kind: &str, origin_id: &str, origin_cwd: &Path) -> Value {
     json!({
         "type": "custom",

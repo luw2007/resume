@@ -32,6 +32,10 @@ struct ParsedTranscript {
     ai_title: Option<String>,
     /// Real (human) user messages, in order of appearance.
     user_messages: Vec<message::UserMessage>,
+    /// Model of the most recent `assistant` message with a `usage` block.
+    final_model: Option<String>,
+    /// Sum of `usage` token fields on that same message.
+    tokens: Option<u64>,
     /// Whether any record carried a recognized Claude structural field
     /// (`type`, `sessionId`, `cwd`, or `uuid`). A transcript with none of
     /// these across every record is not a Claude session at all — e.g. a
@@ -61,6 +65,8 @@ fn parse_transcript(
         agent_name: None,
         ai_title: None,
         user_messages: Vec::new(),
+        final_model: None,
+        tokens: None,
         looks_like_claude: false,
     };
 
@@ -133,6 +139,30 @@ fn interpret_record(record: &Value, parsed: &mut ParsedTranscript) {
         let msg = message::build_user_message(text, attachments);
         if !msg.text.trim().is_empty() || !msg.attachments.is_empty() {
             parsed.user_messages.push(msg);
+        }
+    }
+
+    // Assistant token/model accounting: keep the most recent message that
+    // carries a `usage` block, since Claude Code reports per-turn (not
+    // cumulative) usage and the latest turn is the best size proxy.
+    if record_type == Some("assistant")
+        && let Some(message) = record.get("message")
+        && let Some(usage) = message.get("usage").and_then(Value::as_object)
+    {
+        if let Some(model) = message.get("model").and_then(Value::as_str) {
+            parsed.final_model = Some(model.to_string());
+        }
+        let sum = [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "output_tokens",
+        ]
+        .iter()
+        .filter_map(|key| usage.get(*key).and_then(Value::as_u64))
+        .sum::<u64>();
+        if sum > 0 {
+            parsed.tokens = Some(sum);
         }
     }
 }
@@ -320,6 +350,8 @@ pub(super) fn parse_candidate(
         key,
         resumable_id: stable_id,
         title,
+        final_model: parsed.final_model,
+        tokens: parsed.tokens,
         updated_at: std::fs::metadata(&candidate.path)
             .and_then(|metadata| metadata.modified())
             .ok()

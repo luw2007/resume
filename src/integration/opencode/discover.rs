@@ -26,6 +26,11 @@ pub struct ParsedSession {
     pub updated_at: Option<SystemTime>,
     /// Native `session.parent_id` value; `None` for top-level sessions.
     pub parent_id: Option<String>,
+    /// `session.model` is a JSON object (`{"id", "providerID", "variant"}`);
+    /// this is its bare `id` field.
+    pub final_model: Option<String>,
+    /// Sum of `session.tokens_{input,output,reasoning,cache_read,cache_write}`.
+    pub tokens: Option<u64>,
 }
 
 impl ParsedSession {
@@ -48,6 +53,8 @@ impl ParsedSession {
             },
             resumable_id: self.id.into(),
             title: self.title,
+            final_model: self.final_model,
+            tokens: self.tokens,
             updated_at: self.updated_at.map(|at| UpdateTime {
                 at,
                 source: UpdateTimeSource::Native,
@@ -89,7 +96,9 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
     let conn = open_readonly(&path)?;
     let mut outcome = DiscoverOutcome::default();
     let mut stmt = conn.prepare(
-        "select id, directory, title, time_updated, parent_id from session order by time_updated desc",
+        "select id, directory, title, time_updated, parent_id, model, \
+         tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write \
+         from session order by time_updated desc",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
@@ -98,6 +107,19 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
         let title: Option<String> = row.get(2)?;
         let updated_millis: Option<i64> = row.get(3)?;
         let parent_id: Option<String> = row.get(4)?;
+        let model_json: Option<String> = row.get(5)?;
+        let final_model = model_json.as_deref().and_then(model_id_from_json);
+        let tokens_input: i64 = row.get(6)?;
+        let tokens_output: i64 = row.get(7)?;
+        let tokens_reasoning: i64 = row.get(8)?;
+        let tokens_cache_read: i64 = row.get(9)?;
+        let tokens_cache_write: i64 = row.get(10)?;
+        let tokens_sum = tokens_input
+            + tokens_output
+            + tokens_reasoning
+            + tokens_cache_read
+            + tokens_cache_write;
+        let tokens = (tokens_sum > 0).then_some(tokens_sum as u64);
         let directory = PathBuf::from(directory);
         if !directory.is_absolute() {
             outcome.skipped_rows += 1;
@@ -109,9 +131,23 @@ pub fn discover(effective_root: &std::path::Path) -> rusqlite::Result<Option<Dis
             title: title.filter(|title| !title.is_empty()),
             updated_at: updated_millis.and_then(millis_to_system_time),
             parent_id,
+            final_model,
+            tokens,
         });
     }
     Ok(Some(outcome))
+}
+
+/// Extract the bare `id` field from `session.model`'s JSON object
+/// (`{"id", "providerID", "variant"}`). Malformed or non-object JSON yields
+/// `None` rather than a discovery error — the column is best-effort display
+/// metadata, never load-bearing for resume itself.
+fn model_id_from_json(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn millis_to_system_time(millis: i64) -> Option<SystemTime> {
@@ -165,7 +201,13 @@ mod tests {
                  title text not null,
                  time_created integer not null,
                  time_updated integer not null,
-                 parent_id text
+                 parent_id text,
+                 model text,
+                 tokens_input integer default 0 not null,
+                 tokens_output integer default 0 not null,
+                 tokens_reasoning integer default 0 not null,
+                 tokens_cache_read integer default 0 not null,
+                 tokens_cache_write integer default 0 not null
              );",
         )
         .unwrap();
@@ -202,6 +244,28 @@ mod tests {
         assert_eq!(session.title.as_deref(), Some("Fix the bug"));
         assert!(session.updated_at.is_some());
         assert!(session.parent_id.is_none());
+    }
+
+    #[test]
+    fn extracts_bare_model_id_and_sums_token_columns() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join(super::super::roots::DB_FILENAME);
+        create_test_db(&db);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "insert into session (id, project_id, directory, title, time_created, time_updated, model, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write)
+             values ('ses_metered', 'proj_1', '/Users/test/work', 'Metered', 1700000000000, 1700000300000, '{\"id\":\"gpt-5.6-sol\",\"providerID\":\"codex_gpt\",\"variant\":\"default\"}', 100, 20, 5, 3, 2)",
+            [],
+        )
+        .unwrap();
+        let outcome = discover(dir.path()).unwrap().unwrap();
+        let session = outcome
+            .parsed
+            .iter()
+            .find(|session| session.id == "ses_metered")
+            .unwrap();
+        assert_eq!(session.final_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(session.tokens, Some(130));
     }
 
     #[test]

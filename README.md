@@ -52,6 +52,8 @@ Sessions are scoped to your current worktree by default. Use `--up` / `--down` f
 
 Toggle Preview with Ctrl-O to inspect session metadata before resuming. Selection triggers the agent's own native resume command in its recorded workspace, preserving supported root/profile overrides.
 
+The picker follows OMP's resume interaction: `↑`/`↓` navigates, typing filters, `Enter` resumes, `Tab`/`Shift-Tab` switches agent scope, and `Esc` cancels.
+
 ![Session preview and native agent resume handoff](docs/assets/preview-resume.gif)
 
 ## Quick start
@@ -107,7 +109,9 @@ Upward Scope never includes children; downward Scope never includes ancestors or
 
 ## Picker and Preview
 
-The Skim picker starts with Preview hidden unless config says otherwise.
+The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · tokens · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card has a `›` before its title and Skim's text highlight, without a colored margin block. Each text row clips to the available list width, including when Preview opens beside it. Token counts use compact numbers (`12.3k`); supported Sessions show `✅`. Missing data remains explicit (`tokens unknown`, `unknown model`).
+
+The header shows every available agent tab and the active one in brackets, for example `[All] pi omp claude  <-/->  PAGE 1/3`. A background scan appears alongside the tabs until it finishes.
 
 | Key | Behavior |
 |---|---|

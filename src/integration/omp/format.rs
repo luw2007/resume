@@ -75,6 +75,12 @@ pub struct ParsedSession {
     pub header_time: Option<SystemTime>,
     /// Resolved effective title across header/title/title_change state.
     pub title: Option<String>,
+    /// Whether the title came from a native title record rather than a message summary.
+    pub explicit_title: bool,
+    /// Last model used by an assistant message or model-change record.
+    pub final_model: Option<String>,
+    /// Cumulative tokens reported by the latest assistant message.
+    pub tokens: Option<u64>,
     /// Real user messages (terminal-safe, injection-filtered, attribution-aware).
     pub messages: Vec<UserMessage>,
     /// Canonical absolute transcript path (the locator used for dedupe).
@@ -118,6 +124,8 @@ impl ParsedSession {
             },
             resumable_id: OsString::from(self.id),
             title,
+            final_model: self.final_model,
+            tokens: self.tokens,
             updated_at: self.activity_time.map(|at| UpdateTime {
                 at,
                 source: if self.file_mtime == Some(at) {
@@ -170,11 +178,33 @@ pub(super) fn extract_session(
     let mut title_state = TitleState::default();
 
     let mut messages = Vec::new();
+    let mut final_model = None;
+    let mut tokens = None;
     let mut latest_message_time: Option<SystemTime> = None;
     let mut import: Option<ImportBadge> = None;
 
     for record in &result.records {
         let rec_type = record.get("type").and_then(|v| v.as_str());
+        if rec_type == Some("model_change") {
+            final_model = record
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(String::from);
+        }
+        if let Some(message) = record.get("message").and_then(|value| value.as_object())
+            && message.get("role").and_then(|value| value.as_str()) == Some("assistant")
+        {
+            if let Some(model) = message.get("model").and_then(|value| value.as_str()) {
+                final_model = Some(model.to_string());
+            }
+            if let Some(total) = message
+                .get("usage")
+                .and_then(|value| value.get("totalTokens"))
+                .and_then(|value| value.as_u64())
+            {
+                tokens = Some(total);
+            }
+        }
 
         // The v3 session header itself: extract its title metadata in record
         // order so that a title sidecar before it, the header, and a later
@@ -246,6 +276,7 @@ pub(super) fn extract_session(
 
     // Resolve effective title: accumulated title state, else summary from the
     // first valid human message.
+    let explicit_title = title_state.current.is_some();
     let title = title_state.current.or_else(|| {
         let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
         crate::preview::summary::summarize_texts(texts, crate::preview::summary::default_width())
@@ -254,6 +285,9 @@ pub(super) fn extract_session(
     Some(ParsedSession {
         id,
         workspace,
+        final_model,
+        explicit_title,
+        tokens,
         header_time,
         title,
         messages,

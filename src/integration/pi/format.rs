@@ -42,6 +42,8 @@ impl ParsedSession {
             },
             resumable_id: OsString::from(self.id),
             title,
+            final_model: self.final_model,
+            tokens: self.tokens,
             updated_at: self.activity_time.map(|at| UpdateTime {
                 at,
                 source: if self.file_mtime == Some(at) {

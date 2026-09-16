@@ -42,6 +42,8 @@ pub const EXIT_INTERRUPT: i32 = 130;
 #[derive(Clone, Debug)]
 struct CandidateRecord {
     session: Session,
+    /// First human input when the source supplied a separate native title.
+    message_preview: Option<String>,
     spec: Option<ResumeSpec>,
     evidence: Option<LaunchEvidence>,
     relations: Vec<NativeRelation>,
@@ -468,7 +470,11 @@ fn merge_records(
         let mut map = map.lock().unwrap();
         for record in records {
             let key = CandidateKey(next_key.fetch_add(1, Ordering::SeqCst));
-            let mut candidate = picker_candidate(key.clone(), &record.session);
+            let mut candidate = picker_candidate(
+                key.clone(),
+                &record.session,
+                record.message_preview.as_deref(),
+            );
             if let Some(relation) = record.relations.first() {
                 let breadcrumb = format!("{} {} › ", relation.parent_agent, relation.parent_id);
                 candidate.display = format!("{breadcrumb}{}", candidate.display);
@@ -627,6 +633,11 @@ fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                 .parsed
                 .into_iter()
                 .map(|parsed| {
+                    let message_preview = parsed
+                        .session_info_name
+                        .as_ref()
+                        .filter(|name| !name.trim().is_empty())
+                        .and_then(|_| parsed.messages.first().map(|message| message.text.clone()));
                     let spec = parsed.resume_spec(&roots);
                     let mut session = parsed.clone().into_session(
                         &roots,
@@ -645,7 +656,9 @@ fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         })
                         .into_iter()
                         .collect();
-                    record_with_relations(session, spec, relations)
+                    let mut record = record_with_relations(session, spec, relations);
+                    record.message_preview = message_preview;
+                    record
                 })
                 .collect();
             AgentDiscovery::ok(records, count_errors("pi_skipped", outcome.skipped_files))
@@ -762,6 +775,7 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                 let evidence = codex_transcript_path(&session)
                     .and_then(|path| LaunchEvidence::capture_with_transcript(&session, path).ok());
                 Some(CandidateRecord {
+                    message_preview: None,
                     session,
                     spec: Some(spec),
                     evidence,
@@ -838,6 +852,10 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                 scanned_any = true;
                 errors.extend(count_errors("omp_skipped", outcome.skipped_files));
                 records.extend(outcome.parsed.into_iter().map(|parsed| {
+                    let message_preview = parsed
+                        .explicit_title
+                        .then(|| parsed.messages.first().map(|message| message.text.clone()))
+                        .flatten();
                     let spec = parsed.resume_spec(&root);
                     let relations = parsed
                         .import
@@ -858,7 +876,9 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         omp::activity_status(&parsed, live.for_transcript(&parsed.transcript_path)),
                     );
                     normalize_availability(&mut session);
-                    record_with_relations(session, spec, relations)
+                    let mut record = record_with_relations(session, spec, relations);
+                    record.message_preview = message_preview;
+                    record
                 }));
             }
             Err(_) => errors.push(Diagnostic {
@@ -907,6 +927,7 @@ fn discover_opencode(scope: &Scope) -> AgentDiscovery {
                         .into_iter()
                         .collect();
                     Some(CandidateRecord {
+                        message_preview: None,
                         session,
                         spec: Some(spec),
                         evidence,
@@ -958,6 +979,7 @@ fn record_optional(session: Session, spec: Option<ResumeSpec>) -> CandidateRecor
         None
     };
     CandidateRecord {
+        message_preview: None,
         session,
         spec,
         evidence,
@@ -999,25 +1021,6 @@ fn count_errors(category: &'static str, count: usize) -> Vec<Diagnostic> {
     }
 }
 
-/// Title column budget for the compact human list.
-const TITLE_WIDTH_MIN: usize = 16;
-const TITLE_WIDTH_MAX: usize = 60;
-const TITLE_WIDTH_DEFAULT: usize = 48;
-
-fn title_column_width() -> usize {
-    title_column_width_for_tty(crate::picker::tty_size())
-}
-
-fn title_column_width_for_tty(tty_size: Option<(usize, usize)>) -> usize {
-    const LEADING_COLUMNS: usize = 10 + 1 + 18 + 1;
-    match tty_size {
-        Some((width, _)) if width > LEADING_COLUMNS => {
-            (width - LEADING_COLUMNS).clamp(TITLE_WIDTH_MIN, TITLE_WIDTH_MAX)
-        }
-        _ => TITLE_WIDTH_DEFAULT,
-    }
-}
-
 fn support_label(support: SupportStatus) -> &'static str {
     match support {
         SupportStatus::Supported => "",
@@ -1027,10 +1030,24 @@ fn support_label(support: SupportStatus) -> &'static str {
     }
 }
 
-fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
+fn picker_candidate(
+    key: CandidateKey,
+    session: &Session,
+    message_preview: Option<&str>,
+) -> PickerCandidate {
     let agent = text::normalize(&agent_label(session), text::Mode::Normalized);
     let updated = updated_label(session.updated_at);
     let updated_detail = updated_detail(session.updated_at);
+    let tokens = token_label(session.tokens);
+    let model = text::normalize(
+        session.final_model.as_deref().unwrap_or("unknown model"),
+        text::Mode::Normalized,
+    );
+    let status = if session.support == SupportStatus::Supported {
+        "✅".to_owned()
+    } else {
+        format!("{:?}", session.support)
+    };
     // Native titles (e.g. Pi's session_info.name) are untrusted transcript
     // data and reach --list/JSON directly (unlike search_text/preview below,
     // which already normalize their own format! output) — sanitize before
@@ -1044,26 +1061,27 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         &branch_label(session.workspace.workspace()),
         text::Mode::Normalized,
     );
-    let column_width = title_column_width();
     let support = support_label(session.support);
-    let display = format!(
-        "{:<10} {:<18} {} {}{}",
-        updated,
-        agent,
-        text::pad_to_width(&text::truncate_to_width(title, column_width), column_width),
-        branch,
-        support,
-    );
+    // The list clips each text row against its actual pane width at draw time.
+    let detail =
+        format!("{updated}  ·  {tokens}  ·  {agent}  ·  {model}  ·  {status}  ·  {branch}");
+    let message_preview =
+        message_preview.map(|message| text::normalize(message, text::Mode::Normalized));
+    let display = match &message_preview {
+        Some(message) => format!("{title}\n{message}\n{detail}"),
+        None => format!("{title}\n{detail}"),
+    };
     let search_text = text::normalize(
         &format!(
-            "{updated} {agent} {title} {branch}{support} {:?}",
+            "{title} {} {updated} {tokens} {agent} {model} {status} {branch}{support} {:?}",
+            message_preview.as_deref().unwrap_or_default(),
             session.resumable_id
         ),
         text::Mode::Normalized,
     );
     let preview = text::normalize(
         &format!(
-            "UPDATED {updated_detail}\nAGENT {agent}\nSUPPORT {:?}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}",
+            "UPDATED {updated_detail}\nAGENT {agent}\nMODEL {model}\nTOKENS {tokens}\nSUPPORT {:?}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}",
             session.support
         ),
         text::Mode::Raw,
@@ -1075,6 +1093,18 @@ fn picker_candidate(key: CandidateKey, session: &Session) -> PickerCandidate {
         preview,
         rank: crate::session::sort_rank(session),
         agent: text::normalize(&session.key.agent.to_string_lossy(), text::Mode::Normalized),
+    }
+}
+
+/// Human-friendly token count for the picker card's metadata row.
+fn token_label(tokens: Option<u64>) -> String {
+    let Some(tokens) = tokens else {
+        return "tokens unknown".into();
+    };
+    if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
     }
 }
 
@@ -1611,7 +1641,7 @@ fn print_list(records: &[CandidateRecord]) {
         if writeln!(
             stdout,
             "{}",
-            picker_candidate(CandidateKey(0), &record.session).display
+            picker_candidate(CandidateKey(0), &record.session, None).display
         )
         .is_err()
         {
@@ -1743,6 +1773,7 @@ mod tests {
             (ActivityStatus::Unknown, "Unknown"),
         ] {
             let record = CandidateRecord {
+                message_preview: None,
                 session: Session {
                     key: crate::session::SessionKey {
                         agent: "codex".into(),
@@ -1752,6 +1783,8 @@ mod tests {
                     },
                     resumable_id: "id".into(),
                     title: None,
+                    final_model: None,
+                    tokens: None,
                     updated_at: None,
                     workspace: WorkspaceEvidence::Recorded {
                         workspace: "/workspace".into(),
@@ -1780,6 +1813,8 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: Some("title".into()),
+            final_model: None,
+            tokens: None,
             updated_at: Some(crate::session::UpdateTime {
                 at: std::time::SystemTime::now(),
                 source: crate::session::UpdateTimeSource::Native,
@@ -1792,15 +1827,48 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session);
-        assert!(item.display.starts_with("0m         omp[work]"));
+        let item = picker_candidate(CandidateKey(1), &session, None);
+        assert!(item.display.starts_with("title\n"));
+        let detail = item.display.strip_prefix("title\n").unwrap();
+        assert!(detail.starts_with("0m  ·  tokens unknown  ·  omp[work]"));
+        assert!(detail.contains("  ·  ✅  ·  "));
+        assert_eq!(token_label(Some(12_300)), "12.3k");
+        assert_eq!(token_label(Some(999)), "999");
         assert!(item.preview.contains("native timestamp"));
         assert!(item.display.contains("no-branch"));
-        assert!(
-            !item.display.contains('+'),
-            "title and branch are separate columns, not glued with '+'"
-        );
+        assert!(!item.display.contains('+'));
         assert!(!item.search_text.contains("/workspace"));
+    }
+    #[test]
+    fn native_title_card_shows_first_message_before_metadata() {
+        let session = Session {
+            key: crate::session::SessionKey {
+                agent: "omp".into(),
+                effective_root: "/r".into(),
+                profile: None,
+                native_locator: "/t".into(),
+            },
+            resumable_id: "id".into(),
+            title: Some("Named session".into()),
+            final_model: None,
+            tokens: None,
+            updated_at: None,
+            workspace: WorkspaceEvidence::Unknown,
+            support: SupportStatus::Supported,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        };
+        let item = picker_candidate(CandidateKey(1), &session, Some("First human\nrequest"));
+        assert!(
+            item.display
+                .starts_with("Named session\nFirst human request\nunknown  ·")
+        );
+        assert!(item.search_text.contains("First human request"));
+        assert!(
+            picker_candidate(CandidateKey(2), &session, None)
+                .display
+                .starts_with("Named session\nunknown  ·")
+        );
     }
     #[test]
     fn picker_metadata_normalizes_agent_and_branch_labels() {
@@ -1813,13 +1881,15 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: None,
+            final_model: None,
+            tokens: None,
             updated_at: None,
             workspace: WorkspaceEvidence::Unknown,
             support: SupportStatus::Supported,
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session);
+        let item = picker_candidate(CandidateKey(1), &session, None);
         assert_eq!(item.agent, "omp");
         assert!(!item.display.contains('\u{1b}'));
         assert!(!item.display.contains('\u{202e}'));
@@ -1837,20 +1907,31 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: Some("title".into()),
+            final_model: None,
+            tokens: None,
             updated_at: None,
             workspace: WorkspaceEvidence::Unknown,
             support: SupportStatus::Supported,
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        for (support, label) in [
-            (SupportStatus::DiscoverOnly, "[DiscoverOnly]"),
-            (SupportStatus::Unsupported, "[Unsupported]"),
-            (SupportStatus::Unavailable, "[Unavailable]"),
+        for support in [
+            SupportStatus::DiscoverOnly,
+            SupportStatus::Unsupported,
+            SupportStatus::Unavailable,
         ] {
             session.support = support;
-            let item = picker_candidate(CandidateKey(1), &session);
-            assert!(item.display.ends_with(label), "display={:?}", item.display);
+            let item = picker_candidate(CandidateKey(1), &session, None);
+            assert!(
+                item.display.contains(&format!("{support:?}")),
+                "display={:?}",
+                item.display
+            );
+            assert!(
+                item.display.ends_with("no-branch"),
+                "display={:?}",
+                item.display
+            );
             assert!(item.preview.contains(&format!("SUPPORT {support:?}")));
         }
     }
@@ -1923,6 +2004,8 @@ mod tests {
                 },
                 resumable_id: "id".into(),
                 title: Some("title".into()),
+                final_model: None,
+                tokens: None,
                 updated_at: None,
                 workspace: WorkspaceEvidence::Recorded {
                     workspace: "/workspace".into(),
@@ -1945,6 +2028,7 @@ mod tests {
             SupportStatus::Unavailable,
         ] {
             let record = CandidateRecord {
+                message_preview: None,
                 session: session_with(support),
                 spec: None,
                 evidence: None,
@@ -1958,6 +2042,7 @@ mod tests {
         }
         // Supported but missing spec/evidence: the second E3003 branch.
         let record = CandidateRecord {
+            message_preview: None,
             session: session_with(SupportStatus::Supported),
             spec: None,
             evidence: None,
@@ -1970,28 +2055,6 @@ mod tests {
         );
     }
 
-    /// `docs/product-design.md` §3: title allocation is at least 16 and at
-    /// most 60 columns. Test the terminal-size mapping directly because a
-    /// test harness may itself have a controlling terminal.
-    #[test]
-    fn title_column_width_stays_within_documented_bounds() {
-        for tty_size in [
-            None,
-            Some((0, 0)),
-            Some((30, 0)),
-            Some((31, 0)),
-            Some((47, 0)),
-            Some((48, 0)),
-            Some((usize::MAX, 0)),
-        ] {
-            let width = title_column_width_for_tty(tty_size);
-            assert!(
-                (TITLE_WIDTH_MIN..=TITLE_WIDTH_MAX).contains(&width),
-                "TTY size {tty_size:?} produced width {width} outside [{TITLE_WIDTH_MIN}, {TITLE_WIDTH_MAX}]"
-            );
-        }
-        assert_eq!(title_column_width_for_tty(None), TITLE_WIDTH_DEFAULT);
-    }
     #[test]
     fn non_verbose_diagnostics_collapse_by_category_summing_counts() {
         // Reproduces the real-world spam of N distinct-path diagnostics in

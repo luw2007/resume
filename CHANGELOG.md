@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.7 - 2026-09-17
+
+### Added
+
+- The picker now renders variable-height Session cards: native title plus first human message when available, otherwise the first-message summary, followed by metadata (`updated · tokens · agent · model · status · branch`) and a blank separator. The focused title has a single `›` pointer and text highlighting, without a colored margin block; row text clips to pane width and supported Sessions show `✅`. This requires the vendored `skim` list widget to handle per-item heights (`vendor/skim/PROVENANCE.md`).
+- Codex, Claude, Pi, OMP, and OpenCode discovery now extract a best-effort `final_model` and cumulative `tokens` from native Session data (Codex intentionally uses only its already-read `session_meta.model_provider`, since the precise final model/token counters live past its bounded early-read window and a dedicated tail read would regress discovery performance).
+
 ## 0.3.6 - 2026-08-24
 
 ### Fixed

@@ -75,6 +75,8 @@ mod tests {
             title: Some("Fix the bug".to_string()),
             updated_at: None,
             parent_id: None,
+            final_model: None,
+            tokens: None,
         };
         let capture = tempfile::NamedTempFile::new().unwrap();
         let capture_path = capture.path().to_path_buf();

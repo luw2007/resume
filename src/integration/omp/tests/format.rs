@@ -27,6 +27,26 @@ fn parses_v3_header_when_title_sidecar_precedes_it() {
 }
 
 #[test]
+fn final_model_and_tokens_extracted_from_latest_assistant_message() {
+    let fx = Fixture::new();
+    fx.write(
+        &fx.default_agent_root,
+        &fx.encoded_ws(),
+        "metered.jsonl",
+        &[
+            header_v3("metered", &fx.workspace, 1700000000),
+            model_change_record("codex_gpt/gpt-5.6-sol", 1700000005),
+            assistant_message_with_usage("gpt-5.6-sol", 33278, 1700000010),
+        ],
+    );
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(outcome.parsed.len(), 1);
+    let parsed = &outcome.parsed[0];
+    assert_eq!(parsed.final_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(parsed.tokens, Some(33278));
+}
+
+#[test]
 fn file_without_session_header_skipped_as_no_header() {
     let fx = Fixture::new();
     // Title sidecar present but no session header.
@@ -85,6 +105,7 @@ fn title_sidecar_provides_initial_title() {
     );
     let outcome = fx.discover(fx.roots_default());
     assert_eq!(outcome.parsed[0].title.as_deref(), Some("Sidecar Title"));
+    assert!(outcome.parsed[0].explicit_title);
 }
 
 #[test]
@@ -154,6 +175,7 @@ fn title_falls_back_to_summary_from_first_human_input() {
     let outcome = fx.discover(fx.roots_default());
     let title = outcome.parsed[0].title.clone().unwrap();
     assert!(title.starts_with("Fix the parser bug now"));
+    assert!(!outcome.parsed[0].explicit_title);
 }
 
 #[test]
@@ -484,6 +506,9 @@ fn broad_workspace_risk_flagged_for_home_and_root() {
         workspace: Some(PathBuf::from("/")),
         header_time: None,
         title: None,
+        explicit_title: false,
+        final_model: None,
+        tokens: None,
         messages: vec![],
         transcript_path: PathBuf::from("/x.jsonl"),
         file_mtime: None,

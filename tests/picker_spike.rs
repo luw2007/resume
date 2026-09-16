@@ -351,9 +351,8 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     // and OMP (ids 36-85). The header makes its 35 older sessions discoverable.
     let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_page1.contains("[All]")
-            && all_page1.contains("PAGE 1/2")
-            && all_page1.contains("35 older sessions: Alt-P"),
+        all_page1.contains("[All] pi claude omp  <-/->  PAGE 1/2")
+            && all_page1.contains("35 older: Alt-P"),
         "expected newest All page with continuation: {all_page1:?}"
     );
     assert!(
@@ -374,7 +373,7 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     sess.write(b"\x1b[1;3D");
     let omp_tab = wait_for(&mut sess, "omp-candidate-000", Duration::from_millis(4000));
     assert!(
-        omp_tab.contains("[omp]") && omp_tab.contains("PAGE 1/1"),
+        omp_tab.contains("All pi claude [omp]  <-/->  PAGE 1/1"),
         "expected omp tab page 1/1: {omp_tab:?}"
     );
 
@@ -384,7 +383,7 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     sess.write(b"\x1b[1;3C");
     let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 1/2"),
+        pi_tab.contains("All [pi] claude omp  <-/->  PAGE 1/2"),
         "expected pi tab newest page: {pi_tab:?}"
     );
     assert!(
@@ -414,7 +413,7 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
     // Default: All's newest full page (1/2).
     let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_page1.contains("[All]") && all_page1.contains("PAGE 1/2"),
+        all_page1.contains("[All] pi claude omp  <-/->  PAGE 1/2"),
         "expected All tab newest page: {all_page1:?}"
     );
 
@@ -422,7 +421,7 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
     sess.write(b"\x1b[C");
     let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab.contains("[pi]") && pi_tab.contains("PAGE 1/2"),
+        pi_tab.contains("All [pi] claude omp  <-/->  PAGE 1/2"),
         "expected pi tab newest page: {pi_tab:?}"
     );
 
@@ -434,7 +433,7 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
         Duration::from_millis(4000),
     );
     assert!(
-        claude_tab.contains("[claude]") && claude_tab.contains("PAGE 1/1"),
+        claude_tab.contains("All pi [claude] omp  <-/->  PAGE 1/1"),
         "expected claude tab page 1/1: {claude_tab:?}"
     );
 
@@ -442,7 +441,7 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
     sess.write(b"\x1b[D");
     let pi_tab_again = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
     assert!(
-        pi_tab_again.contains("[pi]") && pi_tab_again.contains("PAGE 1/2"),
+        pi_tab_again.contains("All [pi] claude omp  <-/->  PAGE 1/2"),
         "expected pi tab newest page again: {pi_tab_again:?}"
     );
 
@@ -450,7 +449,7 @@ fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
     sess.write(b"\x1b[Z");
     let all_again = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
     assert!(
-        all_again.contains("[All]") && all_again.contains("PAGE 1/2"),
+        all_again.contains("[All] pi claude omp  <-/->  PAGE 1/2"),
         "expected All tab newest page again: {all_again:?}"
     );
 
@@ -482,7 +481,7 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     // hint -- proving it did not wait for the background agent.
     let early = wait_for(&mut sess, "omp-candidate-002", Duration::from_millis(500));
     assert!(
-        early.contains("[All]") && early.contains("codex still scanning"),
+        early.contains("[All] pi omp (codex still scanning)  <-/->  PAGE 1/1"),
         "expected an immediately open All tab with a pending hint: {early:?}"
     );
     assert!(
@@ -495,12 +494,23 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     // pending hint clears.
     std::thread::sleep(Duration::from_millis(700));
     sess.write(b"\x1b[1;3C"); // Alt+Right: All -> pi
-    let pi_tab = wait_for(&mut sess, "[pi]", Duration::from_millis(2000));
-    assert!(pi_tab.contains("[pi]"), "expected the pi tab: {pi_tab:?}");
-    sess.write(b"\x1b[1;3C"); // pi -> omp
-    let omp_tab = wait_for(&mut sess, "[omp]", Duration::from_millis(2000));
+    let pi_tab = wait_for(
+        &mut sess,
+        "All [pi] omp codex  <-/->",
+        Duration::from_millis(2000),
+    );
     assert!(
-        omp_tab.contains("[omp]"),
+        pi_tab.contains("All [pi] omp codex  <-/->"),
+        "expected the pi tab: {pi_tab:?}"
+    );
+    sess.write(b"\x1b[1;3C"); // pi -> omp
+    let omp_tab = wait_for(
+        &mut sess,
+        "All pi [omp] codex  <-/->",
+        Duration::from_millis(2000),
+    );
+    assert!(
+        omp_tab.contains("All pi [omp] codex  <-/->"),
         "expected the omp tab: {omp_tab:?}"
     );
     sess.write(b"\x1b[1;3C"); // omp -> codex
@@ -510,7 +520,7 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
         Duration::from_millis(4000),
     );
     assert!(
-        codex_tab.contains("[codex]") && !codex_tab.contains("still scanning"),
+        codex_tab.contains("All pi omp [codex]  <-/->") && !codex_tab.contains("still scanning"),
         "expected the codex tab with its pending hint cleared: {codex_tab:?}"
     );
     assert!(

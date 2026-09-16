@@ -258,6 +258,33 @@ pub(crate) fn assistant_message(text: &str) -> Value {
     })
 }
 
+/// Build an assistant `message` record carrying `model` and
+/// `usage.totalTokens` (the shape `final_model`/`tokens` extraction reads).
+pub(crate) fn assistant_message_with_usage(
+    model: &str,
+    total_tokens: u64,
+    timestamp: u64,
+) -> Value {
+    json!({
+        "type": "message",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "usage": { "totalTokens": total_tokens },
+        }
+    })
+}
+
+/// Build a `model_change` record.
+pub(crate) fn model_change(model: &str, timestamp: u64) -> Value {
+    json!({
+        "type": "model_change",
+        "timestamp": timestamp,
+        "model": model,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Root resolution tests
 // ---------------------------------------------------------------------------

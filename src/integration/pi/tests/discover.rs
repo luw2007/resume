@@ -297,6 +297,47 @@ fn activity_time_prefers_message_then_header_then_mtime() {
     let _ = path;
 }
 
+#[test]
+fn final_model_and_tokens_extracted_from_latest_assistant_message() {
+    let fx = Fixture::new();
+    fx.write_grouped(
+        &fx.encoded_ws(),
+        "metered.jsonl",
+        &[
+            header_v3("metered", &fx.workspace, 1700000000),
+            model_change("codex_gpt/gpt-5.6-sol", 1700000005),
+            assistant_message_with_usage("gpt-5.6-sol", 33278, 1700000010),
+        ],
+    );
+    let outcome = fx.discover_default();
+    assert_eq!(outcome.parsed.len(), 1);
+    let parsed = &outcome.parsed[0];
+    // The later assistant message's bare model wins over the earlier
+    // provider-qualified `model_change` value.
+    assert_eq!(parsed.final_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(parsed.tokens, Some(33278));
+}
+
+#[test]
+fn model_change_after_last_assistant_message_wins() {
+    let fx = Fixture::new();
+    fx.write_grouped(
+        &fx.encoded_ws(),
+        "switched.jsonl",
+        &[
+            header_v3("switched", &fx.workspace, 1700000000),
+            assistant_message_with_usage("gpt-5.6-sol", 1000, 1700000005),
+            model_change("claude-sonnet-5", 1700000010),
+        ],
+    );
+    let outcome = fx.discover_default();
+    let parsed = &outcome.parsed[0];
+    // model_change is the last record: it wins for the model, but it never
+    // carries a token count, so the last known token count is retained.
+    assert_eq!(parsed.final_model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(parsed.tokens, Some(1000));
+}
+
 // ---------------------------------------------------------------------------
 // Malformed middle/tail records and missing Workspace
 // ---------------------------------------------------------------------------

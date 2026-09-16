@@ -85,15 +85,33 @@ impl SkimItem for SpikeItem {
         Cow::Borrowed(&self.search_text)
     }
 
-    fn display<'a>(&'a self, context: DisplayContext<'a>) -> AnsiString<'a> {
+    fn display_rows<'a>(&'a self, context: DisplayContext<'a>) -> Vec<AnsiString<'a>> {
         // The sanitized display string is rendered as-is; we never replay the
         // caller's ANSI. Skim's highlight context is ignored here because the
         // sanitized string has different byte offsets than the raw input; in
         // production the sanitizer preserves offsets so highlighting can be
         // applied. For the spike, correctness of sanitization outranks
         // in-band highlighting.
-        let _ = context;
-        AnsiString::new_string(sanitize_for_display(&self.display), vec![])
+        //
+        // Clip each visible content row against the live list width, not the
+        // outer TTY (which may have a side preview). The last row is metadata.
+        // Single-row spike fixtures retain the upstream drawing path.
+        self.display
+            .split('\n')
+            .map(|row| {
+                AnsiString::new_string(
+                    crate::preview::text::truncate_to_width(
+                        &sanitize_for_display(row),
+                        context.container_width,
+                    ),
+                    vec![],
+                )
+            })
+            .collect()
+    }
+
+    fn display_height(&self) -> usize {
+        self.display.bytes().filter(|byte| *byte == b'\n').count() + 2
     }
 
     fn preview(&self, _context: PreviewContext) -> ItemPreview {
@@ -626,37 +644,40 @@ fn build_tabbed_options(
     binds.push(String::from("tab:accept")); // next tab
     binds.push(String::from("shift-tab:accept")); // previous tab
 
-    let mut tabs = String::from(if tab_index == 0 { "[All]" } else { "All" });
-    for (i, agent) in agent_tabs.iter().enumerate() {
-        tabs.push(' ');
-        if tab_index == i + 1 {
-            tabs.push_str(&format!("[{agent}]"));
+    let mut tabs = Vec::with_capacity(agent_tabs.len() + 1);
+    tabs.push(if tab_index == 0 {
+        "[All]".to_string()
+    } else {
+        "All".to_string()
+    });
+    for (index, agent) in agent_tabs.iter().enumerate() {
+        tabs.push(if tab_index == index + 1 {
+            format!("[{agent}]")
         } else {
-            tabs.push_str(agent);
-        }
+            (*agent).to_string()
+        });
     }
     let pending_note = pending_label
-        .map(|label| format!("  ({label} still scanning)"))
+        .map(|label| format!(" ({label} still scanning)"))
         .unwrap_or_default();
-
     let older_count = page_bounds(page.candidates, page.index).start;
-    let older_note = (older_count > 0).then(|| {
-        format!(
-            "  {older_count} older session{}: Alt-P",
-            if older_count == 1 { "" } else { "s" }
-        )
-    });
+    let page_note = format!("PAGE {}/{}", page.index + 1, page.total);
+    let older_note = if older_count > 0 {
+        format!(" · {older_count} older: Alt-P")
+    } else {
+        String::new()
+    };
 
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
+        .multi(false)
+        .reverse(true)
         .no_sort(true)
         .tac(true)
-        .multi(false)
+        .prompt(String::from("> "))
         .header(Some(format!(
-            "Ctrl-O Preview  {tabs}{pending_note}  PAGE {}/{}{older_note}  (alt-p/alt-n page, left/right or tab/shift-tab to switch)\nUPDATED  AGENT[PROFILE]  TITLE  BRANCH",
-            page.index + 1,
-            page.total,
-            older_note = older_note.unwrap_or_default(),
+            "{}{}  <-/->  {page_note}{older_note}\n\n↑/↓ navigate  ·  enter resume  ·  tab agent  ·  alt-p/alt-n page  ·  ctrl-o preview  ·  esc cancel",
+            tabs.join(" "), pending_note
         )))
         .preview(Some(String::new()))
         .preview_window(format!("{position}:60%{visibility}"))
@@ -992,17 +1013,91 @@ mod tests {
         };
         assert_eq!(&item.text().to_string(), "searchable");
         assert_eq!(&item.output().to_string(), "key:7");
-        // display is sanitized: no ESC byte survives.
-        let rendered = item.display(DisplayContext {
+        // display_rows is sanitized: no ESC byte survives. A single-row
+        // candidate (no embedded `\n`) yields exactly one row.
+        let rows = item.display_rows(DisplayContext {
             text: "",
             score: 0,
             matches: Matches::None,
             container_width: 80,
             highlight_attr: Attr::default(),
         });
-        let rendered_str: &str = rendered.stripped();
+        assert_eq!(rows.len(), 1);
+        let rendered_str: &str = rows[0].stripped();
         assert!(!rendered_str.contains('\x1b'));
         assert_eq!(rendered_str, "display red");
+    }
+
+    #[test]
+    fn spike_item_splits_display_rows_on_embedded_newline() {
+        let store = Arc::new(PreviewStore::default());
+        let item = SpikeItem {
+            key: CandidateKey(8),
+            display: "title row\ndetail row".into(),
+            search_text: "searchable".into(),
+            preview_store: store,
+        };
+        let rows = item.display_rows(DisplayContext {
+            text: "",
+            score: 0,
+            matches: Matches::None,
+            container_width: 80,
+            highlight_attr: Attr::default(),
+        });
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].stripped(), "title row");
+        assert_eq!(rows[1].stripped(), "detail row");
+    }
+
+    #[test]
+    fn native_title_card_preserves_preview_and_metadata() {
+        let item = SpikeItem {
+            key: CandidateKey(10),
+            display: "Native title\nA first human message that exceeds the narrow pane\nmetadata"
+                .into(),
+            search_text: "full first human message".into(),
+            preview_store: Arc::new(PreviewStore::default()),
+        };
+        let rows = item.display_rows(DisplayContext {
+            text: "",
+            score: 0,
+            matches: Matches::None,
+            container_width: 30,
+            highlight_attr: Attr::default(),
+        });
+        assert_eq!(item.display_height(), 4);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].stripped(), "Native title");
+        assert_eq!(rows[1].stripped(), "A first human message that ex…");
+        assert_eq!(rows[2].stripped(), "metadata");
+        assert_eq!(item.text(), "full first human message");
+    }
+
+    #[test]
+    fn card_title_uses_actual_list_width_without_changing_search() {
+        let store = Arc::new(PreviewStore::default());
+        let item = SpikeItem {
+            key: CandidateKey(9),
+            display: "A title that fits the wide list but not a side preview\nmetadata".into(),
+            search_text: "complete searchable title".into(),
+            preview_store: store,
+        };
+        let rows_at = |width| {
+            item.display_rows(DisplayContext {
+                text: "",
+                score: 0,
+                matches: Matches::None,
+                container_width: width,
+                highlight_attr: Attr::default(),
+            })
+        };
+        assert_eq!(
+            rows_at(80)[0].stripped(),
+            "A title that fits the wide list but not a side preview"
+        );
+        assert_eq!(rows_at(30)[0].stripped(), "A title that fits the wide li…");
+        assert_eq!(rows_at(30)[1].stripped(), "metadata");
+        assert_eq!(item.text(), "complete searchable title");
     }
 
     #[test]
@@ -1069,7 +1164,7 @@ mod tests {
             options
                 .header
                 .as_deref()
-                .is_some_and(|h| h.contains("PAGE 1/2  3 older sessions: Alt-P")),
+                .is_some_and(|h| { h.contains("[All] pi  <-/->  PAGE 1/2 · 3 older: Alt-P") }),
             "header={:?}",
             options.header
         );
@@ -1092,7 +1187,7 @@ mod tests {
             options
                 .header
                 .as_deref()
-                .is_some_and(|h| h.contains("Ctrl-O Preview")),
+                .is_some_and(|h| h.contains("ctrl-o preview")),
             "header={:?}",
             options.header
         );
@@ -1109,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn tabbed_picker_header_includes_session_columns() {
+    fn tabbed_picker_header_uses_omp_style_controls() {
         let options = build_tabbed_options(
             0,
             &["pi"],
@@ -1123,10 +1218,12 @@ mod tests {
             None,
         );
         assert!(
-            options
-                .header
-                .as_deref()
-                .is_some_and(|h| h.contains("UPDATED  AGENT[PROFILE]  TITLE  BRANCH")),
+            options.header.as_deref().is_some_and(|h| {
+                h.starts_with("[All] pi  <-/->  PAGE 1/1\n\n")
+                    && h.contains("↑/↓ navigate")
+                    && h.contains("enter resume")
+                    && h.contains("esc cancel")
+            }),
             "header={:?}",
             options.header
         );
@@ -1159,6 +1256,10 @@ mod tests {
             PreviewPosition::Auto,
             Some("codex"),
         );
-        assert!(with.header.unwrap().contains("codex still scanning"));
+        assert!(
+            with.header
+                .unwrap()
+                .contains("[All] pi (codex still scanning)")
+        );
     }
 }

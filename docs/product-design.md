@@ -152,7 +152,7 @@ Default ordering is last activity descending, unknown time last. During asynchro
 - Do not skip genuine short natural-language inputs such as “continue” or “confirm.”
 - Agent-specific control-command recognition stays in its integration.
 - For an untitled Session, perform at most a 1 MiB early read before first display. If no human input is found, show `(no early user input)` and continue Preview parsing in the background.
-- Collapse whitespace, sanitize controls, and truncate by Unicode display width. Title allocation is at most 60 columns on a wide terminal and at least 16 columns in the compact layout, ending with `…` when truncated.
+- Collapse whitespace and sanitize controls. In the picker, clip the title by Unicode display width to the actual list pane (which may shrink when Preview opens), ending with `…` when clipped. Never impose a smaller fixed title limit; source-provided titles may already be shortened by the native agent.
 - Search and JSON retain the full title/summary.
 
 ### Time

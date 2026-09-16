@@ -72,6 +72,10 @@ pub struct Session {
     /// The integration-owned resumable ID, deliberately distinct from `key`.
     pub resumable_id: OsString,
     pub title: Option<String>,
+    /// Last model observed in native session records, when available.
+    pub final_model: Option<String>,
+    /// Native cumulative token count, when the adapter exposes it cheaply.
+    pub tokens: Option<u64>,
     /// Most recent agent-recorded Session update, with the transcript mtime as
     /// a fallback when the native format carries no usable timestamp.
     pub updated_at: Option<UpdateTime>,
@@ -186,6 +190,8 @@ mod tests {
                 key: key("pi", "/root", None, key_name),
                 resumable_id: key_name.into(),
                 title: None,
+                final_model: None,
+                tokens: None,
                 updated_at: updated_at.map(|at| UpdateTime {
                     at,
                     source: UpdateTimeSource::Native,

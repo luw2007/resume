@@ -282,6 +282,11 @@ fn discovers_modern_session_under_dated_sessions_subdir() {
     assert_eq!(session.risk, RiskStatus::Normal);
     assert_eq!(session.key.agent.to_str().unwrap(), "codex");
     assert_eq!(session.title.as_deref(), Some("Fix the login bug"));
+    // No dedicated tail read for the precise final model (see
+    // PERFORMANCE.md); `model_provider` from the already-read header is the
+    // cheap fallback, and `tokens` stays unset rather than guessed.
+    assert_eq!(session.final_model.as_deref(), Some("openai"));
+    assert_eq!(session.tokens, None);
 }
 
 #[test]

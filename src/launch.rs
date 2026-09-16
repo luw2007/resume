@@ -518,6 +518,8 @@ mod tests {
             },
             resumable_id: "id".into(),
             title: None,
+            final_model: None,
+            tokens: None,
             updated_at: None,
             workspace: WorkspaceEvidence::Recorded {
                 workspace: "/tmp".into(),

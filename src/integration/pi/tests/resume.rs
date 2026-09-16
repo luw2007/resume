@@ -76,6 +76,8 @@ fn resume_spec_canonicalizes_relative_transcript_and_session_root() {
         messages: Vec::new(),
         transcript_path: relative_path,
         file_mtime: None,
+        final_model: None,
+        tokens: None,
     };
     let roots = EffectiveRoots {
         agent_root: relative_root.parent().unwrap().to_path_buf(),
@@ -261,6 +263,8 @@ fn broad_workspace_risk_flagged_for_home_and_root() {
         messages: vec![],
         transcript_path: PathBuf::from("/x.jsonl"),
         file_mtime: None,
+        final_model: None,
+        tokens: None,
     };
     assert_eq!(
         pi::risk_status(&parsed, Some(Path::new("/"))),

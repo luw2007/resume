@@ -65,8 +65,12 @@ pub struct ParsedSession {
     /// Canonical absolute transcript path (the locator used for dedupe and
     /// Resume).
     pub transcript_path: PathBuf,
-    /// File mtime fallback for activity.
     pub file_mtime: Option<SystemTime>,
+    /// Model of the most recent `model_change` or assistant `message.model`
+    /// record, in record order (assistant messages win over model_change).
+    pub final_model: Option<String>,
+    /// `totalTokens` from the most recent assistant message's `usage` block.
+    pub tokens: Option<u64>,
 }
 
 /// Outcome of discovering Pi sessions in the effective session root.
@@ -249,6 +253,8 @@ pub(super) fn extract_session(
     let mut session_info_name: Option<String> = None;
     let mut messages = Vec::new();
     let mut latest_message_time: Option<SystemTime> = None;
+    let mut final_model: Option<String> = None;
+    let mut tokens: Option<u64> = None;
 
     for record in &result.records {
         // session_info records carry a user-facing name.
@@ -261,6 +267,26 @@ pub(super) fn extract_session(
                 session_info_name = Some(name.to_string());
             }
             continue;
+        }
+        if record.get("type").and_then(|v| v.as_str()) == Some("model_change") {
+            final_model = record
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+        if let Some(message_obj) = record.get("message").and_then(|v| v.as_object())
+            && message_obj.get("role").and_then(|v| v.as_str()) == Some("assistant")
+        {
+            if let Some(model) = message_obj.get("model").and_then(|v| v.as_str()) {
+                final_model = Some(model.to_string());
+            }
+            if let Some(total) = message_obj
+                .get("usage")
+                .and_then(|v| v.get("totalTokens"))
+                .and_then(|v| v.as_u64())
+            {
+                tokens = Some(total);
+            }
         }
         // User message records: message.role == "user".
         if let Some(message_obj) = record.get("message").and_then(|v| v.as_object())
@@ -294,6 +320,8 @@ pub(super) fn extract_session(
         messages,
         transcript_path: path.to_path_buf(),
         file_mtime,
+        final_model,
+        tokens,
     })
 }
 
