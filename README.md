@@ -109,9 +109,9 @@ Upward Scope never includes children; downward Scope never includes ancestors or
 
 ## Picker and Preview
 
-The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · tokens · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card has a `›` before its title and Skim's text highlight, without a colored margin block. Each text row clips to the available list width, including when Preview opens beside it. Token counts use compact numbers (`12.3k`); supported Sessions show `✅`. Missing data remains explicit (`tokens unknown`, `unknown model`).
+The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · session file size · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card has a `›` before its title and Skim's text highlight, without a colored margin block. Each text row clips to the available list width, including when Preview opens beside it. Session size uses OMP's binary-based format (`11.0MB`); when there is no individual session file (OpenCode stores sessions in a shared database), it shows `size unknown` rather than reporting the whole database size. Supported Sessions show `✅`; missing model data shows `unknown model`. Token counts remain in Preview, not the card.
 
-The header shows every available agent tab and the active one in brackets, for example `[All] pi omp claude  <-/->  PAGE 1/3`. A background scan appears alongside the tabs until it finishes.
+The header shows every available agent tab and the active one in brackets, for example `[All 50/147] pi omp claude  <-/->  PAGE 1/3 · older: Alt-P`. `50/147` means 50 Sessions on this page out of 147 in the active tab, not 50 matches out of 50 loaded items. Skim's separate per-page match counter is hidden; typing still filters the current page. A background scan appears alongside the tabs until it finishes.
 
 | Key | Behavior |
 |---|---|

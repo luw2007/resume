@@ -644,15 +644,16 @@ fn build_tabbed_options(
     binds.push(String::from("tab:accept")); // next tab
     binds.push(String::from("shift-tab:accept")); // previous tab
 
+    let current_page = page_bounds(page.candidates, page.index).len();
     let mut tabs = Vec::with_capacity(agent_tabs.len() + 1);
     tabs.push(if tab_index == 0 {
-        "[All]".to_string()
+        format!("[All {current_page}/{}]", page.candidates)
     } else {
         "All".to_string()
     });
     for (index, agent) in agent_tabs.iter().enumerate() {
         tabs.push(if tab_index == index + 1 {
-            format!("[{agent}]")
+            format!("[{agent} {current_page}/{}]", page.candidates)
         } else {
             (*agent).to_string()
         });
@@ -663,14 +664,15 @@ fn build_tabbed_options(
     let older_count = page_bounds(page.candidates, page.index).start;
     let page_note = format!("PAGE {}/{}", page.index + 1, page.total);
     let older_note = if older_count > 0 {
-        format!(" · {older_count} older: Alt-P")
+        " · older: Alt-P"
     } else {
-        String::new()
+        ""
     };
 
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
+        .no_info(true)
         .reverse(true)
         .no_sort(true)
         .tac(true)
@@ -1164,7 +1166,7 @@ mod tests {
             options
                 .header
                 .as_deref()
-                .is_some_and(|h| { h.contains("[All] pi  <-/->  PAGE 1/2 · 3 older: Alt-P") }),
+                .is_some_and(|h| { h.contains("[All 50/53] pi  <-/->  PAGE 1/2 · older: Alt-P") }),
             "header={:?}",
             options.header
         );
@@ -1219,7 +1221,7 @@ mod tests {
         );
         assert!(
             options.header.as_deref().is_some_and(|h| {
-                h.starts_with("[All] pi  <-/->  PAGE 1/1\n\n")
+                h.starts_with("[All 1/1] pi  <-/->  PAGE 1/1\n\n")
                     && h.contains("↑/↓ navigate")
                     && h.contains("enter resume")
                     && h.contains("esc cancel")
@@ -1259,7 +1261,7 @@ mod tests {
         assert!(
             with.header
                 .unwrap()
-                .contains("[All] pi (codex still scanning)")
+                .contains("[All 1/1] pi (codex still scanning)")
         );
     }
 }

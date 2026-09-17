@@ -474,6 +474,7 @@ fn merge_records(
                 key.clone(),
                 &record.session,
                 record.message_preview.as_deref(),
+                session_file_size(&record),
             );
             if let Some(relation) = record.relations.first() {
                 let breadcrumb = format!("{} {} › ", relation.parent_agent, relation.parent_id);
@@ -963,6 +964,25 @@ fn codex_transcript_path(session: &Session) -> Option<PathBuf> {
     }
 }
 
+/// OpenCode stores many sessions in one DB; its database size is not a session size.
+fn session_file_size(record: &CandidateRecord) -> Option<u64> {
+    if record.session.key.agent == "opencode" {
+        return None;
+    }
+    record
+        .evidence
+        .as_ref()
+        .map(|e| e.transcript_identity.len)
+        .or_else(|| {
+            let path = if record.session.key.agent == "codex" {
+                codex_transcript_path(&record.session)?
+            } else {
+                PathBuf::from(&record.session.key.native_locator)
+            };
+            std::fs::metadata(path).ok().map(|m| m.len())
+        })
+}
+
 fn record_with_relations(
     session: Session,
     spec: ResumeSpec,
@@ -1034,11 +1054,15 @@ fn picker_candidate(
     key: CandidateKey,
     session: &Session,
     message_preview: Option<&str>,
+    session_size: Option<u64>,
 ) -> PickerCandidate {
     let agent = text::normalize(&agent_label(session), text::Mode::Normalized);
     let updated = updated_label(session.updated_at);
     let updated_detail = updated_detail(session.updated_at);
     let tokens = token_label(session.tokens);
+    let size = session_size
+        .map(byte_label)
+        .unwrap_or_else(|| "size unknown".into());
     let model = text::normalize(
         session.final_model.as_deref().unwrap_or("unknown model"),
         text::Mode::Normalized,
@@ -1063,8 +1087,7 @@ fn picker_candidate(
     );
     let support = support_label(session.support);
     // The list clips each text row against its actual pane width at draw time.
-    let detail =
-        format!("{updated}  ·  {tokens}  ·  {agent}  ·  {model}  ·  {status}  ·  {branch}");
+    let detail = format!("{updated}  ·  {size}  ·  {agent}  ·  {model}  ·  {status}  ·  {branch}");
     let message_preview =
         message_preview.map(|message| text::normalize(message, text::Mode::Normalized));
     let display = match &message_preview {
@@ -1073,7 +1096,7 @@ fn picker_candidate(
     };
     let search_text = text::normalize(
         &format!(
-            "{title} {} {updated} {tokens} {agent} {model} {status} {branch}{support} {:?}",
+            "{title} {} {updated} {size} {agent} {model} {status} {branch}{support} {:?}",
             message_preview.as_deref().unwrap_or_default(),
             session.resumable_id
         ),
@@ -1081,7 +1104,7 @@ fn picker_candidate(
     );
     let preview = text::normalize(
         &format!(
-            "UPDATED {updated_detail}\nAGENT {agent}\nMODEL {model}\nTOKENS {tokens}\nSUPPORT {:?}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}",
+            "UPDATED {updated_detail}\nAGENT {agent}\nMODEL {model}\nSIZE {size}\nTOKENS {tokens}\nSUPPORT {:?}\nTITLE {title}\nWORKTREE {branch}\n\n# normalized\n{title}\n\n# raw (still terminal-safe)\n{title}",
             session.support
         ),
         text::Mode::Raw,
@@ -1105,6 +1128,19 @@ fn token_label(tokens: Option<u64>) -> String {
         format!("{:.1}k", tokens as f64 / 1000.0)
     } else {
         tokens.to_string()
+    }
+}
+
+/// Match OMP's picker file-size display (binary multiples with decimal labels).
+fn byte_label(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
@@ -1641,7 +1677,13 @@ fn print_list(records: &[CandidateRecord]) {
         if writeln!(
             stdout,
             "{}",
-            picker_candidate(CandidateKey(0), &record.session, None).display
+            picker_candidate(
+                CandidateKey(0),
+                &record.session,
+                None,
+                session_file_size(record)
+            )
+            .display
         )
         .is_err()
         {
@@ -1827,13 +1869,17 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session, None);
+        let item = picker_candidate(CandidateKey(1), &session, None, Some(11_534_336));
         assert!(item.display.starts_with("title\n"));
         let detail = item.display.strip_prefix("title\n").unwrap();
-        assert!(detail.starts_with("0m  ·  tokens unknown  ·  omp[work]"));
+        assert!(detail.starts_with("0m  ·  11.0MB  ·  omp[work]"));
         assert!(detail.contains("  ·  ✅  ·  "));
         assert_eq!(token_label(Some(12_300)), "12.3k");
         assert_eq!(token_label(Some(999)), "999");
+        assert!(item.preview.contains("SIZE 11.0MB"));
+        assert!(item.preview.contains("TOKENS tokens unknown"));
+        assert_eq!(byte_label(1024), "1.0KB");
+        assert_eq!(byte_label(1024 * 1024 * 1024), "1.0GB");
         assert!(item.preview.contains("native timestamp"));
         assert!(item.display.contains("no-branch"));
         assert!(!item.display.contains('+'));
@@ -1858,18 +1904,57 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session, Some("First human\nrequest"));
+        let item = picker_candidate(
+            CandidateKey(1),
+            &session,
+            Some("First human\nrequest"),
+            None,
+        );
         assert!(
             item.display
                 .starts_with("Named session\nFirst human request\nunknown  ·")
         );
         assert!(item.search_text.contains("First human request"));
         assert!(
-            picker_candidate(CandidateKey(2), &session, None)
+            picker_candidate(CandidateKey(2), &session, None, None)
                 .display
                 .starts_with("Named session\nunknown  ·")
         );
     }
+    #[test]
+    fn session_file_size_uses_only_own_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(&transcript, b"session bytes").unwrap();
+        let session = Session {
+            key: crate::session::SessionKey {
+                agent: "pi".into(),
+                effective_root: dir.path().into(),
+                profile: None,
+                native_locator: transcript.clone().into_os_string(),
+            },
+            resumable_id: "id".into(),
+            title: None,
+            final_model: None,
+            tokens: Some(76_800),
+            updated_at: None,
+            workspace: WorkspaceEvidence::Unknown,
+            support: SupportStatus::Supported,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        };
+        let mut record = record_optional(session, None);
+        for agent in ["pi", "omp", "claude"] {
+            record.session.key.agent = agent.into();
+            assert_eq!(session_file_size(&record), Some(13));
+        }
+        record.session.key.agent = "codex".into();
+        record.session.key.native_locator = format!("id::{}", transcript.display()).into();
+        assert_eq!(session_file_size(&record), Some(13));
+        record.session.key.agent = "opencode".into();
+        assert_eq!(session_file_size(&record), None);
+    }
+
     #[test]
     fn picker_metadata_normalizes_agent_and_branch_labels() {
         let session = Session {
@@ -1889,7 +1974,7 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session, None);
+        let item = picker_candidate(CandidateKey(1), &session, None, None);
         assert_eq!(item.agent, "omp");
         assert!(!item.display.contains('\u{1b}'));
         assert!(!item.display.contains('\u{202e}'));
@@ -1921,7 +2006,7 @@ mod tests {
             SupportStatus::Unavailable,
         ] {
             session.support = support;
-            let item = picker_candidate(CandidateKey(1), &session, None);
+            let item = picker_candidate(CandidateKey(1), &session, None, None);
             assert!(
                 item.display.contains(&format!("{support:?}")),
                 "display={:?}",
