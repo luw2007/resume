@@ -44,6 +44,7 @@ struct CandidateRecord {
     session: Session,
     /// First human input when the source supplied a separate native title.
     message_preview: Option<String>,
+    user_inputs: Vec<crate::preview::message::UserMessage>,
     spec: Option<ResumeSpec>,
     evidence: Option<LaunchEvidence>,
     relations: Vec<NativeRelation>,
@@ -475,6 +476,7 @@ fn merge_records(
                 &record.session,
                 record.message_preview.as_deref(),
                 session_file_size(&record),
+                &record.user_inputs,
             );
             if let Some(relation) = record.relations.first() {
                 let breadcrumb = format!("{} {} › ", relation.parent_agent, relation.parent_id);
@@ -639,6 +641,7 @@ fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         .as_ref()
                         .filter(|name| !name.trim().is_empty())
                         .and_then(|_| parsed.messages.first().map(|message| message.text.clone()));
+                    let user_inputs = parsed.messages.clone();
                     let spec = parsed.resume_spec(&roots);
                     let mut session = parsed.clone().into_session(
                         &roots,
@@ -659,6 +662,7 @@ fn discover_pi(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         .collect();
                     let mut record = record_with_relations(session, spec, relations);
                     record.message_preview = message_preview;
+                    record.user_inputs = user_inputs;
                     record
                 })
                 .collect();
@@ -681,6 +685,7 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
     }) {
         Ok(discovery) => {
             let mut diagnostics = discovery.diagnostics;
+            let mut user_inputs = discovery.user_inputs;
             let records = discovery
                 .sessions
                 .into_iter()
@@ -698,7 +703,12 @@ fn discover_claude(scope: &Scope) -> AgentDiscovery {
                         }
                         Err(crate::session::IntegrationError::Unavailable) => None,
                     };
-                    record_optional(session, spec)
+                    let inputs = user_inputs
+                        .remove(&session.key.native_locator)
+                        .unwrap_or_default();
+                    let mut record = record_optional(session, spec);
+                    record.user_inputs = inputs;
+                    record
                 })
                 .collect();
             if diagnostics
@@ -757,11 +767,16 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                 if let Some(rollout) = codex_transcript_path(&session) {
                     session.activity = codex::activity::activity_status(&rollout, Some(activity));
                 }
-                let relations = codex_transcript_path(&session)
+                let parsed = codex_transcript_path(&session)
                     .and_then(|path| {
                         codex::parse_rollout_file(&path, &root, &Bounds::default()).ok()
                     })
-                    .flatten()
+                    .flatten();
+                let user_inputs = parsed
+                    .as_ref()
+                    .map(|parsed| parsed.user_messages.clone())
+                    .unwrap_or_default();
+                let relations = parsed
                     .and_then(|parsed| {
                         parsed.parent_thread_id.map(|parent_id| NativeRelation {
                             parent_agent: codex::AGENT.into(),
@@ -777,6 +792,7 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                     .and_then(|path| LaunchEvidence::capture_with_transcript(&session, path).ok());
                 Some(CandidateRecord {
                     message_preview: None,
+                    user_inputs,
                     session,
                     spec: Some(spec),
                     evidence,
@@ -857,6 +873,7 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                         .explicit_title
                         .then(|| parsed.messages.first().map(|message| message.text.clone()))
                         .flatten();
+                    let user_inputs = parsed.messages.clone();
                     let spec = parsed.resume_spec(&root);
                     let relations = parsed
                         .import
@@ -879,6 +896,7 @@ fn discover_omp(scope: &Scope, ctx: &DiscoveryContext) -> AgentDiscovery {
                     normalize_availability(&mut session);
                     let mut record = record_with_relations(session, spec, relations);
                     record.message_preview = message_preview;
+                    record.user_inputs = user_inputs;
                     record
                 }));
             }
@@ -929,6 +947,7 @@ fn discover_opencode(scope: &Scope) -> AgentDiscovery {
                         .collect();
                     Some(CandidateRecord {
                         message_preview: None,
+                        user_inputs: Vec::new(),
                         session,
                         spec: Some(spec),
                         evidence,
@@ -1000,6 +1019,7 @@ fn record_optional(session: Session, spec: Option<ResumeSpec>) -> CandidateRecor
     };
     CandidateRecord {
         message_preview: None,
+        user_inputs: Vec::new(),
         session,
         spec,
         evidence,
@@ -1055,6 +1075,7 @@ fn picker_candidate(
     session: &Session,
     message_preview: Option<&str>,
     session_size: Option<u64>,
+    user_inputs: &[crate::preview::message::UserMessage],
 ) -> PickerCandidate {
     let agent = text::normalize(&agent_label(session), text::Mode::Normalized);
     let updated = updated_label(session.updated_at);
@@ -1109,11 +1130,26 @@ fn picker_candidate(
         ),
         text::Mode::Raw,
     );
+    let mut details = String::from("USER INPUT\n");
+    if user_inputs.is_empty() {
+        details.push_str("No user input available\n");
+    } else {
+        for (index, message) in user_inputs.iter().enumerate() {
+            details.push_str(&format!("\n{}. {}\n", index + 1, message.text));
+            for attachment in &message.attachments {
+                details.push_str(&attachment.to_display());
+                details.push('\n');
+            }
+        }
+    }
+    details.push_str(&format!("\nSESSION\nTITLE {title}\nUPDATED {updated_detail}\nAGENT {agent}\nMODEL {model}\nSIZE {size}\nTOKENS {tokens}\nSUPPORT {:?}\nWORKTREE {branch}", session.support));
+    let details = text::normalize(&details, text::Mode::Raw);
     PickerCandidate {
         key,
         display,
         search_text,
         preview,
+        details: Some(details),
         rank: crate::session::sort_rank(session),
         agent: text::normalize(&session.key.agent.to_string_lossy(), text::Mode::Normalized),
     }
@@ -1681,7 +1717,8 @@ fn print_list(records: &[CandidateRecord]) {
                 CandidateKey(0),
                 &record.session,
                 None,
-                session_file_size(record)
+                session_file_size(record),
+                &[],
             )
             .display
         )
@@ -1816,6 +1853,7 @@ mod tests {
         ] {
             let record = CandidateRecord {
                 message_preview: None,
+                user_inputs: Vec::new(),
                 session: Session {
                     key: crate::session::SessionKey {
                         agent: "codex".into(),
@@ -1869,7 +1907,7 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session, None, Some(11_534_336));
+        let item = picker_candidate(CandidateKey(1), &session, None, Some(11_534_336), &[]);
         assert!(item.display.starts_with("title\n"));
         let detail = item.display.strip_prefix("title\n").unwrap();
         assert!(detail.starts_with("0m  ·  11.0MB  ·  omp[work]"));
@@ -1909,6 +1947,7 @@ mod tests {
             &session,
             Some("First human\nrequest"),
             None,
+            &[],
         );
         assert!(
             item.display
@@ -1916,10 +1955,40 @@ mod tests {
         );
         assert!(item.search_text.contains("First human request"));
         assert!(
-            picker_candidate(CandidateKey(2), &session, None, None)
+            picker_candidate(CandidateKey(2), &session, None, None, &[])
                 .display
                 .starts_with("Named session\nunknown  ·")
         );
+    }
+    #[test]
+    fn details_prioritize_safe_user_inputs_over_session_metadata() {
+        let session = Session {
+            key: crate::session::SessionKey {
+                agent: "omp".into(),
+                effective_root: "/r".into(),
+                profile: None,
+                native_locator: "/t".into(),
+            },
+            resumable_id: "id".into(),
+            title: Some("Named session".into()),
+            final_model: None,
+            tokens: None,
+            updated_at: None,
+            workspace: WorkspaceEvidence::Unknown,
+            support: SupportStatus::Supported,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        };
+        let inputs = [crate::preview::message::UserMessage {
+            text: "first question\nsecond line\u{1b}[2J".into(),
+            attachments: vec![crate::preview::message::Attachment::image(None)],
+        }];
+        let candidate = picker_candidate(CandidateKey(1), &session, None, None, &inputs);
+        let details = candidate.details.unwrap();
+        assert!(details.starts_with("USER INPUT\n\n1. first question\nsecond line"));
+        assert!(details.contains("[image]"));
+        assert!(details.find("first question").unwrap() < details.find("SESSION").unwrap());
+        assert!(!details.contains('\u{1b}'));
     }
     #[test]
     fn session_file_size_uses_only_own_transcript() {
@@ -1974,7 +2043,7 @@ mod tests {
             activity: ActivityStatus::Unknown,
             risk: RiskStatus::Normal,
         };
-        let item = picker_candidate(CandidateKey(1), &session, None, None);
+        let item = picker_candidate(CandidateKey(1), &session, None, None, &[]);
         assert_eq!(item.agent, "omp");
         assert!(!item.display.contains('\u{1b}'));
         assert!(!item.display.contains('\u{202e}'));
@@ -2006,7 +2075,7 @@ mod tests {
             SupportStatus::Unavailable,
         ] {
             session.support = support;
-            let item = picker_candidate(CandidateKey(1), &session, None, None);
+            let item = picker_candidate(CandidateKey(1), &session, None, None, &[]);
             assert!(
                 item.display.contains(&format!("{support:?}")),
                 "display={:?}",
@@ -2114,6 +2183,7 @@ mod tests {
         ] {
             let record = CandidateRecord {
                 message_preview: None,
+                user_inputs: Vec::new(),
                 session: session_with(support),
                 spec: None,
                 evidence: None,
@@ -2128,6 +2198,7 @@ mod tests {
         // Supported but missing spec/evidence: the second E3003 branch.
         let record = CandidateRecord {
             message_preview: None,
+            user_inputs: Vec::new(),
             session: session_with(SupportStatus::Supported),
             spec: None,
             evidence: None,

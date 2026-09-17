@@ -114,13 +114,14 @@ impl SkimItem for SpikeItem {
         self.display.bytes().filter(|byte| *byte == b'\n').count() + 2
     }
 
-    fn preview(&self, _context: PreviewContext) -> ItemPreview {
-        // In-memory lookup. We deliberately return `ItemPreview::Text`, never
-        // `ItemPreview::Command`, so no candidate or preview content is ever
-        // executed by a shell. The dual-section fallback renders both the
-        // normalized and raw forms in one preview, satisfying the accepted
-        // Ctrl+R fallback without rebuilding the picker.
-        ItemPreview::Text(self.preview_store.render(&self.key))
+    fn preview(&self, context: PreviewContext) -> ItemPreview {
+        // In-memory lookup only; transcript contents are never shell commands.
+        let text = if context.modal {
+            self.preview_store.render_details(&self.key)
+        } else {
+            self.preview_store.render(&self.key)
+        };
+        ItemPreview::Text(text)
     }
 
     fn output(&self) -> Cow<'_, str> {
@@ -136,6 +137,8 @@ pub struct PreviewStore {
     /// Guarded by the single-producer-before-render discipline in the streamed
     /// path; for the synchronous path it is populated before `run_with`.
     pub entries: std::sync::Mutex<HashMap<CandidateKey, String>>,
+    /// Optional user-first modal details, separate from the side preview.
+    pub details: std::sync::Mutex<HashMap<CandidateKey, String>>,
     /// When true, the preview shows the raw (still terminal-safe) text in
     /// addition to the normalized form. Toggled by Ctrl+R via `reload`.
     pub show_raw: std::sync::atomic::AtomicBool,
@@ -163,6 +166,14 @@ impl PreviewStore {
         if let Ok(mut m) = self.entries.lock() {
             m.insert(key, value);
         }
+    }
+
+    fn render_details(&self, key: &CandidateKey) -> String {
+        self.details
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(key).cloned())
+            .unwrap_or_else(|| self.render(key))
     }
 }
 
@@ -403,6 +414,7 @@ pub struct PickerCandidate {
     pub display: String,
     pub search_text: String,
     pub preview: String,
+    pub details: Option<String>,
     /// Ascending rank for the paginated view. It reverses
     /// `session::compare_sessions` so Skim's reverse display preserves the
     /// documented activity-first, newest-first order.
@@ -480,6 +492,13 @@ pub fn run_tabbed_picker(
         snapshot.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
         for candidate in &snapshot {
             store.insert(candidate.key.clone(), candidate.preview.clone());
+            let details = candidate
+                .details
+                .as_ref()
+                .map(|text| (candidate.key.clone(), text.clone()));
+            if let (Some(details), Ok(mut entries)) = (details, store.details.lock()) {
+                entries.insert(details.0, details.1);
+            }
         }
 
         // Tab 0 is "All"; tabs 1.. are each distinct agent, in first-seen order.
@@ -678,10 +697,12 @@ fn build_tabbed_options(
         .tac(true)
         .prompt(String::from("> "))
         .header(Some(format!(
-            "{}{}  <-/->  {page_note}{older_note}\n\n↑/↓ navigate  ·  enter resume  ·  tab agent  ·  alt-p/alt-n page  ·  ctrl-o preview  ·  esc cancel",
+            "{}{}  <-/->  {page_note}{older_note}",
             tabs.join(" "), pending_note
         )))
+        .footer(Some(String::from("↑/↓ navigate  ·  enter resume  ·  tab agent  ·  alt-p/alt-n page  ·  space space details  ·  ctrl-o side preview  ·  esc cancel")))
         .preview(Some(String::new()))
+        .modal_preview(true)
         .preview_window(format!("{position}:60%{visibility}"))
         .bind(binds)
         .build()
@@ -1172,7 +1193,7 @@ mod tests {
         );
     }
     #[test]
-    fn tabbed_picker_header_advertises_preview_toggle_and_keeps_binding() {
+    fn tabbed_picker_advertises_modal_details_and_keeps_side_preview_binding() {
         let options = build_tabbed_options(
             0,
             &["pi"],
@@ -1186,18 +1207,18 @@ mod tests {
             None,
         );
         assert!(
-            options
-                .header
-                .as_deref()
-                .is_some_and(|h| h.contains("ctrl-o preview")),
-            "header={:?}",
-            options.header
+            options.footer.as_deref().is_some_and(
+                |h| h.contains("space space details") && h.contains("ctrl-o side preview")
+            ),
+            "footer={:?}",
+            options.footer
         );
         assert!(
             options.bind.iter().any(|b| b == "ctrl-o:toggle-preview"),
             "bind={:?}",
             options.bind
         );
+        assert!(options.modal_preview);
         assert!(
             options.preview_window.ends_with(":hidden"),
             "preview_window={:?}",
@@ -1220,14 +1241,15 @@ mod tests {
             None,
         );
         assert!(
-            options.header.as_deref().is_some_and(|h| {
-                h.starts_with("[All 1/1] pi  <-/->  PAGE 1/1\n\n")
-                    && h.contains("↑/↓ navigate")
-                    && h.contains("enter resume")
-                    && h.contains("esc cancel")
-            }),
-            "header={:?}",
-            options.header
+            options.header.as_deref() == Some("[All 1/1] pi  <-/->  PAGE 1/1")
+                && options.footer.as_deref().is_some_and(|h| {
+                    h.contains("↑/↓ navigate")
+                        && h.contains("enter resume")
+                        && h.contains("esc cancel")
+                }),
+            "header={:?}, footer={:?}",
+            options.header,
+            options.footer
         );
     }
 

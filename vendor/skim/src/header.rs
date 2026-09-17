@@ -62,6 +62,14 @@ impl Header {
         self
     }
 
+    pub fn from_text(text: &str, theme: Arc<ColorTheme>) -> Self {
+        let mut parser = ANSIParser::default();
+        let mut header = Self::empty().theme(theme);
+        header.header = str_lines(text).into_iter().map(|line| parser.parse_ansi(line)).collect();
+        header.reverse = true;
+        header
+    }
+
     fn lines_of_header(&self) -> usize {
         self.header.len() + self.item_pool.reserved().len()
     }

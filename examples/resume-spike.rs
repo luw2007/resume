@@ -82,6 +82,12 @@ fn run_tabbed_demo() -> PickerOutcome {
                 display: format!("{agent}-candidate-{i:03}"),
                 search_text: format!("{agent}-candidate-{i:03}"),
                 preview: format!("Session {agent}-{i}"),
+                details: Some(format!(
+                    "USER INPUT\n\n1. Session input\n{}",
+                    (1..=35)
+                        .map(|n| format!("input line {n}\n"))
+                        .collect::<String>()
+                )),
                 rank: (
                     0,
                     Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
@@ -118,6 +124,12 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                 display: format!("{agent}-candidate-{i:03}"),
                 search_text: format!("{agent}-candidate-{i:03}"),
                 preview: format!("Session {agent}-{i}"),
+                details: Some(format!(
+                    "USER INPUT\n\n1. Session input\n{}",
+                    (1..=35)
+                        .map(|n| format!("input line {n}\n"))
+                        .collect::<String>()
+                )),
                 rank: (
                     0,
                     Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
@@ -143,6 +155,12 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                     display: format!("codex-candidate-{i:03}"),
                     search_text: format!("codex-candidate-{i:03}"),
                     preview: format!("Session codex-{i}"),
+                    details: Some(format!(
+                        "USER INPUT\n\n1. Session input\n{}",
+                        (1..=35)
+                            .map(|n| format!("input line {n}\n"))
+                            .collect::<String>()
+                    )),
                     rank: (
                         0,
                         Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),

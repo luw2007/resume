@@ -209,16 +209,17 @@ fn first_nonempty_str(record: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+type ParsedCandidate = (Option<Session>, Vec<Diagnostic>, Vec<message::UserMessage>);
+
 /// Build a [`Session`] from a candidate + parsed transcript, applying the
 /// identity contract (UUID filename == embedded sessionId).
 ///
-/// Returns `(Option<Session>, Vec<Diagnostic>)`: `Some(session)` plus any
-/// non-fatal diagnostics (truncation/malformed) when retained, or `None` plus
-/// diagnostics when skipped. A hard I/O failure is returned as `Err`.
+/// Returns the retained session, non-fatal diagnostics, and parsed human inputs;
+/// a hard I/O failure is returned as `Err`.
 pub(super) fn parse_candidate(
     candidate: &Candidate,
     root: &ClaudeRoot,
-) -> Result<(Option<Session>, Vec<Diagnostic>), Diagnostic> {
+) -> Result<ParsedCandidate, Diagnostic> {
     let confined_root = root
         .effective_root
         .canonicalize()
@@ -261,7 +262,7 @@ pub(super) fn parse_candidate(
                     // is not a Claude session transcript (e.g. another tool
                     // writing unrelated JSONL into the workspace-key
                     // directory). Ignore silently rather than diagnosing.
-                    return Ok((None, Vec::new()));
+                    return Ok((None, Vec::new(), Vec::new()));
                 }
                 return Err(diagnostic_chain(
                     "claude_no_session_id",
@@ -365,7 +366,7 @@ pub(super) fn parse_candidate(
         risk: crate::session::RiskStatus::Normal,
     };
 
-    Ok((Some(session), nonfatal))
+    Ok((Some(session), nonfatal, parsed.user_messages))
 }
 
 #[cfg(test)]

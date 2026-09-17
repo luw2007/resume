@@ -477,9 +477,6 @@ impl Selection {
             self.theme.matched()
         };
 
-        if is_current {
-            let _ = canvas.print_with_attr(row, 0, "›", default_attr);
-        }
         // Multi-select indicators are independent of the focused item.
         let index = (current_run_num(), matched_item.item_idx);
         if self.selected.contains_key(&index) {

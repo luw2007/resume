@@ -154,6 +154,7 @@ impl Previewer {
         new_cmd_query: impl Into<Option<String>>,
         num_selected: usize,
         get_selected_items: impl Fn() -> (Vec<usize>, Vec<Arc<dyn SkimItem>>), // lazy get
+        modal: bool,
         force: bool,
     ) {
         let new_item = new_item.into();
@@ -221,6 +222,7 @@ impl Previewer {
         };
 
         let preview_context = PreviewContext {
+            modal,
             query,
             cmd_query,
             width: columns,

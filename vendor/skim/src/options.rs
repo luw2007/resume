@@ -600,6 +600,9 @@ pub struct SkimOptions {
     /// `--with-nth`. ANSI color codes are processed even when `--ansi` is not set.
     #[arg(long, help_heading = "Display")]
     pub header: Option<String>,
+    /// Fixed text below the selection in reverse layout.
+    #[arg(long, help_heading = "Display")]
+    pub footer: Option<String>,
 
     /// Number of lines of the input treated as header
     ///
@@ -871,6 +874,9 @@ pub struct SkimOptions {
     /// and return a Vec<String> with the lines to display in UTF-8
     #[clap(skip)]
     pub preview_fn: Option<PreviewCallback>,
+    /// Open a centered preview with a quick double-space; Escape closes it.
+    #[clap(skip)]
+    pub modal_preview: bool,
 }
 
 impl Default for SkimOptions {

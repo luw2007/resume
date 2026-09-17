@@ -691,6 +691,73 @@ fn preview_hidden_by_default_and_ctrl_o_toggles() {
     let _ = wait_child(&mut sess);
 }
 
+/// The details card overlays the list and Escape returns to it without exiting.
+#[test]
+fn double_space_opens_details_and_escape_returns_to_picker() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "[All 50/85]", Duration::from_secs(4));
+    sess.write(b"  ");
+    let card = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+    assert!(card.contains("USER INPUT"), "user input missing: {card:?}");
+    assert!(card.contains("inputline1"), "first input missing: {card:?}");
+    sess.write(b"j");
+    let scrolled = strip(&sess.read_for(Duration::from_millis(250)));
+    assert!(
+        scrolled.contains("input") && scrolled != card,
+        "j did not redraw details: {scrolled:?}"
+    );
+    sess.write(b"i");
+    let i_up = strip(&sess.read_for(Duration::from_millis(250)));
+    assert!(
+        i_up.contains("USERINPUT") && i_up != scrolled,
+        "i did not scroll up: {i_up:?}"
+    );
+    sess.write(b"j");
+    let _ = sess.read_for(Duration::from_millis(250));
+    sess.write(b"\x1b[A");
+    let up = sess.read_for(Duration::from_millis(300));
+    assert!(!up.is_empty(), "Up did not redraw details");
+    sess.write(b"\x1b");
+    let list = sess.read_for(Duration::from_millis(400));
+    assert!(!list.is_empty(), "Escape did not redraw the picker");
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// Double-space details work while filtering, without changing the filter.
+#[test]
+fn double_space_opens_details_with_active_filter() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"omp");
+    let _ = sess.read_for(Duration::from_millis(300));
+    sess.write(b"  ");
+    let card = sess.read_for(Duration::from_millis(800));
+    assert!(
+        card.windows(7).any(|bytes| bytes == b"details"),
+        "details card missing"
+    );
+    assert!(
+        strip(&card).contains("USER INPUT"),
+        "wrong details: {:?}",
+        strip(&card)
+    );
+    sess.write(b"\x1b");
+    let list = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(
+        list.contains("te-003") && !list.contains("claude-candidate"),
+        "filter lost after closing details: {list:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
 /// Ctrl+R is bound to a safe no-op (ignore). The default `reload` action is
 /// UNSAFE for a channel-fed picker because it re-runs the default `find`
 /// command against the cwd, listing real files. This test proves Ctrl+R does

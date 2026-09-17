@@ -50,9 +50,9 @@ Sessions are scoped to your current worktree by default. Use `--up` / `--down` f
 
 ### Preview and native resume
 
-Toggle Preview with Ctrl-O to inspect session metadata before resuming. Selection triggers the agent's own native resume command in its recorded workspace, preserving supported root/profile overrides.
+Press Space twice quickly to open a centered session-details card. It puts available user inputs first, followed by session metadata; `h`/`j`/`i`/`k`/`l` or arrow keys scroll the card (`i` and `k` both move up), and `Esc` returns to the picker. `Ctrl-O` still toggles the side Preview. Selection triggers the agent's own native resume command in its recorded workspace, preserving supported root/profile overrides.
 
-The picker follows OMP's resume interaction: `↑`/`↓` navigates, typing filters, `Enter` resumes, `Tab`/`Shift-Tab` switches agent scope, and `Esc` cancels.
+The picker follows OMP's resume interaction: `↑`/`↓` navigates, typing filters, `Enter` resumes, `Tab`/`Shift-Tab` switches agent scope, and `Esc` cancels when the details card is closed.
 
 ![Session preview and native agent resume handoff](docs/assets/preview-resume.gif)
 
@@ -109,17 +109,21 @@ Upward Scope never includes children; downward Scope never includes ancestors or
 
 ## Picker and Preview
 
-The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · session file size · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card has a `›` before its title and Skim's text highlight, without a colored margin block. Each text row clips to the available list width, including when Preview opens beside it. Session size uses OMP's binary-based format (`11.0MB`); when there is no individual session file (OpenCode stores sessions in a shared database), it shows `size unknown` rather than reporting the whole database size. Supported Sessions show `✅`; missing model data shows `unknown model`. Token counts remain in Preview, not the card.
+The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · session file size · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card uses Skim's text highlight, without a margin pointer or colored block. Each text row clips to the available list width, including when Preview opens beside it. Session size uses OMP's binary-based format (`11.0MB`); when there is no individual session file (OpenCode stores sessions in a shared database), it shows `size unknown` rather than reporting the whole database size. Supported Sessions show `✅`; missing model data shows `unknown model`. Token counts remain in Preview, not the card.
 
 The header shows every available agent tab and the active one in brackets, for example `[All 50/147] pi omp claude  <-/->  PAGE 1/3 · older: Alt-P`. `50/147` means 50 Sessions on this page out of 147 in the active tab, not 50 matches out of 50 loaded items. Skim's separate per-page match counter is hidden; typing still filters the current page. A background scan appears alongside the tabs until it finishes.
 
+Shortcut hints stay at the bottom of the list, so the active tab and Sessions are adjacent.
+
 | Key | Behavior |
 |---|---|
-| `Ctrl-O` | Toggle Preview |
+| `Space` twice | Open user-input details; `Esc` closes the card |
+| `h` / `j` / `i` or `k` / `l`, arrow keys (details open) | Scroll the details card horizontally / vertically |
+| `Ctrl-O` | Toggle side Preview |
 | `Ctrl-R` | Intentionally ignored |
 | `Alt-P` / `Alt-N` | Move to the older / newer page in the current tab |
 | `Alt-Left` / `Alt-Right`, `Left` / `Right`, `Tab` / `Shift-Tab` | Move to the previous / next tab, wrapping and opening its newest page |
-| `Esc` | Cancel without resuming |
+| `Esc` | Close details, or cancel the picker |
 | `Ctrl-C` | Interrupt (exit 130) |
 Preview uses a safe dual-section fallback: normalized and raw-but-terminal-safe sections are shown together. **Ctrl-R does not reload, refresh, or switch views live.** A channel-fed Skim `reload` can execute its default filesystem command, so `resume` explicitly binds Ctrl-R to `ignore` to prevent an accidental filesystem listing. Preview currently presents the Session metadata/title available to the assembled picker; integration parsers and text-safety foundations have broader user-input coverage, but this README does not claim a full native transcript viewer.
 

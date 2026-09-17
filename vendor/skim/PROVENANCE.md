@@ -13,6 +13,10 @@ screen row per `SkimItem`. This vendored copy patches:
   heights, including navigation, paging, mouse selection, and drawing. It
   prints up to three content rows per item; one-row items retain upstream's
   highlight-aware path. Multi-row cards print rows independently.
+- `src/options.rs`, `src/header.rs`, `src/model/mod.rs`: optional fixed footer
+  below the selection in reverse layout, for the picker shortcut hints.
+- `src/options.rs`, `src/model/mod.rs`: optional double-space modal Preview
+  overlay with `Esc` dismissal; only enabled by `resume`'s tabbed picker.
 
 Other upstream files only gain explicit elided lifetimes (`'_`) to silence
 `mismatched_lifetime_syntaxes` warnings with current Rust compilers.

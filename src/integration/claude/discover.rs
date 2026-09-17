@@ -1,5 +1,8 @@
 use super::{format::parse_candidate, roots::ClaudeRoot};
-use crate::session::{Diagnostic, IntegrationError, Session};
+use crate::{
+    preview::message::UserMessage,
+    session::{Diagnostic, IntegrationError, Session},
+};
 use std::{
     ffi::OsString,
     fs,
@@ -20,6 +23,7 @@ pub(super) struct Candidate {
 #[derive(Clone, Debug)]
 pub struct Discovery {
     pub sessions: Vec<Session>,
+    pub user_inputs: std::collections::HashMap<std::ffi::OsString, Vec<UserMessage>>,
     pub diagnostics: Vec<Diagnostic>,
     /// Number of workspace-key directories pruned by the directory-name
     /// filter without reading any file inside them.
@@ -30,6 +34,7 @@ impl Discovery {
     fn new() -> Self {
         Self {
             sessions: Vec::new(),
+            user_inputs: std::collections::HashMap::new(),
             diagnostics: Vec::new(),
             pruned_dirs: 0,
         }
@@ -94,11 +99,14 @@ where
 
     for candidate in candidates {
         match parse_candidate(&candidate, root) {
-            Ok((Some(session), nonfatal)) => {
+            Ok((Some(session), nonfatal, user_inputs)) => {
                 discovery.sessions.push(session);
+                discovery
+                    .user_inputs
+                    .insert(candidate.path.into_os_string(), user_inputs);
                 discovery.diagnostics.extend(nonfatal);
             }
-            Ok((None, nonfatal)) => {
+            Ok((None, nonfatal, _)) => {
                 discovery.diagnostics.extend(nonfatal);
             }
             Err(diagnostic) => discovery.diagnostics.push(diagnostic),

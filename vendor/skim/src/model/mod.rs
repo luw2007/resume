@@ -77,8 +77,12 @@ pub struct Model {
     matcher_control: Option<MatcherControl>,
 
     header: Header,
+    footer: Option<Header>,
 
     preview_hidden: bool,
+    modal_preview: bool,
+    modal_preview_open: bool,
+    last_space: Option<Instant>,
     previewer: Option<Previewer>,
     preview_direction: Direction,
     preview_size: Size,
@@ -135,6 +139,7 @@ impl Model {
             .with_options(options)
             .item_pool(item_pool.clone())
             .theme(theme.clone());
+        let footer = options.footer.as_deref().map(|text| Header::from_text(text, theme.clone()));
 
         let margins = parse_margin(&options.margin);
         let (margin_top, margin_right, margin_bottom, margin_left) = margins;
@@ -156,6 +161,7 @@ impl Model {
             rx,
             tx,
             reader_timer: Instant::now(),
+            footer,
             matcher_timer: Instant::now(),
             reader_control: None,
             matcher_control: None,
@@ -163,6 +169,9 @@ impl Model {
 
             header,
             preview_hidden: true,
+            modal_preview: options.modal_preview,
+            modal_preview_open: false,
+            last_space: None,
             previewer: None,
             preview_direction: Direction::Right,
             preview_size: Size::Default,
@@ -521,7 +530,50 @@ impl Model {
             let (key, ev) = next_event.take().or_else(|| self.rx.recv().ok())?;
 
             debug!("handle event: {:?}", ev);
-
+            if self.modal_preview {
+                if self.modal_preview_open && key == Key::ESC {
+                    self.modal_preview_open = false;
+                    let _ = self.do_with_widget(|root| self.term.draw(&root));
+                    let _ = self.term.present();
+                    continue;
+                }
+                if self.modal_preview_open && key != Key::Null {
+                    if let Some(previewer) = self.previewer.as_mut() {
+                        let scroll = match key {
+                            Key::Char('h') | Key::Left => Some(Event::EvActPreviewLeft(1)),
+                            Key::Char('j') | Key::Down => Some(Event::EvActPreviewDown(1)),
+                            Key::Char('i') | Key::Char('k') | Key::Up => Some(Event::EvActPreviewUp(1)),
+                            Key::Char('l') | Key::Right => Some(Event::EvActPreviewRight(1)),
+                            _ => None,
+                        };
+                        if let Some(scroll) = scroll {
+                            previewer.handle(&scroll);
+                        } else {
+                            previewer.handle(&ev);
+                        }
+                    }
+                    let _ = self.do_with_widget(|root| self.term.draw(&root));
+                    let _ = self.term.present();
+                    continue;
+                }
+                if !self.modal_preview_open && matches!(ev, Event::EvActAddChar(' ')) && env.in_query_mode {
+                    let now = Instant::now();
+                    if self.last_space.is_some_and(|at| now.duration_since(at).as_millis() < 500) {
+                        self.last_space = None;
+                        self.query.act_backward_delete_char();
+                        env.query = self.query.get_fz_query();
+                        self.on_query_change(&mut env);
+                        self.modal_preview_open = true;
+                        self.draw_preview(&env, true);
+                        let _ = self.do_with_widget(|root| self.term.draw(&root));
+                        let _ = self.term.present();
+                        continue;
+                    }
+                    self.last_space = Some(now);
+                } else if !matches!(ev, Event::EvHeartBeat) {
+                    self.last_space = None;
+                }
+            }
             match ev {
                 Event::EvHeartBeat => {
                     // consume following HeartBeat event
@@ -681,7 +733,7 @@ impl Model {
     }
 
     fn draw_preview(&mut self, env: &ModelEnv, force: bool) {
-        if self.preview_hidden {
+        if self.preview_hidden && !self.modal_preview_open {
             return;
         }
 
@@ -698,6 +750,7 @@ impl Model {
                 env.cmd_query.to_string(),
                 selections.get_num_of_selected_exclude_current(),
                 get_selected_items,
+                self.modal_preview_open,
                 force,
             );
         }
@@ -806,28 +859,35 @@ impl Model {
             .split(Win::new(status_inline).grow(1).shrink(0));
 
         let layout = &self.layout as &str;
-        let win_main = match layout {
-            "reverse" => VSplit::default()
+        let win_main: Box<dyn Widget<Event> + '_> = match (layout, &self.footer) {
+            ("reverse", Some(footer)) => Box::new(VSplit::default()
                 .split(win_query_status)
                 .split(win_query)
                 .split(win_status)
                 .split(win_header)
-                .split(win_selection),
-            "reverse-list" => VSplit::default()
+                .split(win_selection)
+                .split(Win::new(footer).grow(0).shrink(0))),
+            ("reverse", None) => Box::new(VSplit::default()
+                .split(win_query_status)
+                .split(win_query)
+                .split(win_status)
+                .split(win_header)
+                .split(win_selection)),
+            ("reverse-list", _) => Box::new(VSplit::default()
                 .split(win_selection)
                 .split(win_header)
                 .split(win_status)
                 .split(win_query)
-                .split(win_query_status),
-            _ => VSplit::default()
+                .split(win_query_status)),
+            _ => Box::new(VSplit::default()
                 .split(win_selection)
                 .split(win_header)
                 .split(win_status)
                 .split(win_query)
-                .split(win_query_status),
+                .split(win_query_status)),
         };
 
-        let screen: Box<dyn Widget<Event>> = if !self.preview_hidden && self.previewer.is_some() {
+        let screen: Box<dyn Widget<Event>> = if !self.modal_preview_open && !self.preview_hidden && self.previewer.is_some() {
             let previewer = self.previewer.as_ref().unwrap();
             let win = Win::new(previewer)
                 .basis(self.preview_size)
@@ -843,13 +903,27 @@ impl Model {
             };
 
             match self.preview_direction {
-                Direction::Up => Box::new(VSplit::default().split(win_preview).split(win_main)),
-                Direction::Right => Box::new(HSplit::default().split(win_main).split(win_preview)),
-                Direction::Down => Box::new(VSplit::default().split(win_main).split(win_preview)),
-                Direction::Left => Box::new(HSplit::default().split(win_preview).split(win_main)),
+                Direction::Up => Box::new(VSplit::default().split(win_preview).split(Win::new(win_main))),
+                Direction::Right => Box::new(HSplit::default().split(Win::new(win_main)).split(win_preview)),
+                Direction::Down => Box::new(VSplit::default().split(Win::new(win_main)).split(win_preview)),
+                Direction::Left => Box::new(HSplit::default().split(win_preview).split(Win::new(win_main))),
             }
         } else {
             Box::new(win_main)
+        };
+        let screen: Box<dyn Widget<Event>> = if self.modal_preview_open {
+            let card = Win::new(self.previewer.as_ref().expect("modal preview requires a previewer"))
+                .margin_top(Size::Percent(12))
+                .margin_bottom(Size::Percent(12))
+                .margin_left(Size::Percent(12))
+                .margin_right(Size::Percent(12))
+                .border(true)
+                .border_attr(self.theme.border())
+                .title(" Session details ")
+                .right_prompt("h/j/i/k/l arrows scroll · Esc close ");
+            Box::new(Stack::new().bottom(screen).top(card))
+        } else {
+            screen
         };
 
         let root = Win::new(screen)

@@ -207,6 +207,7 @@ impl<'a> From<DisplayContext<'a>> for AnsiString<'a> {
 // Preview Context
 
 pub struct PreviewContext<'a> {
+    pub modal: bool,
     pub query: &'a str,
     pub cmd_query: &'a str,
     pub width: usize,
