@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-18
+
+### Added
+
+- Session cards now show transcript file sizes and tab-wide page totals, making large histories and pagination visible before selection.
+- Pressing Space twice opens a centered, scrollable details card that prioritizes extracted user inputs from Codex, Claude, Pi, and OMP before Session metadata. Scroll with `h`/`j`/`i`/`k`/`l` or the arrow keys; `Esc` returns to the filtered picker.
+
+
 ## 0.3.7 - 2026-09-17
 
 ### Added
