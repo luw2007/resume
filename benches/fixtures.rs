@@ -280,7 +280,13 @@ pub fn opencode_db(root: &Path, sessions: usize) {
             directory text not null,
             title text,
             time_updated integer,
-            parent_id text
+            parent_id text,
+            model text,
+            tokens_input integer not null default 0,
+            tokens_output integer not null default 0,
+            tokens_reasoning integer not null default 0,
+            tokens_cache_read integer not null default 0,
+            tokens_cache_write integer not null default 0
         )",
     )
     .expect("create session table");
@@ -289,7 +295,8 @@ pub fn opencode_db(root: &Path, sessions: usize) {
     {
         let mut stmt = tx
             .prepare(
-                "insert into session (id, directory, title, time_updated) values (?1, ?2, ?3, ?4)",
+                "insert into session (id, directory, title, time_updated, model, tokens_input, tokens_output) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .expect("prepare insert");
         for i in 0..sessions {
@@ -299,6 +306,11 @@ pub fn opencode_db(root: &Path, sessions: usize) {
                 ws.display().to_string(),
                 format!("Bench session {i}"),
                 (sessions - i) as i64,
+                format!(
+                    "{{\"id\":\"bench-model-{i}\",\"providerID\":\"bench\",\"variant\":\"default\"}}"
+                ),
+                100 + (i % 50) as i64,
+                20 + (i % 10) as i64,
             ])
             .expect("insert session row");
         }
