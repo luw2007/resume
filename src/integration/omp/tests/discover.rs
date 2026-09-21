@@ -177,6 +177,119 @@ fn symlinked_session_outside_effective_root_is_rejected_with_diagnostic_count() 
 }
 
 // ===========================================================================
+// CHILD-EXECUTION DIRECTORY (OMP stem-dir convention)
+// ===========================================================================
+
+#[test]
+fn child_execution_directory_skipped() {
+    // Regression: OMP child-execution dirs (`parent/` alongside `parent.jsonl`)
+    // must be skipped during discover. Each child has a valid v3 header but
+    // is never a resumable Session — only the parent file counts.
+    let fx = Fixture::new();
+    let ws_dir = fx.default_agent_root.join(fx.encoded_ws());
+    fs::create_dir_all(&ws_dir).unwrap();
+
+    // Parent session file.
+    fx.write_jsonl(
+        &ws_dir.join("parent.jsonl"),
+        &[
+            header_v3("parent", &fx.workspace, 1700000000),
+            user_message_string("parent msg", 1700000010),
+        ],
+    );
+    // Child execution directory matching the parent stem.
+    let child_dir = ws_dir.join("parent");
+    fs::create_dir_all(&child_dir).unwrap();
+    fx.write_jsonl(
+        &child_dir.join("worker.jsonl"),
+        &[
+            header_v3("child-1", &fx.workspace, 1700000020),
+            user_message_string("child msg", 1700000030),
+        ],
+    );
+    // Additional sibling child file.
+    fx.write_jsonl(
+        &child_dir.join("__advisor.jsonl"),
+        &[
+            header_v3("advisor", &fx.workspace, 1700000040),
+            user_message_string("advisor msg", 1700000050),
+        ],
+    );
+
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(
+        outcome.parsed.len(),
+        1,
+        "only the parent Session, not child workers"
+    );
+    assert_eq!(
+        outcome.parsed[0].id, "parent",
+        "the one remaining session must be the parent"
+    );
+    assert_eq!(
+        outcome.child_exec_dirs_skipped, 1,
+        "one child-execution directory was skipped"
+    );
+}
+
+#[test]
+fn child_execution_directory_still_discoverable_by_children_module() {
+    // Confirm that children.rs discover_children() still finds the same child
+    // files that discover() now skips — the two modules are complementary,
+    // not redundant.
+    let fx = Fixture::new();
+    let ws_dir = fx.default_agent_root.join(fx.encoded_ws());
+    fs::create_dir_all(&ws_dir).unwrap();
+
+    fx.write_jsonl(
+        &ws_dir.join("parent.jsonl"),
+        &[header_v3("parent", &fx.workspace, 1700000000)],
+    );
+    let child_dir = ws_dir.join("parent");
+    fs::create_dir_all(&child_dir).unwrap();
+    fx.write_jsonl(
+        &child_dir.join("worker.jsonl"),
+        &[header_v3("child-1", &fx.workspace, 1700000020)],
+    );
+
+    let children = crate::integration::omp::children::discover_children(&fx.default_agent_root);
+    assert_eq!(children.children.len(), 1, "children module still finds it");
+    assert_eq!(children.children[0].child_id.as_deref(), Some("child-1"));
+}
+
+#[test]
+fn directory_without_matching_jsonl_stem_is_not_skipped() {
+    // A directory whose name does NOT match any sibling .jsonl stem must
+    // still be descended (OMP may store unencoded structural dirs).
+    let fx = Fixture::new();
+    let ws_dir = fx.default_agent_root.join(fx.encoded_ws());
+    fs::create_dir_all(&ws_dir).unwrap();
+
+    // Normal session file.
+    fx.write_jsonl(
+        &ws_dir.join("session.jsonl"),
+        &[
+            header_v3("sess", &fx.workspace, 1700000000),
+            user_message_string("sess msg", 1700000010),
+        ],
+    );
+    // Some other directory with no matching .jsonl stem.
+    let other_dir = ws_dir.join("misc-assets");
+    fs::create_dir_all(&other_dir).unwrap();
+    fx.write_jsonl(
+        &other_dir.join("deep.jsonl"),
+        &[
+            header_v3("deep", &fx.workspace, 1700000020),
+            user_message_string("deep msg", 1700000030),
+        ],
+    );
+
+    let outcome = fx.discover(fx.roots_default());
+    assert_eq!(outcome.parsed.len(), 2, "both discovered");
+    assert_eq!(outcome.child_exec_dirs_skipped, 0);
+}
+
+// ===========================================================================
 // SCOPE FILTERING
 // ===========================================================================
 

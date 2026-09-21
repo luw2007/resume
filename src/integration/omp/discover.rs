@@ -67,6 +67,10 @@ pub struct DiscoverOutcome {
     /// Number of grouped Workspace directories pruned by the directory-name
     /// prefilter without reading any file inside them.
     pub pruned_dirs: usize,
+    /// Number of OMP child-execution directories skipped. An OMP child-execution
+    /// directory shares its name with a sibling `.jsonl` file's stem; its contents
+    /// are executor/worker transcripts that never surface as resumable Sessions.
+    pub child_exec_dirs_skipped: usize,
 }
 
 /// Discover OMP sessions under the effective session root. Reads JSONL
@@ -158,9 +162,11 @@ fn iter_session_files(
 /// Workspace directory names always start with `-` (home-relative or
 /// absolute lossy encoding); such a directory whose name cannot encode any
 /// in-Scope Workspace is pruned without reading it (counted in
-/// `outcome.pruned_dirs`). Any other directory (e.g. the literal `sessions`
-/// level under the agent root) is descended unconditionally, and custom
-/// session roots are never pruned.
+/// `outcome.pruned_dirs`). Directories that match a sibling JSONL file stem
+/// are OMP child-execution directories (e.g. `abc/` alongside `abc.jsonl`)
+/// and are skipped without descending. Other directories (e.g. the literal
+/// `sessions` level under the agent root) are descended unconditionally, and
+/// custom session roots are never pruned.
 fn collect_jsonl(
     config: &DiscoverConfig<'_>,
     dir: &Path,
@@ -186,6 +192,20 @@ fn collect_jsonl(
                     .may_contain_session_dir(name, config.home.as_deref())
             {
                 outcome.pruned_dirs += 1;
+                continue;
+            }
+            // Skip OMP child-execution directories. OMP stores executor/worker
+            // transcripts in a directory named after the parent JSONL file stem:
+            // `abc.jsonl` → children in `abc/`. These are never resumable
+            // Sessions (see [`crate::integration::omp::children`]). Applies to
+            // all roots including custom session roots (children.rs applies the
+            // same stem-dir convention unconditionally).
+            if dir
+                .join(entry.file_name())
+                .with_extension("jsonl")
+                .is_file()
+            {
+                outcome.child_exec_dirs_skipped += 1;
                 continue;
             }
             collect_jsonl(config, &path, out, outcome)?;

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.4.1 - 2026-09-21
+
+### Fixed
+
+- OMP child-execution directories (parent-stem named alongside `parent.jsonl`) were recursively descended during discovery, surfacing executor/worker transcripts as independent resumable Sessions. `collect_jsonl` now skips stem-matching directories before parsing, matching the `children.rs` contract that child executions "never surface as resumable". This reduced `resume --list` from 16 to 1 Session in a real OMP workspace with 13 worker transcripts.
+- Added `DiscoverOutcome.child_exec_dirs_skipped` counter and three regression tests covering exclusion, `children.rs` complement, and non-stem directory preservation.
+
 ## 0.4.0 - 2026-09-18
 
 ### Added
