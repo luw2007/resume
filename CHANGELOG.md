@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.4.2 - 2026-10-08
+
 ### Fixed
 
 - Picker: limit bottom Preview height to keep the focused Session card and shortcut footer visible at the supported 60×10 terminal size, including after a terminal resize.
