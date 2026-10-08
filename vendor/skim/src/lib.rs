@@ -137,6 +137,12 @@ pub trait SkimItem: AsAny + Send + Sync + 'static {
         self.text()
     }
 
+    /// Whether accepting (Enter) on this item may finish the run. Defaults to true;
+    /// when false skim ignores the accept and stays open.
+    fn selectable(&self) -> bool {
+        true
+    }
+
     /// we could limit the matching ranges of the `get_text` of the item.
     /// providing (`start_byte`, `end_byte`) of the range
     fn get_matching_ranges(&self) -> Option<&[(usize, usize)]> {

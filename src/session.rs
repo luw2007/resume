@@ -138,7 +138,7 @@ fn activity_sort_priority(activity: ActivityStatus) -> u8 {
     }
 }
 
-/// Ascending sort key for the interactive picker's paginated view. It is the
+/// Ascending sort key for the interactive picker's list. It is the
 /// exact reverse of [`compare_sessions`]' activity priority, so Skim's
 /// reverse display puts Active sessions first while preserving newest-first
 /// order within each activity state.

@@ -234,7 +234,7 @@ fn child_execution_directory_skipped() {
 
 #[test]
 fn child_execution_directory_still_discoverable_by_children_module() {
-    // Confirm that children.rs discover_children() still finds the same child
+    // Confirm that children.rs discover_children_for_parents() still finds the same child
     // files that discover() now skips — the two modules are complementary,
     // not redundant.
     let fx = Fixture::new();
@@ -252,7 +252,10 @@ fn child_execution_directory_still_discoverable_by_children_module() {
         &[header_v3("child-1", &fx.workspace, 1700000020)],
     );
 
-    let children = crate::integration::omp::children::discover_children(&fx.default_agent_root);
+    let children = crate::integration::omp::children::discover_children_for_parents(
+        &fx.default_agent_root,
+        &[ws_dir.join("parent.jsonl")],
+    );
     assert_eq!(children.children.len(), 1, "children module still finds it");
     assert_eq!(children.children[0].child_id.as_deref(), Some("child-1"));
 }

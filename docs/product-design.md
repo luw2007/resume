@@ -180,6 +180,7 @@ Without an explicit direction:
 
 - In a Git repository, include Sessions whose Workspaces belong to the current repository's current worktree, at any depth within it. `--all-worktrees` widens this to every linked worktree of the repository instead of only the current one.
 - Determine repository identity using Git common-directory/worktree information, not repository-name or path-prefix guesses.
+- Resolve current and linked worktree roots to canonical paths before membership comparisons. If a root cannot be resolved, treat it as repository resolution failure rather than retaining an unresolved path.
 - Outside Git, match only a Workspace exactly equal to the current real directory.
 - If Git is unavailable or repository resolution fails, warn and degrade to the non-Git exact-directory rule.
 
@@ -289,7 +290,9 @@ Discovery and content parsing are two-stage:
 
 If Skim can safely update an emitted item without moving the stable selection, user content becomes searchable after parsing. Otherwise do not rebuild the list; that Session's content remains browsable through Preview but may not join main-list matching during that run. First-screen speed and selection safety take priority over complete transcript indexing.
 
-There is no implicit age limit, result count cap, continuous watch, or refresh; rerun `resume` to rescan. The Picker opens after discovery settles with an `All` tab plus one tab per discovered agent. Each tab retains every Session, sorts oldest-first with the most recently updated last, splits results into pages of 50, and opens on its newest page. `Alt+P`/`Alt+N` move to the older/newer page in the current tab. `Alt+Left`/`Alt+Right` cycle through tabs and reset the selected tab to its newest page; `Left`/`Shift+Tab` and `Right`/`Tab` are equivalent, so tabs are reachable without a modifier on terminals that swallow Alt+arrow.
+There is no implicit age limit, result count cap, or continuous watch; rerun `resume` to rescan. The normal Picker opens after discovery settles with an `All` tab plus one tab per discovered agent. Each tab retains every Session, sorts oldest-first with the most recently updated last, and feeds all of them to Skim, so a query searches the whole tab immediately. `PgUp`/`PgDn` scroll the list; `Alt+P`/`Alt+N` page it down (older) / up (newer) in place. `Alt+Left`/`Alt+Right` and `Shift+Tab`/`Tab` cycle through tabs, keeping the query text and side Preview visibility; bare `Left`/`Right` edit the query cursor. While a background agent (Codex) is still scanning, the header says so; its Sessions join the searchable snapshot on the next tab switch or an explicit `Ctrl+L` refresh, never mid-render, so a search made meanwhile covers only the Sessions that had landed. The details card (opened by a doubled `Space` on a focused Session, which leaves no whitespace in the query) is read-only: `q`, `Esc` or `Enter` closes it without resuming, `PgUp`/`PgDn` and `Ctrl-U`/`Ctrl-D` scroll it, and `Ctrl-C` still interrupts.
+
+Interactive `--tree` uses one unified `Tree` view rather than per-agent tabs: the pre-rendered relationship projection must not be sliced into dangling cross-agent ancestry. Tab/Shift-Tab and Alt-Left/Alt-Right are disabled and omitted from its footer. Fuzzy filtering searches all tree rows together; `Ctrl-L` refreshes the shared snapshot while retaining query and Preview visibility. Preview, details and scrolling remain available, and relation-only rows ignore acceptance without becoming resumable.
 
 Within an open Session Preview, search applies only to that Session's user inputs and supports previous/next match navigation, subject to Skim's proven public interaction surface.
 
@@ -384,6 +387,8 @@ Before handoff:
 7. Call Unix `exec` so the agent owns the terminal, signals, and eventual exit status. If `exec` fails after a confirmed cmux update, the update is not rolled back; the error is surfaced and the next shell prompt naturally reports the shell's directory.
 
 If final revalidation fails, do not reopen the Picker or choose a replacement; print the exact reason and exit 1.
+
+On macOS and Linux, final Workspace revalidation compares the recorded path and the directory's device/inode identity. Creating or removing entries in that same directory is normal and does not block Resume. A missing path, a non-directory path, or a replacement directory is rejected. Transcript identity remains stricter: device/inode, length, and modification time must still match the captured evidence.
 
 ### Agent CLI unavailable
 
@@ -529,7 +534,7 @@ Which agents get scanned at all is a separate, one-time choice that lives outsid
 
 - The selection is stored in `~/.resume/settings.json`, resolved through `$HOME` only — never through XDG, and never through `--config`. Missing `$HOME` is an error, not a fallback.
 - The file holds `schema_version` (currently 1), `agents` (the selection), and `known_agents` (every agent that had shipped when the file was last written). Unrecognized fields are preserved verbatim across rewrites, so a file written by a newer version survives an older one. A `schema_version` other than the current one, or an agent name outside the supported list, is a configuration error rather than a silent reset.
-- On a first run with no file, an interactive invocation opens the chooser: agents are listed numbered, and the answer is a comma-separated list of those numbers, `all`, or `none`. Anything else is rejected and re-asked. `--list` and `--json` do not prompt; with no file they exit with a hint to run `resume setup` first.
+- On a first run with no file, an interactive invocation opens the chooser: agents are listed numbered, and the answer is a comma-separated list of those numbers, `all`, or `none`. Anything else is rejected and re-asked. End-of-input aborts setup without saving a selection. `--list` and `--json` do not prompt; with no file they exit with a hint to run `resume setup` first.
 - `resume setup` reruns that chooser at any time and replaces the saved selection. It needs `/dev/tty`; without one it is an error rather than a default.
 - Writes go to a temporary file in the same directory and are renamed into place with mode `0600`, so an interrupted write cannot leave a truncated selection behind.
 - When a release adds an agent the saved file has never seen, the next run says so once on stderr, records it in `known_agents`, and leaves `agents` alone — a new integration never enables itself.

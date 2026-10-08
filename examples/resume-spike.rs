@@ -4,9 +4,11 @@
 //!   resume-spike demo            – open the picker with a few fixed candidates
 //!   resume-spike streamed        – stream candidates from a bounded channel
 //!   resume-spike tabbed          – run_tabbed_picker with multiple agents and
-//!                                  over one page in "All"/"pi", to exercise
-//!                                  Alt+P/Alt+N pagination and Alt+Left/
-//!                                  Alt+Right tab switching
+//!                                  85 candidates in "All" (pi=70), to exercise
+//!                                  full-tab search, Alt+P/Alt+N in-view scroll
+//!                                  and Tab/Alt+Left/Alt+Right tab switching
+//!   resume-spike tabbed-right     – same, with an explicit right-hand Preview
+//!   resume-spike tree             – unified cross-agent tree with a relation row
 //!   resume-spike tabbed-async     – run_tabbed_picker opens immediately on
 //!                                  "pi"/"omp" while a simulated slow
 //!                                  "codex" background agent adds its
@@ -25,7 +27,7 @@ use std::time::UNIX_EPOCH;
 use resume::config::{PreviewMode, PreviewPosition};
 use resume::picker::{
     self, CandidateKey, MIN_TERM_HEIGHT, MIN_TERM_WIDTH, PickerCandidate, PickerOutcome,
-    run_picker, run_picker_streamed, run_tabbed_picker,
+    run_picker, run_picker_streamed, run_tabbed_picker, run_tree_picker,
 };
 
 fn main() -> ExitCode {
@@ -36,7 +38,10 @@ fn main() -> ExitCode {
             let outcome = run_picker_streamed(demo_candidates(), false);
             print_outcome(outcome)
         }
-        "tabbed" => print_outcome(run_tabbed_demo()),
+        "tabbed" => print_outcome(run_tabbed_demo(PreviewPosition::Auto)),
+        "tabbed-right" => print_outcome(run_tabbed_demo(PreviewPosition::Right)),
+        "tree" => print_outcome(run_tree_demo(false)),
+        "relation-tabbed" => print_outcome(run_tree_demo(true)),
         "tabbed-async" => print_outcome(run_tabbed_async_demo()),
         "raw" => run(demo_candidates(), true),
         "empty" => run(Vec::new(), false),
@@ -67,12 +72,12 @@ fn run(candidates: Vec<(CandidateKey, String, String)>, force_raw: bool) -> Exit
     print_outcome(run_picker(candidates, force_raw))
 }
 
-/// Builds a multi-agent, multi-page fixture and drives `run_tabbed_picker`
-/// directly — mirrors `app::run_interactive` once discovery has already
-/// fully completed. "pi" gets 70 candidates (2 pages of 50), "claude" and
-/// "omp" get a handful each (1 page), so "All" (85 total, 2 pages) and "pi"
-/// both exercise Alt+P/Alt+N, while Alt+Left/Alt+Right cycles all 4 tabs.
-fn run_tabbed_demo() -> PickerOutcome {
+/// Builds a multi-agent fixture and drives `run_tabbed_picker` directly —
+/// mirrors `app::run_interactive` once discovery has already fully completed.
+/// "pi" gets 70 candidates, "claude" and "omp" a handful each, so "All" (85)
+/// holds Sessions far older than one screen while Tab/Alt+Left/Alt+Right
+/// cycle all 4 tabs.
+fn run_tabbed_demo(position: PreviewPosition) -> PickerOutcome {
     let mut candidates = Vec::new();
     let mut next_id = 1u64;
     let mut push = |agent: &str, count: usize, candidates: &mut Vec<PickerCandidate>| {
@@ -93,6 +98,7 @@ fn run_tabbed_demo() -> PickerOutcome {
                     Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
                 ),
                 agent: agent.to_string(),
+                selectable: true,
             });
             next_id += 1;
         }
@@ -101,6 +107,36 @@ fn run_tabbed_demo() -> PickerOutcome {
     push("claude", 10, &mut candidates);
     push("omp", 5, &mut candidates);
     run_tabbed_picker(
+        std::sync::Arc::new(std::sync::Mutex::new(candidates)),
+        PreviewMode::Hidden,
+        position,
+        None,
+    )
+}
+/// Cross-agent tree fixture with a non-selectable relation-only row.
+/// The separate tabbed variant exercises normal-view acceptance guards.
+fn run_tree_demo(tabs_enabled: bool) -> PickerOutcome {
+    let row = |id: u64, agent: &str, name: &str, selectable: bool| PickerCandidate {
+        key: CandidateKey(id),
+        display: name.to_string(),
+        search_text: name.to_string(),
+        preview: format!("Session {name}"),
+        details: Some(format!("USER INPUT\n\n1. Session input\n{name}\n")),
+        rank: (0, Some(UNIX_EPOCH + std::time::Duration::from_secs(id))),
+        agent: agent.to_string(),
+        selectable,
+    };
+    let candidates = vec![
+        row(1, "pi", "tree pi-root", true),
+        row(2, "omp", "tree   omp-child", true),
+        row(3, "pi", "tree pi-relation-only", false),
+    ];
+    let picker = if tabs_enabled {
+        run_tabbed_picker
+    } else {
+        run_tree_picker
+    };
+    picker(
         std::sync::Arc::new(std::sync::Mutex::new(candidates)),
         PreviewMode::Hidden,
         PreviewPosition::Auto,
@@ -135,6 +171,7 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                     Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
                 ),
                 agent: agent.to_string(),
+                selectable: true,
             });
             next_id += 1;
         }
@@ -166,6 +203,7 @@ fn run_tabbed_async_demo() -> PickerOutcome {
                         Some(UNIX_EPOCH + std::time::Duration::from_secs(next_id)),
                     ),
                     agent: "codex".to_string(),
+                    selectable: true,
                 });
             }
             candidates.lock().unwrap().extend(codex_candidates);

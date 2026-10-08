@@ -206,7 +206,7 @@ fn discover_enriched(home: &Path) -> (Vec<crate::session::Session>, SqliteOutcom
     let sessions = outcomes
         .into_iter()
         .filter_map(|o| match o {
-            DiscoveredSession::Session(s) => Some(s),
+            DiscoveredSession::Session { session, .. } => Some(session),
             DiscoveredSession::Error { .. } => None,
         })
         .collect();
@@ -912,7 +912,7 @@ fn locked_db_degrades_silently_and_does_not_block_discovery() {
         let sessions: Vec<_> = outcomes
             .into_iter()
             .filter_map(|o| match o {
-                DiscoveredSession::Session(s) => Some(s),
+                DiscoveredSession::Session { session, .. } => Some(session),
                 _ => None,
             })
             .collect();

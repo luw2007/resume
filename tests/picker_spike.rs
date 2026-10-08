@@ -10,7 +10,7 @@
 //! never produces false negatives.
 
 use std::io::{Read, Write};
-use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
+use std::sync::{Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,14 +57,22 @@ fn spike_cmd(sub: &str) -> CommandBuilder {
     cmd
 }
 
+/// Screen state fed by the background reader: a real VT emulator sized like
+/// the PTY, so ANSI cell diffs, cursor moves, erases and UTF-8/CSI sequences
+/// split across reads resolve to what a terminal would actually display.
+struct ScreenState {
+    parser: vt100::Parser,
+    /// Last time bytes arrived from the child or the test wrote input.
+    last_change: Instant,
+}
+
+/// A screen must be unchanged this long (after the last output or input)
+/// before a predicate match counts as "settled".
+const SCREEN_IDLE: Duration = Duration::from_millis(200);
+
 /// A PTY session with a background reader draining rendered bytes.
 struct PtySession {
-    // macOS can fail `openpty` under a burst of parallel integration tests.
-    // Serialize PTY ownership while still exercising the full interaction.
-    _serial: MutexGuard<'static, ()>,
     writer: Box<dyn Write + Send>,
-    #[allow(dead_code)]
-    reader: Box<dyn Read + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _pair: portable_pty::PtyPair,
     rx: mpsc::Receiver<u8>,
@@ -72,12 +80,28 @@ struct PtySession {
     /// background thread. `read_for` returns a slice of new bytes, but this
     /// buffer retains everything for whole-session assertions.
     accumulated: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    screen: std::sync::Arc<std::sync::Mutex<ScreenState>>,
+    // macOS can fail `openpty` under a burst of parallel integration tests.
+    // Serialize PTY ownership while still exercising the full interaction.
+    // Declared last so the child and PTY are torn down (see `Drop`) before
+    // the next test may open its own PTY.
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl Drop for PtySession {
+    /// Reap the child even when a test panics mid-interaction, so a failed
+    /// assertion never leaves a picker process running behind the guard.
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 fn pty_serial() -> MutexGuard<'static, ()> {
-    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    static SERIAL: Mutex<()> = Mutex::new(());
     SERIAL
-        .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -103,6 +127,11 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
     let accumulated: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let acc_clone = accumulated.clone();
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(ScreenState {
+        parser: vt100::Parser::new(rows, cols, 0),
+        last_change: Instant::now(),
+    }));
+    let screen_clone = screen.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -112,9 +141,16 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
                     if let Ok(mut a) = acc_clone.lock() {
                         a.extend_from_slice(&buf[..n]);
                     }
+                    {
+                        // The emulator keeps UTF-8 and CSI state across
+                        // reads, so chunk boundaries never corrupt cells.
+                        let mut s = screen_clone.lock().unwrap_or_else(|p| p.into_inner());
+                        s.parser.process(&buf[..n]);
+                        s.last_change = Instant::now();
+                    }
                     for &b in &buf[..n] {
                         if tx.send(b).is_err() {
-                            return;
+                            break;
                         }
                     }
                 }
@@ -122,13 +158,13 @@ fn spawn(sub: &str, cols: u16, rows: u16) -> PtySession {
         }
     });
     PtySession {
-        _serial: serial,
         writer,
-        reader: Box::new(std::io::empty()),
         child,
         _pair: pair,
         rx,
         accumulated,
+        screen,
+        _serial: serial,
     }
 }
 
@@ -148,8 +184,66 @@ impl PtySession {
     }
 
     fn write(&mut self, bytes: &[u8]) {
+        // Input invalidates any previously settled screen: the next settle
+        // must observe SCREEN_IDLE of quiet *after* this keystroke.
+        self.screen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .last_change = Instant::now();
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
+    }
+
+    /// Current emulated screen: one line per terminal row, trailing blanks
+    /// trimmed, trailing empty rows dropped.
+    fn screen_text(&self) -> (String, Duration) {
+        let s = self.screen.lock().unwrap_or_else(|p| p.into_inner());
+        let (_, cols) = s.parser.screen().size();
+        let mut rows: Vec<String> = s
+            .parser
+            .screen()
+            .rows(0, cols)
+            .map(|r| r.trim_end().to_string())
+            .collect();
+        while rows.last().is_some_and(|r| r.is_empty()) {
+            rows.pop();
+        }
+        (rows.join("\n"), s.last_change.elapsed())
+    }
+
+    /// Wait until the emulated screen satisfies `pred` and has been quiet
+    /// for `SCREEN_IDLE`. Panics with the full screen snapshot when `pred`
+    /// never holds before `timeout`. Raw bytes are drained (not retained) so
+    /// a later `read_for` sees only post-exit output.
+    fn wait_screen(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        pred: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let _ = self.read_for(Duration::from_millis(50));
+            let (text, idle) = self.screen_text();
+            let holds = pred(&text);
+            if holds && idle >= SCREEN_IDLE {
+                return text;
+            }
+            if Instant::now() >= deadline {
+                if holds {
+                    return text;
+                }
+                panic!(
+                    "timed out after {timeout:?} waiting for {what}\n--- screen ---\n{text}\n--- end ---"
+                );
+            }
+        }
+    }
+
+    /// Wait for the screen to go quiet (no output for `SCREEN_IDLE` since
+    /// the last keystroke) and return it, for asserting state or absence.
+    fn settle(&mut self) -> String {
+        self.wait_screen("a settled screen", Duration::from_secs(5), |_| true)
     }
 
     /// Return a copy of every byte rendered across the whole session so far.
@@ -284,8 +378,9 @@ fn skim_streams_candidates_and_selects_opaque_key() {
     }
     let mut sess = spawn("demo", 100, 30);
     // Let the candidates stream in.
-    let rendered = sess.read_for(Duration::from_millis(1500));
-    let text = strip(&rendered);
+    let text = sess.wait_screen("login candidate", Duration::from_secs(4), |s| {
+        s.contains("login")
+    });
     // All three candidates are streamed and searchable. Skim collapses
     // inter-token spacing in unselected rows, so assert on distinctive tokens.
     assert!(text.contains("login"), "pi candidate missing: {text:?}");
@@ -320,8 +415,9 @@ fn skim_streamed_path_still_selects() {
         return;
     }
     let mut sess = spawn("streamed", 100, 30);
-    let rendered = sess.read_for(Duration::from_millis(1500));
-    let text = strip(&rendered);
+    let text = sess.wait_screen("claude candidate", Duration::from_secs(4), |s| {
+        s.contains("refactor")
+    });
     assert!(
         text.contains("refactor"),
         "claude candidate missing: {text:?}"
@@ -334,67 +430,50 @@ fn skim_streamed_path_still_selects() {
 }
 
 /// `run_tabbed_picker` (the path `app::run_interactive` uses once discovery
-/// fully completes): default view is the "All" tab's newest full page;
-/// `Alt+P`/`Alt+N` move to older/newer pages within a tab; Alt+Left/Alt+Right
-/// cycle tabs (wrapping) and reset to each tab's newest page; Enter still
-/// resolves the correct opaque key. Fixture: pi=70 (2 pages), claude=10,
-/// omp=5 (1 page each), so "All" (85 total) and "pi" both exercise
-/// pagination while Alt+Left/Alt+Right cycles all 4 tabs (All, pi, claude, omp).
+/// fully completes): every candidate of the current tab is in one Skim view, so
+/// a query reaches Sessions far older than the first screen. Alt+Left/Alt+Right
+/// and Tab/Shift-Tab cycle tabs (wrapping). Fixture: pi=70, claude=10, omp=5.
 #[test]
-fn tabbed_picker_paginates_and_switches_tabs() {
+fn tabbed_picker_switches_tabs_with_alt_arrows_and_tab_keys() {
     if !pty_available() {
         return;
     }
     let mut sess = spawn("tabbed", 100, 30);
+    let all = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    assert!(all.contains("[All 85] pi claude omp"), "All tab: {all:?}");
 
-    // Default: All's newest full page — 1/2, holding pi 035-069, Claude,
-    // and OMP (ids 36-85). The header makes its 35 older sessions discoverable.
-    let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
-    assert!(
-        all_page1.contains("[All 50/85] pi claude omp  <-/->  PAGE 1/2")
-            && all_page1.contains("older: Alt-P"),
-        "expected newest All page with continuation: {all_page1:?}"
-    );
-    assert!(
-        !all_page1.contains("pi-candidate-000"),
-        "older-page pi candidate leaked onto newest All page: {all_page1:?}"
-    );
-
-    // Alt+P: older page of All (2/2) — the 35 oldest pi candidates.
-    sess.write(b"\x1bp");
-    let all_page2 = wait_for(&mut sess, "pi-candidate-000", Duration::from_millis(4000));
-    assert!(
-        all_page2.contains("[All 35/85] pi claude omp  <-/->  PAGE 2/2"),
-        "page header: {all_page2:?}"
-    );
-    assert!(
-        !all_page2.contains("omp-candidate"),
-        "omp leaked onto older All page: {all_page2:?}"
-    );
-
-    // macOS terminals emit the xterm modifier form for Option+Left.
+    // macOS terminals emit the xterm modifier form for Option+Left/Right.
     sess.write(b"\x1b[1;3D");
     let omp_tab = wait_for(&mut sess, "omp-candidate-000", Duration::from_millis(4000));
     assert!(
-        omp_tab.contains("All pi claude [omp 5/5]  <-/->  PAGE 1/1"),
-        "expected omp tab page 1/1: {omp_tab:?}"
+        omp_tab.contains("All pi claude [omp 5]"),
+        "omp: {omp_tab:?}"
     );
 
-    // macOS terminals emit the xterm modifier form for Option+Right.
     sess.write(b"\x1b[1;3C");
-    sess.read_for(Duration::from_millis(800));
-    sess.write(b"\x1b[1;3C");
-    let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
+    let all_again = wait_for(&mut sess, "[All 85]", Duration::from_millis(4000));
     assert!(
-        pi_tab.contains("All [pi 50/70] claude omp  <-/->  PAGE 1/2"),
-        "expected pi tab newest page: {pi_tab:?}"
+        all_again.contains("[All 85] pi claude omp"),
+        "{all_again:?}"
     );
+
+    sess.write(b"\t");
+    let pi_tab = wait_for(&mut sess, "[pi 70]", Duration::from_millis(4000));
     assert!(
         !pi_tab.contains("claude-candidate") && !pi_tab.contains("omp-candidate"),
         "other agents leaked onto the pi tab: {pi_tab:?}"
     );
 
-    // Enter selects the highlighted candidate from the current view.
+    sess.write(b"\t");
+    let claude_tab = wait_for(&mut sess, "[claude 10]", Duration::from_millis(4000));
+    assert!(
+        claude_tab.contains("claude-candidate-000"),
+        "{claude_tab:?}"
+    );
+
+    sess.write(b"\x1b[Z"); // Shift-Tab back to pi
+    let _ = wait_for(&mut sess, "[pi 70]", Duration::from_millis(4000));
+
     sess.write(b"\r");
     let exit = wait_child(&mut sess);
     assert_eq!(exit, 0, "exit={exit}");
@@ -402,72 +481,367 @@ fn tabbed_picker_paginates_and_switches_tabs() {
     assert!(out.contains("key:"), "out={out:?}");
 }
 
-/// Left/Right (bare xterm arrows) and Tab/Shift-Tab are bound alongside
-/// Alt-Left/Alt-Right for the same tab-cycle move, so a terminal or
-/// keyboard layout that never emits the Alt-modified form still switches
-/// tabs. Reuses the same fixture as `tabbed_picker_paginates_and_switches_tabs`.
+/// A Session older than the first 50 is searchable and selectable at once.
 #[test]
-fn tabbed_picker_switches_tabs_with_bare_arrows_and_tab_key() {
+fn query_reaches_sessions_older_than_fifty_and_selects_them() {
     if !pty_available() {
         return;
     }
     let mut sess = spawn("tabbed", 100, 30);
-
-    // Default: All's newest full page (1/2).
-    let all_page1 = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"pi-candidate-000");
+    let filtered = sess.wait_screen("filtered match count 1/85", Duration::from_secs(4), |s| {
+        s.contains("pi-candidate-000") && s.contains("1/85")
+    });
     assert!(
-        all_page1.contains("[All 50/85] pi claude omp  <-/->  PAGE 1/2"),
-        "expected All tab newest page: {all_page1:?}"
+        filtered.contains("1/85"),
+        "match count missing: {filtered:?}"
     );
-
-    // Plain Right (no Alt modifier): next tab -> pi, its newest full page (1/2).
-    sess.write(b"\x1b[C");
-    let pi_tab = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
-    assert!(
-        pi_tab.contains("All [pi 50/70] claude omp  <-/->  PAGE 1/2"),
-        "expected pi tab newest page: {pi_tab:?}"
-    );
-
-    // Tab: next tab -> claude, its only page (1/1).
-    sess.write(b"\t");
-    let claude_tab = wait_for(
-        &mut sess,
-        "claude-candidate-000",
-        Duration::from_millis(4000),
-    );
-    assert!(
-        claude_tab.contains("All pi [claude 10/10] omp  <-/->  PAGE 1/1"),
-        "expected claude tab page 1/1: {claude_tab:?}"
-    );
-
-    // Plain Left (no Alt modifier): previous tab -> back to pi, newest page.
-    sess.write(b"\x1b[D");
-    let pi_tab_again = wait_for(&mut sess, "pi-candidate-069", Duration::from_millis(4000));
-    assert!(
-        pi_tab_again.contains("All [pi 50/70] claude omp  <-/->  PAGE 1/2"),
-        "expected pi tab newest page again: {pi_tab_again:?}"
-    );
-
-    // Shift-Tab (CSI Z, standard backtab): previous tab -> back to All, newest page.
-    sess.write(b"\x1b[Z");
-    let all_again = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
-    assert!(
-        all_again.contains("[All 50/85] pi claude omp  <-/->  PAGE 1/2"),
-        "expected All tab newest page again: {all_again:?}"
-    );
-
-    // Enter selects the highlighted candidate from the current view.
     sess.write(b"\r");
     let exit = wait_child(&mut sess);
     assert_eq!(exit, 0, "exit={exit}");
     let out = strip(&sess.read_for(Duration::from_millis(500)));
-    assert!(out.contains("key:"), "out={out:?}");
+    let at = out.find("key:1").unwrap_or_else(|| panic!("out={out:?}"));
+    assert!(
+        !out[at + 5..].starts_with(|c: char| c.is_ascii_digit()),
+        "wrong key selected: {out:?}"
+    );
+}
+
+/// A query that matches nothing says so with a visible `0/N` count.
+#[test]
+fn no_match_query_shows_zero_count() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 80, 24);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"zzzzqq");
+    let text = wait_for(&mut sess, "0/85", Duration::from_millis(4000));
+    assert!(text.contains("0/85"), "no-match feedback missing: {text:?}");
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// Bare Left/Right edit the query cursor instead of switching tabs.
+#[test]
+fn bare_left_right_edit_query_cursor() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 100, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"pi-candidate-9");
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> pi-candidate-9")
+    });
+    sess.write(b"\x1b[D"); // Left: cursor before '9'
+    let _ = sess.read_for(Duration::from_millis(200));
+    sess.write(b"6"); // inserted => "pi-candidate-69", which only pi 069 matches
+    let text = sess.wait_screen("inserted digit", Duration::from_secs(4), |s| {
+        s.contains("> pi-candidate-69") && s.contains("pi-candidate-069")
+    });
+    assert!(
+        text.contains("[All 85]") || !text.contains("[pi 70]"),
+        "Left must not switch tabs: {text:?}"
+    );
+    sess.write(b"\r");
+    let exit = wait_child(&mut sess);
+    assert_eq!(exit, 0, "exit={exit}");
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert!(
+        out.contains("key:70"),
+        "insertion did not target pi 069: {out:?}"
+    );
+}
+
+/// Query text and side Preview visibility both survive a tab switch.
+#[test]
+fn query_and_side_preview_survive_tab_switch() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 130, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"candidate");
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> candidate")
+    });
+    sess.write(b"\x0f"); // show side Preview
+    let _ = wait_for(&mut sess, "normalized", Duration::from_secs(3));
+    sess.write(b"\t");
+    let next = sess.wait_screen(
+        "pi tab with query and preview",
+        Duration::from_secs(4),
+        |s| s.contains("[pi ") && s.contains("> candidate") && s.contains("normalized"),
+    );
+    assert!(next.contains("> candidate"), "query lost: {next:?}");
+    assert!(
+        next.contains("normalized"),
+        "preview hidden by tab switch: {next:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// The shortcut footer keeps Enter / Preview / Esc / details visible at 60, 80
+/// and 100 columns, and still at 60 columns with an explicit right-hand
+/// Preview, where the list pane is only ~23 columns.
+#[test]
+fn footer_hints_visible_at_supported_widths() {
+    if !pty_available() {
+        return;
+    }
+    for (sub, cols) in [
+        ("tabbed", 60u16),
+        ("tabbed", 80),
+        ("tabbed", 100),
+        ("tabbed-right", 60),
+    ] {
+        let mut sess = spawn(sub, cols, 14);
+        let text = wait_for(&mut sess, "Esc", Duration::from_secs(4));
+        for hint in ["Enter", "preview", "Esc", "details"] {
+            assert!(
+                text.contains(hint),
+                "{hint} missing at {sub}/{cols} cols: {text:?}"
+            );
+        }
+        sess.write(b"\x1b");
+        assert_eq!(wait_child(&mut sess), 0);
+    }
+}
+
+/// Parse the `key:<N>` the spike prints on selection.
+fn selected_key(out: &str) -> u64 {
+    let at = out
+        .find("key:")
+        .unwrap_or_else(|| panic!("no key in {out:?}"));
+    out[at + 4..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("unparsable key in {out:?}"))
+}
+
+/// Alt-P pages the cursor down the list in place (older Sessions) and Alt-N
+/// pages it back up, with no tab change and no exit.
+#[test]
+fn alt_p_alt_n_scroll_the_list_in_place() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 100, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"\x1bp");
+    let _ = sess.read_for(Duration::from_millis(400));
+    assert!(sess.child.try_wait().unwrap().is_none(), "Alt-P exited");
+    sess.write(b"\r");
+    assert_eq!(wait_child(&mut sess), 0);
+    let paged = selected_key(&strip(&sess.read_for(Duration::from_millis(500))));
+    assert!(
+        paged < 85,
+        "Alt-P did not move the cursor down: key {paged}"
+    );
+    drop(sess); // Release the serial PTY guard before opening another session.
+
+    let mut sess = spawn("tabbed", 100, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_millis(4000));
+    sess.write(b"\x1bp");
+    let _ = sess.read_for(Duration::from_millis(300));
+    sess.write(b"\x1bn");
+    let _ = sess.read_for(Duration::from_millis(300));
+    sess.write(b"\r");
+    assert_eq!(wait_child(&mut sess), 0);
+    let back = selected_key(&strip(&sess.read_for(Duration::from_millis(500))));
+    assert!(
+        back > paged,
+        "Alt-N did not move the cursor back up: {back} vs {paged}"
+    );
+}
+
+/// A relation-only (non-selectable) row ignores Enter in place, yet Tab and
+/// Shift-Tab still move between tabs from it.
+#[test]
+fn non_selectable_row_ignores_enter_but_tab_navigates() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("relation-tabbed", 100, 30);
+    let all = wait_for(&mut sess, "pi-relation-only", Duration::from_secs(4));
+    assert!(all.contains("[All 3]"), "{all:?}");
+    sess.write(b"\r");
+    let _ = sess.read_for(Duration::from_millis(500));
+    assert!(
+        sess.child.try_wait().unwrap().is_none(),
+        "Enter on a relation-only row must not resume or exit"
+    );
+    sess.write(b"\t");
+    let pi_tab = wait_for(&mut sess, "[pi 2]", Duration::from_secs(4));
+    assert!(
+        pi_tab.contains("[pi 2]"),
+        "Tab blocked on a relation-only row: {pi_tab:?}"
+    );
+    sess.write(b"\t");
+    let omp_tab = wait_for(&mut sess, "[omp 1]", Duration::from_secs(4));
+    assert!(omp_tab.contains("[omp 1]"), "{omp_tab:?}");
+    sess.write(b"\r");
+    assert_eq!(wait_child(&mut sess), 0);
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert_eq!(selected_key(&out), 2, "{out:?}");
+}
+
+/// Tree mode keeps cross-agent ancestry in one searchable view; tab keys do
+/// not slice it, even when focus is on a non-selectable relation row.
+#[test]
+fn tree_picker_keeps_cross_agent_rows_in_one_view() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tree", 100, 30);
+    let initial = wait_for(&mut sess, "pi-relation-only", Duration::from_secs(4));
+    assert!(initial.contains("[Tree 3]"), "{initial:?}");
+    assert!(
+        initial.contains("pi-root") && initial.contains("omp-child"),
+        "{initial:?}"
+    );
+    sess.write(b"\r");
+    sess.settle();
+    assert!(sess.child.try_wait().unwrap().is_none());
+    sess.write(b"\t\x1b[Z\x1b[1;3C\x1b[1;3D");
+    sess.settle();
+    assert!(sess.child.try_wait().unwrap().is_none());
+    sess.write(b"tree");
+    let filtered = sess.wait_screen("query tree with 3/3", Duration::from_secs(4), |s| {
+        s.contains("> tree") && s.contains("3/3")
+    });
+    assert!(filtered.contains("3/3"), "{filtered:?}");
+    assert!(!filtered.contains("[pi 2]"), "{filtered:?}");
+    // Ctrl-U discards the whole query (Ctrl-K is cursor-up in Skim, not a
+    // kill-line), so the new query is exactly `omp-child`.
+    sess.write(b"\x15omp-child");
+    let narrowed = sess.wait_screen("query omp-child with 1/3", Duration::from_secs(4), |s| {
+        s.contains("> omp-child") && s.contains("1/3")
+    });
+    assert!(narrowed.contains("1/3"), "{narrowed:?}");
+    sess.write(b"\r");
+    assert_eq!(wait_child(&mut sess), 0);
+    let out = strip(&sess.read_for(Duration::from_millis(500)));
+    assert_eq!(selected_key(&out), 2, "{out:?}");
+}
+
+/// Opening details with a doubled space consumes both spaces: after closing,
+/// the query is exactly what was typed before.
+#[test]
+fn double_space_leaves_no_trigger_whitespace_in_query() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"omp");
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> omp")
+    });
+    sess.write(b"  ");
+    let _ = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+    sess.write(b"\x1b");
+    sess.wait_screen("details closed", Duration::from_secs(3), |s| {
+        !s.contains("Session details") && s.contains("> omp")
+    });
+    // Exactly "omp" => three Backspaces empty the query (85/85); a stray
+    // trailing space would leave "o" (5/85).
+    sess.write(b"\x7f\x7f\x7f");
+    let text = wait_for(&mut sess, "85/85", Duration::from_secs(3));
+    assert!(
+        text.contains("85/85"),
+        "stray whitespace left in query: {text:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// With no matching Session there is nothing to detail: a doubled space is
+/// just query text and no card opens.
+#[test]
+fn double_space_does_not_open_details_without_a_current_item() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"zzzzqq");
+    let _ = wait_for(&mut sess, "0/85", Duration::from_secs(3));
+    sess.write(b"  ");
+    let after = sess.settle();
+    assert!(
+        !after.contains("Session details"),
+        "card opened on no item: {after:?}"
+    );
+    assert!(sess.child.try_wait().unwrap().is_none());
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// A single space stays an ordinary term separator.
+#[test]
+fn single_space_still_separates_search_terms() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"pi 069");
+    let text = wait_for(&mut sess, "1/85", Duration::from_secs(3));
+    assert!(
+        text.contains("1/85") && !text.contains("Session details"),
+        "{text:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// Ctrl-C from the main list aborts with 130 as well.
+#[test]
+fn ctrl_c_in_list_with_query_exits_130() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 100, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"omp");
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> omp")
+    });
+    sess.write(b"\x03");
+    assert_eq!(wait_child(&mut sess), 130);
+}
+
+/// Ctrl-L re-reads the shared candidate list in place: a background agent's
+/// Sessions become searchable without a tab switch and the hint clears.
+#[test]
+fn ctrl_l_refreshes_background_candidates_in_place() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed-async", 100, 30);
+    let early = wait_for(&mut sess, "omp-candidate-002", Duration::from_millis(500));
+    assert!(early.contains("codex scanning"), "{early:?}");
+    std::thread::sleep(Duration::from_millis(1000));
+    sess.write(b"\x0c");
+    let text = wait_for(&mut sess, "[All 11]", Duration::from_secs(3));
+    assert!(
+        text.contains("[All 11]") && !text.contains("scanning"),
+        "refresh did not pick up codex: {text:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
 }
 
 /// `run_tabbed_picker` with a [`resume::picker::BackgroundAgent`] (the path
 /// `app::run_interactive` uses when Codex is configured alongside other
 /// agents): the picker opens immediately on the agents that are already
-/// ready, showing a "still scanning" header hint, and never blocks on the
+/// ready, showing a "scanning" header hint, and never blocks on the
 /// simulated slow "codex" background thread. Once that thread finishes
 /// (merging into the same shared candidate list `run_tabbed_picker` reads
 /// on every navigation), the next tab switch picks up its Sessions and the
@@ -484,7 +858,7 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     // hint -- proving it did not wait for the background agent.
     let early = wait_for(&mut sess, "omp-candidate-002", Duration::from_millis(500));
     assert!(
-        early.contains("[All 6/6] pi omp (codex still scanning)  <-/->  PAGE 1/1"),
+        early.contains("[All 6] pi omp (codex scanning"),
         "expected an immediately open All tab with a pending hint: {early:?}"
     );
     assert!(
@@ -499,21 +873,21 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     sess.write(b"\x1b[1;3C"); // Alt+Right: All -> pi
     let pi_tab = wait_for(
         &mut sess,
-        "All [pi 3/3] omp codex  <-/->",
+        "All [pi 3] omp codex",
         Duration::from_millis(2000),
     );
     assert!(
-        pi_tab.contains("All [pi 3/3] omp codex  <-/->"),
+        pi_tab.contains("All [pi 3] omp codex"),
         "expected the pi tab: {pi_tab:?}"
     );
     sess.write(b"\x1b[1;3C"); // pi -> omp
     let omp_tab = wait_for(
         &mut sess,
-        "All pi [omp 3/3] codex  <-/->",
+        "All pi [omp 3] codex",
         Duration::from_millis(2000),
     );
     assert!(
-        omp_tab.contains("All pi [omp 3/3] codex  <-/->"),
+        omp_tab.contains("All pi [omp 3] codex"),
         "expected the omp tab: {omp_tab:?}"
     );
     sess.write(b"\x1b[1;3C"); // omp -> codex
@@ -523,8 +897,7 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
         Duration::from_millis(4000),
     );
     assert!(
-        codex_tab.contains("All pi omp [codex 5/5]  <-/->")
-            && !codex_tab.contains("still scanning"),
+        codex_tab.contains("All pi omp [codex 5]") && !codex_tab.contains("scanning"),
         "expected the codex tab with its pending hint cleared: {codex_tab:?}"
     );
     assert!(
@@ -540,21 +913,10 @@ fn tabbed_picker_opens_immediately_while_background_agent_scans() {
     assert!(out.contains("key:"), "out={out:?}");
 }
 
-/// Poll for newly rendered output (only bytes read *during this call*, not
-/// the whole session history — so a later negative assertion isn't polluted
-/// by an earlier frame) until `needle` appears or `timeout` elapses.  Robust
-/// against variable first-render latency for larger fixtures/relaunches,
-/// unlike a single fixed-duration `read_for`.
+/// Wait until the emulated screen contains `needle` and is settled, then
+/// return the screen text. Hard-fails with a screen snapshot on timeout.
 fn wait_for(sess: &mut PtySession, needle: &str, timeout: Duration) -> String {
-    let deadline = Instant::now() + timeout;
-    let mut buf = Vec::new();
-    loop {
-        buf.extend(sess.read_for(Duration::from_millis(150)));
-        let text = strip(&buf);
-        if text.contains(needle) || Instant::now() >= deadline {
-            return text;
-        }
-    }
+    sess.wait_screen(&format!("{needle:?}"), timeout, |s| s.contains(needle))
 }
 
 /// Esc restores the terminal and the process exits cleanly.
@@ -667,7 +1029,9 @@ fn preview_hidden_by_default_and_ctrl_o_toggles() {
         return;
     }
     let mut sess = spawn("demo", 120, 30);
-    let before = strip(&sess.read_for(Duration::from_millis(1200)));
+    let before = sess.wait_screen("initial picker", Duration::from_secs(4), |s| {
+        s.contains("login")
+    });
     // Preview content (workspace path) must NOT be visible while hidden.
     assert!(
         !before.contains("/tmp/proj"),
@@ -675,14 +1039,18 @@ fn preview_hidden_by_default_and_ctrl_o_toggles() {
     );
     // Toggle preview on.
     sess.write(b"\x0f"); // Ctrl+O
-    let after = strip(&sess.read_for(Duration::from_millis(800)));
+    let after = sess.wait_screen("preview shown", Duration::from_secs(4), |s| {
+        s.contains("/tmp/proj") || s.contains("workspace")
+    });
     assert!(
         after.contains("/tmp/proj") || after.contains("workspace"),
         "preview not shown after Ctrl+O: {after:?}"
     );
     // Toggle preview off again.
     sess.write(b"\x0f");
-    let off = strip(&sess.read_for(Duration::from_millis(600)));
+    let off = sess.wait_screen("preview hidden", Duration::from_secs(4), |s| {
+        !s.contains("/tmp/proj") && s.contains("login")
+    });
     assert!(
         !off.contains("/tmp/proj"),
         "preview did not hide on second Ctrl+O: {off:?}"
@@ -698,31 +1066,181 @@ fn double_space_opens_details_and_escape_returns_to_picker() {
         return;
     }
     let mut sess = spawn("tabbed", 110, 30);
-    let _ = wait_for(&mut sess, "[All 50/85]", Duration::from_secs(4));
+    let _ = wait_for(&mut sess, "[All 85]", Duration::from_secs(4));
     sess.write(b"  ");
     let card = wait_for(&mut sess, "Session details", Duration::from_secs(3));
     assert!(card.contains("USER INPUT"), "user input missing: {card:?}");
-    assert!(card.contains("inputline1"), "first input missing: {card:?}");
+    assert!(
+        card.contains("input line 1"),
+        "first input missing: {card:?}"
+    );
     sess.write(b"j");
-    let scrolled = strip(&sess.read_for(Duration::from_millis(250)));
+    let scrolled = sess.wait_screen("details scrolled by j", Duration::from_secs(3), |s| {
+        s != card.as_str() && s.contains("Session details")
+    });
     assert!(
         scrolled.contains("input") && scrolled != card,
         "j did not redraw details: {scrolled:?}"
     );
     sess.write(b"i");
-    let i_up = strip(&sess.read_for(Duration::from_millis(250)));
+    let i_up = sess.wait_screen("details scrolled back by i", Duration::from_secs(3), |s| {
+        s != scrolled.as_str() && s.contains("USER INPUT")
+    });
     assert!(
-        i_up.contains("USERINPUT") && i_up != scrolled,
+        i_up.contains("USER INPUT") && i_up != scrolled,
         "i did not scroll up: {i_up:?}"
     );
     sess.write(b"j");
-    let _ = sess.read_for(Duration::from_millis(250));
+    let down = sess.wait_screen("details scrolled by j again", Duration::from_secs(3), |s| {
+        s != i_up.as_str() && s.contains("Session details")
+    });
     sess.write(b"\x1b[A");
-    let up = sess.read_for(Duration::from_millis(300));
-    assert!(!up.is_empty(), "Up did not redraw details");
+    let up = sess.wait_screen("details scrolled by Up", Duration::from_secs(3), |s| {
+        s != down.as_str() && s.contains("Session details")
+    });
+    assert!(up != down, "Up did not redraw details");
     sess.write(b"\x1b");
-    let list = sess.read_for(Duration::from_millis(400));
-    assert!(!list.is_empty(), "Escape did not redraw the picker");
+    let list = sess.wait_screen("picker restored after Esc", Duration::from_secs(3), |s| {
+        !s.contains("Session details") && s.contains("[All 85]")
+    });
+    assert!(
+        list.contains("[All 85]"),
+        "Escape did not redraw the picker: {list:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// Ctrl+C is never swallowed by the details card: it aborts with 130.
+#[test]
+fn ctrl_c_in_details_card_exits_130() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "[All 85]", Duration::from_secs(4));
+    sess.write(b"  ");
+    let _ = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+    sess.write(b"\x03");
+    assert_eq!(wait_child(&mut sess), 130);
+}
+
+/// `q` and Enter both dismiss the read-only card; Enter never resumes a Session.
+#[test]
+fn q_and_enter_dismiss_details_without_resuming() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "[All 85]", Duration::from_secs(4));
+    for dismiss in [&b"q"[..], &b"\r"[..]] {
+        sess.write(b"  ");
+        let _ = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+        sess.write(dismiss);
+        let list = sess.wait_screen("list restored", Duration::from_secs(3), |s| {
+            !s.contains("Session details") && s.contains("[All 85]")
+        });
+        assert!(list.contains("[All 85]"), "list not restored: {list:?}");
+        assert!(
+            sess.child.try_wait().unwrap().is_none(),
+            "dismiss key {dismiss:?} exited the picker"
+        );
+    }
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// PageDown and Ctrl-D scroll the details card instead of reaching the list.
+#[test]
+fn page_keys_scroll_details_card() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "[All 85]", Duration::from_secs(4));
+    sess.write(b"  ");
+    let card = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+    assert!(card.contains("input line 1"), "{card:?}");
+    sess.write(b"\x1b[6~"); // PageDown
+    let paged = sess.wait_screen("details paged down", Duration::from_secs(3), |s| {
+        s != card.as_str() && s.contains("Session details")
+    });
+    assert!(
+        !paged.is_empty() && paged != card,
+        "PageDown did not scroll"
+    );
+    sess.write(b"\x15"); // Ctrl-U: half page up
+    let half_up = sess.wait_screen("details half-paged up", Duration::from_secs(3), |s| {
+        s != paged.as_str() && s.contains("Session details")
+    });
+    sess.write(b"\x04"); // Ctrl-D: half page down
+    let half = sess.wait_screen("details half-paged down", Duration::from_secs(3), |s| {
+        s != half_up.as_str() && s.contains("Session details")
+    });
+    assert!(half != half_up, "Ctrl-D did not scroll");
+    sess.write(b"\x03");
+    assert_eq!(wait_child(&mut sess), 130);
+}
+
+/// Closing the details card must refresh the side Preview: the redraw after
+/// Esc has to show the selected item's own `Session <agent>-<n>` preview text
+/// and none of the card's "Session input" details.
+#[test]
+fn escape_from_details_restores_side_preview_content() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 130, 30);
+    let _ = wait_for(&mut sess, "[All 85]", Duration::from_secs(4));
+    sess.write(b"\x0f"); // show side Preview
+    let _ = wait_for(&mut sess, "normalized", Duration::from_secs(3));
+    sess.write(b"  ");
+    let _ = wait_for(&mut sess, "Session details", Duration::from_secs(3));
+    sess.write(b"\x1b");
+    // Fresh read only: frames from before the Esc must not satisfy the check.
+    // Cell diffs may drop spaces, so compare with whitespace removed.
+    let after: String = sess
+        .wait_screen("picker restored after Esc", Duration::from_secs(3), |s| {
+            let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            !compact.contains("Sessiondetails")
+                && ["Sessionpi-", "Sessionclaude-", "Sessionomp-"]
+                    .iter()
+                    .any(|needle| compact.contains(needle))
+        })
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        ["Sessionpi-", "Sessionclaude-", "Sessionomp-"]
+            .iter()
+            .any(|needle| after.contains(needle)),
+        "side preview content missing after Esc: {after:?}"
+    );
+    assert!(
+        !after.contains("USERINPUT") && !after.contains("Sessioninput"),
+        "stale details in side preview after Esc: {after:?}"
+    );
+    sess.write(b"\x1b");
+    assert_eq!(wait_child(&mut sess), 0);
+}
+
+/// The filter text survives tab navigation.
+#[test]
+fn filter_query_survives_tab_switch() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed", 110, 30);
+    let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
+    sess.write(b"omp");
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> omp")
+    });
+    sess.write(b"\t");
+    let next = sess.wait_screen("pi tab with query", Duration::from_secs(4), |s| {
+        s.contains("[pi ") && s.contains("> omp")
+    });
+    assert!(next.contains("> omp"), "query lost on tab switch: {next:?}");
     sess.write(b"\x1b");
     assert_eq!(wait_child(&mut sess), 0);
 }
@@ -736,20 +1254,18 @@ fn double_space_opens_details_with_active_filter() {
     let mut sess = spawn("tabbed", 110, 30);
     let _ = wait_for(&mut sess, "omp-candidate-004", Duration::from_secs(4));
     sess.write(b"omp");
-    let _ = sess.read_for(Duration::from_millis(300));
+    sess.wait_screen("typed query", Duration::from_secs(3), |s| {
+        s.contains("> omp")
+    });
     sess.write(b"  ");
-    let card = sess.read_for(Duration::from_millis(800));
-    assert!(
-        card.windows(7).any(|bytes| bytes == b"details"),
-        "details card missing"
-    );
-    assert!(
-        strip(&card).contains("USER INPUT"),
-        "wrong details: {:?}",
-        strip(&card)
-    );
+    let card = sess.wait_screen("details card", Duration::from_secs(4), |s| {
+        s.contains("Session details") && s.contains("USER INPUT")
+    });
+    assert!(card.contains("USER INPUT"), "wrong details: {card:?}");
     sess.write(b"\x1b");
-    let list = strip(&sess.read_for(Duration::from_millis(500)));
+    let list = sess.wait_screen("filtered list restored", Duration::from_secs(4), |s| {
+        !s.contains("Session details") && s.contains("te-003")
+    });
     assert!(
         list.contains("te-003") && !list.contains("claude-candidate"),
         "filter lost after closing details: {list:?}"
@@ -776,7 +1292,11 @@ fn ctrl_r_does_not_scan_filesystem() {
     sess.read_for(Duration::from_millis(600));
     // Press Ctrl+R (must NOT reload the filesystem).
     sess.write(b"\x12");
-    let _ = sess.read_for(Duration::from_millis(1000));
+    let after_reload = sess.settle();
+    assert!(
+        !after_reload.contains("Cargo.toml") && !after_reload.contains("src/"),
+        "Ctrl+R listed working-directory contents on screen: {after_reload:?}"
+    );
     // Quit.
     sess.write(b"\x1b");
     let exit = wait_child(&mut sess);
@@ -809,8 +1329,10 @@ fn control_sequence_attacks_are_neutralized() {
         return;
     }
     let mut sess = spawn("control-chars", 130, 30);
-    let rendered = sess.read_for(Duration::from_millis(1500));
-    let text = strip(&rendered);
+    let text = sess.wait_screen("control-char labels", Duration::from_secs(4), |s| {
+        s.contains("ANSI color") && s.contains("OSC-52")
+    });
+    let rendered = sess.accumulated();
     // The candidate labels (sanitized) are visible...
     assert!(text.contains("ANSI color"), "rendered: {text:?}");
     assert!(text.contains("OSC-52"), "rendered: {text:?}");

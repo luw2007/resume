@@ -133,7 +133,7 @@ where
                         parsed.effective_root = Some(canonical_root.clone());
                         parsed.archived = root.kind == RolloutKind::Archived;
                         if filter(&parsed) {
-                            out.push(DiscoveredSession::Session(build_session(parsed)));
+                            out.push(discovered_session(parsed));
                         }
                     }
                 },
@@ -259,7 +259,7 @@ where
                 let enriched = kept_by_path
                     .remove(&rollout_path)
                     .expect("enriched session must map back to its pending slot");
-                DiscoveredSession::Session(build_session(enriched))
+                discovered_session(enriched)
             }
             Pending::Error { path, error } => DiscoveredSession::Error { path, error },
         })
@@ -312,10 +312,28 @@ fn parse_for_discovery(
 }
 
 /// A discovery outcome for one rollout file.
+// Success is the hot, common variant and carries the Session plus the
+// already-parsed user messages and parent id inline; `Error` is rare and
+// small. Boxing the success payload would add one heap allocation per
+// discovered session, and boxing `Error` would only widen the size gap, so
+// the inline layout is the cheaper correct choice. Outcomes live in a
+// `Vec` that is consumed once, so the extra bytes per element are irrelevant.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "hot success variant stays inline to avoid a per-session allocation"
+)]
 #[derive(Debug)]
 pub enum DiscoveredSession {
-    /// A successfully discovered, in-scope Session.
-    Session(Session),
+    /// A successfully discovered, in-scope Session, with the user messages
+    /// and parent thread id parsed from the same rollout read so callers
+    /// never need to reparse the file.
+    Session {
+        session: Session,
+        /// Extracted, deduplicated user messages in transcript order.
+        user_messages: Vec<UserMessage>,
+        /// `session_meta.payload.parent_thread_id`, if present.
+        parent_thread_id: Option<String>,
+    },
     /// A rollout file that could not be parsed; isolated, never aborts.
     Error {
         path: PathBuf,
@@ -327,7 +345,7 @@ impl DiscoveredSession {
     /// Returns the inner Session if this is the `Session` variant.
     pub fn session(&self) -> Option<&Session> {
         match self {
-            DiscoveredSession::Session(session) => Some(session),
+            DiscoveredSession::Session { session, .. } => Some(session),
             DiscoveredSession::Error { .. } => None,
         }
     }
@@ -335,6 +353,17 @@ impl DiscoveredSession {
     /// Iterator-like accessor over a list of outcomes yielding only Sessions.
     pub fn sessions_of(list: &[DiscoveredSession]) -> impl Iterator<Item = &Session> {
         list.iter().filter_map(DiscoveredSession::session)
+    }
+}
+
+/// Build the Session and carry the already-parsed user messages and parent
+/// thread id alongside it (no second read of the rollout).
+fn discovered_session(parsed: ParsedSession) -> DiscoveredSession {
+    let session = build_session(&parsed);
+    DiscoveredSession::Session {
+        session,
+        user_messages: parsed.user_messages,
+        parent_thread_id: parsed.parent_thread_id,
     }
 }
 
@@ -701,7 +730,7 @@ fn find_session_meta(records: &[Value]) -> Option<&Value> {
 /// before construction (see [`discover_with_filter`], which sets `archived`
 /// on the [`ParsedSession`] before filtering). This builder reads `parsed` as
 /// authoritative.
-pub fn build_session(parsed: ParsedSession) -> Session {
+pub fn build_session(parsed: &ParsedSession) -> Session {
     let effective_root = parsed.effective_root.clone().unwrap_or_default();
 
     let native_locator = native_locator(&parsed.id, &parsed.rollout_path);
@@ -720,7 +749,7 @@ pub fn build_session(parsed: ParsedSession) -> Session {
         None => WorkspaceEvidence::Unknown,
     };
 
-    let title = match (derive_title(&parsed), parsed.import.as_ref()) {
+    let title = match (derive_title(parsed), parsed.import.as_ref()) {
         (Some(title), Some(import)) => Some(format!("{title} [{}]", import.to_display())),
         (None, Some(import)) => Some(import.to_display()),
         (title, None) => title,

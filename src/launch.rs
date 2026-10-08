@@ -7,6 +7,7 @@ use std::{
     process::Command,
 };
 
+use crate::preview::text;
 use crate::session::{ActivityStatus, ResumeSpec, RiskStatus, Session, SupportStatus};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,6 +71,35 @@ impl FileIdentity {
             })
         }
     }
+
+    fn read_workspace(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "Workspace is not a directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Directory entries may change normally while the picker is open.
+            // Only device/inode identify the recorded directory itself.
+            Ok(Self {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                len: 0,
+                modified: None,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            })
+        }
+    }
 }
 
 impl LaunchEvidence {
@@ -87,7 +117,7 @@ impl LaunchEvidence {
             .to_path_buf();
         Ok(Self {
             transcript_identity: FileIdentity::read(&transcript)?,
-            workspace_identity: FileIdentity::read(&workspace)?,
+            workspace_identity: FileIdentity::read_workspace(&workspace)?,
             transcript,
             workspace,
         })
@@ -132,8 +162,8 @@ pub fn revalidate(
     if transcript != evidence.transcript_identity {
         return Err(RevalidationError::TranscriptChanged);
     }
-    let workspace =
-        FileIdentity::read(&spec.cwd).map_err(|_| RevalidationError::WorkspaceUnavailable)?;
+    let workspace = FileIdentity::read_workspace(&spec.cwd)
+        .map_err(|_| RevalidationError::WorkspaceUnavailable)?;
     if workspace != evidence.workspace_identity || spec.cwd != evidence.workspace {
         return Err(RevalidationError::WorkspaceChanged);
     }
@@ -169,14 +199,20 @@ pub fn confirm<R: BufRead, W: Write>(
     session: &Session,
     reasons: &[&str],
 ) -> io::Result<bool> {
+    // The workspace is recorded in untrusted transcript data (or is a
+    // filesystem name) and this prompt goes straight to the terminal.
+    let workspace = session.workspace.workspace().map_or_else(
+        || "<unknown>".into(),
+        |p| text::normalize(&p.display().to_string(), text::Mode::Normalized),
+    );
+    let agent = text::normalize(&session.key.agent.to_string_lossy(), text::Mode::Normalized);
+    let title = session.title.as_deref().map_or_else(String::new, |title| {
+        format!(" ({})", text::normalize(title, text::Mode::Normalized))
+    });
     writeln!(
         writer,
-        "Resume {:?} in {}?",
-        session.resumable_id,
-        session
-            .workspace
-            .workspace()
-            .map_or_else(|| "<unknown>".into(), |p| p.display().to_string())
+        "Resume {} session {:?}{} in {}?",
+        agent, session.resumable_id, title, workspace
     )?;
     if !reasons.is_empty() {
         writeln!(writer, "Risk: {}", reasons.join(", "))?;
@@ -529,6 +565,30 @@ mod tests {
             activity,
             risk,
         }
+    }
+    #[test]
+    fn confirmation_workspace_has_no_terminal_controls() {
+        let mut s = session(RiskStatus::Normal, ActivityStatus::Unknown);
+        s.workspace = WorkspaceEvidence::Recorded {
+            workspace: "/tmp/w\u{1b}]0;Injected\u{7}\nx".into(),
+            historical_git_identity: None,
+        };
+        s.key.agent = "pi\u{1b}[2J".into();
+        s.title = Some("task\u{1b}]0;Injected\u{7}\nname".into());
+        let mut out = Vec::new();
+        confirm(&mut io::Cursor::new(b"n\n"), &mut out, &s, &[]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let prompt = text.strip_suffix("Continue? [y/N] ").unwrap();
+        assert!(
+            !prompt
+                .trim_end_matches('\n')
+                .contains(|c: char| c.is_control()),
+            "{prompt:?}"
+        );
+        assert!(prompt.contains("/tmp/w"));
+        assert!(prompt.contains("Resume pi"));
+        assert!(prompt.contains("task"));
+        assert!(prompt.contains("name"));
     }
     #[cfg(unix)]
     struct MockRunner {
@@ -1140,11 +1200,65 @@ elif [ "$1" = rpc ]; then if [ "${{FAIL_REPORT:-0}}" = 1 ]; then exit 1; fi; pri
         );
         std::fs::write(&transcript, "one").unwrap();
         let evidence = LaunchEvidence::capture(&session).unwrap();
-        std::fs::remove_dir(&workspace).unwrap();
+        // Keep the original inode alive so allocation cannot reuse it.
+        std::fs::rename(&workspace, dir.path().join("original-workspace")).unwrap();
         std::fs::create_dir(&workspace).unwrap();
         assert_eq!(
             revalidate(&session, &spec, &evidence),
             Err(RevalidationError::WorkspaceChanged)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_entry_mutations_preserve_launch_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        let workspace = dir.path().join("workspace");
+        std::fs::write(&transcript, "one").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let directory = std::fs::File::open(&workspace).unwrap();
+        let before = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        directory
+            .set_times(std::fs::FileTimes::new().set_modified(before))
+            .unwrap();
+        let mut session = session(RiskStatus::Normal, ActivityStatus::Unknown);
+        session.key.native_locator = transcript.into_os_string();
+        session.workspace = WorkspaceEvidence::Recorded {
+            workspace: workspace.clone(),
+            historical_git_identity: None,
+        };
+        let evidence = LaunchEvidence::capture(&session).unwrap();
+        let spec = ResumeSpec {
+            program: std::env::current_exe().unwrap().into_os_string(),
+            argv: vec![],
+            cwd: workspace.clone(),
+            env: vec![],
+        };
+        let entry = workspace.join("new-file");
+        std::fs::write(&entry, "new entry").unwrap();
+        // Force different directory metadata without relying on clock resolution.
+        directory
+            .set_times(
+                std::fs::FileTimes::new().set_modified(before + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        assert_eq!(revalidate(&session, &spec, &evidence), Ok(()));
+        std::fs::remove_file(entry).unwrap();
+        assert_eq!(revalidate(&session, &spec, &evidence), Ok(()));
+        std::fs::rename(&workspace, dir.path().join("original-workspace")).unwrap();
+        assert_eq!(
+            revalidate(&session, &spec, &evidence),
+            Err(RevalidationError::WorkspaceUnavailable)
+        );
+        std::fs::write(&workspace, "not a directory").unwrap();
+        assert_eq!(
+            revalidate(&session, &spec, &evidence),
+            Err(RevalidationError::WorkspaceUnavailable)
+        );
+        assert_eq!(
+            LaunchEvidence::capture(&session).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
         );
     }
 

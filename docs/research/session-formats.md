@@ -62,7 +62,11 @@ Accept only a top-level UUID-named transcript whose embedded `sessionId` agrees.
 
 User content may be a string or typed blocks. Include human text; exclude `tool_result`. Titles may be present as `agent-name`/`agentName` and `ai-title`/`aiTitle`; explicit name should precede generated title, with first valid user input as fallback. This precedence needs an isolated behavioral fixture because the native picker precedence was not safely invoked.
 
-Nested `projects/<workspace-key>/<parent-session-uuid>/subagents/*.jsonl` files are relation-only child executions, not independently resumable Workspace Sessions. Parent association derives from the child's `parentSessionId` or `parent_session_id`; otherwise it falls back only when the workspace-key directory contains exactly one sibling top-level transcript whose filename stem is a UUID, and the resulting parent ID must match a discovered Session.
+Nested `projects/<workspace-key>/<parent-session-uuid>/subagents/agent-*.jsonl` files are relation-only child executions, not independently resumable Workspace Sessions. In this native layout the parent directory name is the authoritative parent association (`NativeLayout`); the transcript's `sessionId` is the parent's id and `agentId` is the child's. A `parentSessionId`/`parent_session_id` that disagrees with the directory, or disagreeing values within one child, drop the child with `claude_subagent_parent_conflict` rather than choosing one.
+
+The flat `projects/<workspace-key>/subagents/*.jsonl` layout is still read: association derives from the child's `parentSessionId` or `parent_session_id` (`NativeTranscript`); otherwise it falls back only when the workspace-key directory contains exactly one sibling top-level transcript, otherwise `claude_subagent_parent_ambiguous`. In both layouts the resulting parent ID must match a discovered Session.
+
+`--tree` only reads `<uuid>/subagents/` for already-discovered, in-scope parent transcripts, plus the flat `subagents/` of their workspace-key directories (the sole-sibling fallback still counts every top-level transcript in that directory). For OMP it only opens the `<stem>/` directory beside each already-discovered parent transcript. Every such directory is canonicalized and must be the expected path inside the effective root before it is listed; symlinked directories that escape the root or redirect elsewhere are skipped. Out-of-scope projects are never walked.
 
 ### Resume and activity
 

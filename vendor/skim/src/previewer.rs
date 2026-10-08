@@ -277,6 +277,12 @@ impl Previewer {
         let _ = self.tx_preview.send(preview_event);
     }
 
+    /// Scroll by half the preview height (positive = down), used by the modal card.
+    pub fn scroll_half_page(&mut self, direction: i32) {
+        let half = (self.height.load(Ordering::Relaxed) / 2).max(1) as i32;
+        self.act_scroll_down(direction * half);
+    }
+
     fn act_scroll_down(&mut self, diff: i32) {
         let vscroll_offset = self.vscroll_offset.load(Ordering::SeqCst);
         let new_offset = if diff > 0 {

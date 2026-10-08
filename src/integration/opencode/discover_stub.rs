@@ -25,6 +25,10 @@ pub struct ParsedSession {
     pub title: Option<String>,
     pub updated_at: Option<SystemTime>,
     pub parent_id: Option<String>,
+    /// Native model metadata, matching the feature-on session shape.
+    pub final_model: Option<String>,
+    /// Native token metadata, matching the feature-on session shape.
+    pub tokens: Option<u64>,
 }
 
 impl ParsedSession {

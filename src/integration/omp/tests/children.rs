@@ -1,4 +1,4 @@
-use crate::integration::omp::children::discover_children;
+use crate::integration::omp::children::discover_children_for_parents;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -39,7 +39,8 @@ fn discovers_child_under_parent_stem_directory() {
         ],
     );
 
-    let result = discover_children(&session_root);
+    let result =
+        discover_children_for_parents(&session_root, &[ws_dir.join("parent-session.jsonl")]);
     assert_eq!(result.children.len(), 1);
     assert!(result.diagnostics.is_empty());
 
@@ -70,7 +71,7 @@ fn child_never_becomes_a_session() {
     );
 
     // Child discovery finds it as ChildExecution (not Session)
-    let children = discover_children(&session_root);
+    let children = discover_children_for_parents(&session_root, &[ws_dir.join("my-session.jsonl")]);
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].child_id.as_deref(), Some("child-1"));
 
@@ -97,7 +98,7 @@ fn malformed_child_isolated_as_diagnostic() {
     fs::create_dir_all(child_path.parent().unwrap()).unwrap();
     fs::write(&child_path, "{{not json\ntruncated").unwrap();
 
-    let result = discover_children(&session_root);
+    let result = discover_children_for_parents(&session_root, &[ws_dir.join("p.jsonl")]);
     // Graceful: either diagnostic (IO parse error) or child with no activity, no panic
     if !result.children.is_empty() {
         assert!(
@@ -139,7 +140,7 @@ fn child_with_import_badge_preserves_structured_metadata() {
         })],
     );
 
-    let result = discover_children(&session_root);
+    let result = discover_children_for_parents(&session_root, &[ws_dir.join("imported.jsonl")]);
     assert_eq!(result.children.len(), 1);
     let child = &result.children[0];
     assert_eq!(child.child_id.as_deref(), Some("foreign-child-id"));
@@ -149,4 +150,63 @@ fn child_with_import_badge_preserves_structured_metadata() {
     assert_eq!(badge.source_kind, "claude");
     assert_eq!(badge.origin_id.as_deref(), Some("orig-uuid-1234"));
     assert_eq!(badge.origin_cwd, Some(PathBuf::from("/original/path")));
+}
+
+#[test]
+fn out_of_scope_parents_children_are_not_discovered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session_root = tmp.path().join("sessions");
+    let in_ws = session_root.join("-in-");
+    let out_ws = session_root.join("-out-");
+
+    for (ws, stem) in [(&in_ws, "a"), (&out_ws, "b")] {
+        write_jsonl(
+            &ws.join(format!("{stem}.jsonl")),
+            &[json!({"type": "session", "id": stem, "cwd": "/w"})],
+        );
+        write_jsonl(
+            &ws.join(stem).join("worker.jsonl"),
+            &[json!({"type": "session", "id": format!("child-{stem}"), "cwd": "/w"})],
+        );
+    }
+
+    let parent = in_ws.join("a.jsonl");
+    let result = discover_children_for_parents(&session_root, &[parent.clone(), parent]);
+    assert_eq!(
+        result.children.len(),
+        1,
+        "duplicates and out-of-scope ignored"
+    );
+    assert_eq!(result.children[0].child_id.as_deref(), Some("child-a"));
+
+    // A parent without a sibling stem directory yields nothing.
+    write_jsonl(
+        &in_ws.join("lonely.jsonl"),
+        &[json!({"type": "session", "id": "l", "cwd": "/w"})],
+    );
+    let none = discover_children_for_parents(&session_root, &[in_ws.join("lonely.jsonl")]);
+    assert!(none.children.is_empty() && none.diagnostics.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_child_directory_outside_root_is_not_listed() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let session_root = tmp.path().join("sessions");
+    let outside = tmp.path().join("outside");
+    let ws_dir = session_root.join("ws");
+    write_jsonl(
+        &ws_dir.join("p.jsonl"),
+        &[json!({"type": "session", "id": "p"})],
+    );
+    write_jsonl(
+        &outside.join("c.jsonl"),
+        &[json!({"type": "session", "id": "evil"})],
+    );
+    symlink(&outside, ws_dir.join("p")).unwrap();
+
+    let result = discover_children_for_parents(&session_root, &[ws_dir.join("p.jsonl")]);
+    assert!(result.children.is_empty());
+    assert!(result.diagnostics.is_empty());
 }

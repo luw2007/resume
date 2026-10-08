@@ -142,7 +142,8 @@ OPTIONS
 
     --tree
         Show recorded Session relationships as a tree. Without --list or
-        --json, opens an interactive tree view. With --list, prints the
+        --json, opens one unified cross-agent Tree view without agent tabs
+        or tab-switch shortcuts. With --list, prints the
         static tree to stdout. With --json, prints the relationship graph
         as JSON.
 
@@ -314,31 +315,41 @@ LIST OUTPUT
 PICKER KEYS
     Enter       Resume the highlighted Session (subject to risk confirmation).
     Esc         Cancel, exit 0.
-    Ctrl-C      Interrupt, exit 130.
+    Ctrl-C      Interrupt, exit 130 (also while the details card is open).
     Ctrl-O      Toggle the Preview pane (hidden by default).
     Ctrl-R      No-op by design; see the v0.1.0 specifics below.
-    Alt-P       Page to older Sessions in the current tab.
-    Alt-N       Page to newer Sessions in the current tab.
-    Alt-Left    Switch to the previous tab (wraps). Left, Shift-Tab do the
-                same.
-    Alt-Right   Switch to the next tab (wraps). Right, Tab do the same.
+    Space Space Open the read-only details card; q, Esc or Enter closes it
+                without resuming, PgUp/PgDn and Ctrl-U/Ctrl-D scroll it.
+    Left, Right Move the cursor inside the query (they do not switch tabs).
+    Ctrl-L      Re-read the candidate list in place. A background agent
+                (Codex) still scanning shows "scanning · ^L" in the header;
+                until a tab switch or Ctrl-L its Sessions are not searchable.
+                An Enter or double-click on a relation-only --tree row is
+                ignored. Tree mode keeps all agents in one view and disables
+                Tab, Shift-Tab and Alt-Left/Right rather than slicing ancestry.
+    PgUp, PgDn  Scroll the Session list. Alt-P/Alt-N do the same in place:
+                Alt-P toward older Sessions, Alt-N toward newer ones.
+    Alt-Left    Normal picker: previous tab (wraps). Shift-Tab does the same.
+    Alt-Right   Normal picker: next tab (wraps). Tab does the same.
+
+    The query text and Preview visibility are kept across tab switches.
+    The footer shows shortened hints that fit down to 60 columns, and the
+    query row shows matched/total, so a query with no match reads 0/N.
 
     The Picker opens once Pi, OMP, and Claude have all finished discovery
     (see PROGRESS below), with an `All` tab plus one tab per agent that
     has produced a Session so far. Each tab holds every Session for its
     scope, sorted oldest-first with the most recently updated Session
-    last, split into pages of 50. The Picker opens on a full newest page of
-    the `All` tab; when older Sessions remain, its header states their count
-    and `Alt-P`. Paging or switching tabs relaunches a small, fresh view over
-    the target tab/page; it never reorders or drops a Session already
-    discovered.
+    last, and the filter searches the whole tab at once. Switching tabs
+    relaunches a fresh view over the target tab; it never reorders or
+    drops a Session already discovered.
 
     When Codex is configured alongside at least one other agent, it
     discovers in the background instead of holding the Picker closed: its
     per-file scan cost is not bounded the way the other agents' directory-
     pruned scans are. A `(codex still scanning)` hint appears in the
     header while it runs; its Sessions merge in and a `codex` tab appears
-    on the next tab switch or page turn once it finishes. When Codex is
+    on the next tab switch once it finishes. When Codex is
     the only configured agent it is discovered synchronously like every
     other agent, since there is nothing else to show while waiting.
 

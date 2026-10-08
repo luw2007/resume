@@ -138,7 +138,7 @@ fn bench_codex_discovery(c: &mut Criterion) {
         assert_eq!(
             gated_sanity
                 .iter()
-                .filter(|o| matches!(o, codex::DiscoveredSession::Session(_)))
+                .filter(|o| matches!(o, codex::DiscoveredSession::Session { .. }))
                 .count(),
             0,
             "gated fixture sanity check: everything out of scope"

@@ -3207,10 +3207,9 @@ def _(fx, ctx):
     bound = set(re.findall(r"SkimKey::(\w+(?:\('\w'\))?)", nav))
     spec = (ctx["root"] / "docs/product-design.md").read_text()
     # Matched with a leading boundary so bare `Left` is not vouched for by
-    # `Alt+Left`, which is what makes the undocumented plain-arrow bindings
-    # invisible to a substring search.
+    # `Alt+Left`; bare Left/Right edit the query cursor and are not tab keys.
     names = {
-        "Alt('p')": r"Alt\+P", "Alt('n')": r"Alt\+N",
+        "Alt('p')": r"Alt\+P", "Alt('n')": r"Alt\+N", "Ctrl('l')": r"Ctrl\+L",
         "AltLeft": r"Alt\+Left", "AltRight": r"Alt\+Right",
         "Left": r"(?<![+\w])Left", "Right": r"(?<![+\w])Right",
         "Tab": r"(?<![-\w])Tab", "BackTab": r"Shift\+Tab",
@@ -3228,14 +3227,14 @@ def _(fx, ctx):
 # itself and the layout only exists once something paints it.
 
 ROW_HEADER = r"^\s*UPDATED\s+AGENT\[PROFILE\]\s+TITLE\s+BRANCH\s*$"
-PAGE = r"PAGE (\d+)/(\d+)"
+HEADER = r"\[[^\]\n]+ \d+\]"
 
 KEYS = {
     "ctrl-o": "\x0f", "ctrl-r": "\x12", "ctrl-c": "\x03", "esc": "\x1b",
     "enter": "\r", "tab": "\t", "shift-tab": "\x1b[Z",
     "left": "\x1b[D", "right": "\x1b[C",
     "alt-left": "\x1b[1;3D", "alt-right": "\x1b[1;3C",
-    "alt-p": "\x1bp", "alt-n": "\x1bn",
+    "alt-p": "\x1bp", "alt-n": "\x1bn", "ctrl-l": "\x0c",
 }
 
 
@@ -3243,7 +3242,7 @@ def _picker(fx, *args, cols=120, rows=30, env=None, stdin=None, timeout=25):
     """Open the picker and wait until it has painted its header line."""
     pty = Pty(fx, *args, cols=cols, rows=rows, env=env, stdin=stdin)
     try:
-        pty.expect(PAGE, timeout=timeout)
+        pty.expect(HEADER, timeout=timeout)
     except BaseException:
         pty.close()
         raise
@@ -3255,18 +3254,16 @@ def _key(pty, name, settle=1.0):
 
 
 def _status(pty):
-    """Tab names, active tab, page numbers and hint, read off the header."""
-    line = next((l for l in pty.lines if re.search(PAGE, l)), None)
+    """Tab names, active tab and its Session count, read off the header."""
+    line = next((l for l in pty.lines if re.search(HEADER, l)), None)
     if line is None:
         return None
-    m = re.search(PAGE, line)
-    tokens = re.sub(r"\([^)]*\)", "", line[:m.start()]).split()
+    tokens = re.findall(r"\[[^\]]+\]|\S+", re.sub(r"\([^)]*\)", "", line))
+    active = next((t for t in tokens if t.startswith("[")), None)
     return {
-        "tabs": [t.strip("[]") for t in tokens],
-        "tab": next((t.strip("[]") for t in tokens if t.startswith("[")), None),
-        "page": int(m.group(1)),
-        "pages": int(m.group(2)),
-        "hint": line[m.start():].strip(),
+        "tabs": [t.strip("[]").split()[0] for t in tokens],
+        "tab": active.strip("[]").split()[0] if active else None,
+        "total": int(active.strip("[]").split()[1]) if active else None,
         "line": line.strip(),
     }
 
@@ -3279,15 +3276,12 @@ def _rows(pty):
 
 
 def _count(pty):
-    """How many candidates the current view holds, from Skim's own counter.
-
-    Reading the rows is not the same thing: a page of 50 cannot fit on a
-    30-line terminal, and the counter is what the user sees for the total.
-    """
+    """The tab's total from Skim's `matched/total` counter on the query row."""
     for line in pty.lines:
-        m = re.match(r"^\s*(\d+)/(\d+)\b", line)
-        if m:
-            return int(m.group(2))
+        if line.lstrip().startswith(">"):
+            m = re.search(r"\b(\d+)/(\d+)\b", line)
+            if m:
+                return int(m.group(2))
     return None
 
 
@@ -3329,11 +3323,10 @@ def _stable(pty, read, timeout=20, hold=0.8, poll=0.2):
 def _await_tab(pty, name, timeout=30):
     """Wait for a background agent's tab, redrawing until it appears.
 
-    `run_tabbed_picker` re-reads the candidate snapshot once per navigation
+    `run_tabbed_picker` re-reads the candidate snapshot on every tab switch
     and never mid-render, so a tab that lands behind the user's back only
-    shows up on the next redraw. Right-then-Left is the cheapest redraw that
-    always works: Alt+N is only bound away from the newest page, and both
-    steps reset to page 0, which is where a freshly opened tab already is.
+    shows up on the next redraw. Tab-then-Shift-Tab is the cheapest redraw
+    that always works.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -3341,8 +3334,8 @@ def _await_tab(pty, name, timeout=30):
             return True
         if time.monotonic() > deadline:
             return False
-        _key(pty, "right", settle=0.4)
-        _key(pty, "left", settle=0.4)
+        _key(pty, "tab", settle=0.4)
+        _key(pty, "shift-tab", settle=0.4)
 
 
 def _pi_corpus(fx, count, *, prefix="bulk", base=1_700_000_000):
@@ -3436,7 +3429,7 @@ def _preview_column(fx, cols=120, settle=4.0):
 
     A right-hand pane starts beside the rows; a bottom pane starts at column
     0. That offset is the only way to read the layout back off the screen.
-    A visible pane squeezes the header, so `PAGE n/m` can be off the right
+    A visible pane squeezes the header, so the tab list can be off the right
     edge and cannot be the readiness signal here.
     """
     pty = Pty(fx, cols=cols)
@@ -3559,7 +3552,7 @@ def _(fx, ctx):
 
 @check("picker-tab-switch-keys", "picker-tabbed-view-tabs-and-pages")
 def _(fx, ctx):
-    """All six switch keys move one tab, wrapping at both ends."""
+    """All four switch keys move one tab, wrapping at both ends."""
     with _picker(fx) as pty:
         _await_tab(pty, "codex")
         tabs = _status(pty)["tabs"]
@@ -3571,7 +3564,7 @@ def _(fx, ctx):
             _key(pty, "shift-tab")
             backward.append(_status(pty)["tab"])
         singles = {}
-        for name in ("right", "alt-right", "left", "alt-left"):
+        for name in ("alt-right", "alt-left"):
             was = _status(pty)["tab"]
             _key(pty, name)
             singles[name] = (was, _status(pty)["tab"])
@@ -3582,64 +3575,53 @@ def _(fx, ctx):
     return expect(
         forward == tabs[1:] + tabs[:1]
         and backward == list(reversed(tabs))[:-1] + [tabs[0]]
-        and all(step(singles[k], +1) for k in ("right", "alt-right"))
-        and all(step(singles[k], -1) for k in ("left", "alt-left")),
+        and step(singles["alt-right"], +1) and step(singles["alt-left"], -1),
         f"tabs {tabs}; Tab cycle {forward}; Shift+Tab cycle {backward}; "
         f"single steps {singles}",
     )
 
 
-@check("picker-paging-keys", "picker-newest-page-is-full")
+@check("picker-paging-keys", "picker-full-tab-search")
 def _(fx, ctx):
-    """Page 1 always holds the newest PAGE_SIZE rows; the short page is the
-    oldest one, and both ends clamp rather than wrap."""
-    size = int(re.search(r"PAGE_SIZE: usize = (\d+)",
-                         (ctx["root"] / "src/picker.rs").read_text()).group(1))
-    _pi_corpus(fx, size + 3)
+    """Every Session of the tab is in the Skim list at once (53 > the old 50
+    page), and Alt+P/Alt+N page it in place without leaving the tab."""
+    _pi_corpus(fx, 53)
     with _picker(fx, "--agent", "pi") as pty:
-        newest = _stable(pty, lambda: _count(pty))
-        first = (_status(pty), newest)
-        _key(pty, "alt-n")  # already newest: a no-op redraw
-        clamped_newest = _status(pty)["page"]
+        total = _stable(pty, lambda: _count(pty))
         _key(pty, "alt-p")
-        oldest = _stable(pty, lambda: _count(pty))
-        second = (_status(pty), oldest)
-        _key(pty, "alt-p")  # already oldest
-        clamped_oldest = _status(pty)["page"]
+        after_older = (_status(pty), _count(pty))
+        _key(pty, "alt-n")
+        after_newer = (_status(pty), _count(pty))
+        alive = pty.alive()
         _key(pty, "ctrl-c")
         pty.wait()
     return expect(
-        first[0]["page"] == 1 and first[0]["pages"] == 2 and first[1] == size
-        and clamped_newest == 1 and second[0]["page"] == 2 and second[1] == 3
-        and clamped_oldest == 2,
-        f"page 1 held {first[1]} of {size} candidates ({first[0]['line']!r}); "
-        f"page 2 held {second[1]} of 3; Alt+N on the newest page gave page "
-        f"{clamped_newest}, Alt+P on the oldest gave page {clamped_oldest}",
+        total == 53 and alive and after_older[0]["total"] == 53
+        and after_newer[0]["total"] == 53 and after_older[1] == 53,
+        f"Skim counter total {total}; after Alt+P {after_older}; after Alt+N "
+        f"{after_newer}",
     )
 
 
-@check("picker-page-clamped-on-shrink")
+@check("picker-query-and-preview-kept-on-tab-switch")
 def _(fx, ctx):
-    """Paging deep into a large tab and then switching to a single-page tab
-    must land on that tab's last page, not past its end."""
-    size = int(re.search(r"PAGE_SIZE: usize = (\d+)",
-                         (ctx["root"] / "src/picker.rs").read_text()).group(1))
-    _pi_corpus(fx, size + 3)
+    """Tab switches keep the typed query and the side Preview visibility."""
     with _picker(fx) as pty:
-        _key(pty, "alt-p")
-        deep = _status(pty)
-        while _status(pty)["tab"] != "claude":
-            _key(pty, "tab")
-        small = _status(pty)
-        rows = _rows(pty)
+        pty.send("title", settle=1.0)
+        _key(pty, "ctrl-o")
+        _key(pty, "tab")
+        lines = pty.lines
         _key(pty, "ctrl-c")
         pty.wait()
+    text = "\n".join(lines)
+    has_query = any(l.lstrip().startswith("> title") for l in lines)
     return expect(
-        deep["page"] == 2 and small["pages"] == 1 and small["page"] == 1 and rows,
-        f"left the All tab on page {deep['page']}/{deep['pages']}, arrived at "
-        f"{small['tab']} page {small['page']}/{small['pages']} showing "
-        f"{len(rows)} rows",
+        has_query and "# normalized" in text,
+        f"query kept: {has_query}; preview kept: {'# normalized' in text}",
     )
+
+
+
 
 
 @check("picker-rank-ordering")
@@ -3685,8 +3667,8 @@ def _(fx, ctx):
         pty.wait()
         after = pty.screen
     return expect(
-        "still scanning" in opening["line"] and "codex" not in opening["tabs"]
-        and "codex" in landed["tabs"] and "still scanning" not in landed["line"]
+        "scanning" in opening["line"] and "codex" not in opening["tabs"]
+        and "codex" in landed["tabs"] and "scanning" not in landed["line"]
         and merged > 0
         and "codex scanned" not in during and "codex scanned" in after,
         f"header on open {opening['line']!r}; after Codex landed "
@@ -3706,7 +3688,7 @@ def _(fx, ctx):
         pty.wait()
     return expect(
         "waiting for codex" not in opened and status["tabs"] == ["All", "codex"]
-        and "still scanning" not in status["line"],
+        and "scanning" not in status["line"],
         f"screen {opened.strip()[:200]!r}; header {status['line']!r}",
     )
 

@@ -9,6 +9,7 @@ use super::format::ImportBadge;
 use crate::preview::jsonl::{self, Bounds};
 use crate::session::Diagnostic;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// A discovered OMP child execution record. Never becomes a [`crate::session::Session`].
@@ -37,70 +38,40 @@ pub struct ChildDiscovery {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Discover child executions under the given session root. For each `.jsonl`
-/// file, checks for a sibling directory named `<stem>/` containing child
-/// transcripts.
-pub fn discover_children(session_root: &Path) -> ChildDiscovery {
+/// Discover child executions for the given parent transcripts only. Each
+/// parent `<dir>/<stem>.jsonl` owns the sibling directory `<dir>/<stem>/`;
+/// nothing else under `session_root` is visited. Parents are deduplicated and
+/// processed in sorted order, and children within a directory are sorted, so
+/// output is deterministic. Reads stay confined to `session_root`.
+pub fn discover_children_for_parents(session_root: &Path, parents: &[PathBuf]) -> ChildDiscovery {
     let mut result = ChildDiscovery::default();
     let confined_root = session_root
         .canonicalize()
         .unwrap_or_else(|_| session_root.to_path_buf());
-    discover_children_recursive(session_root, &confined_root, &mut result);
-    result
-}
-
-fn discover_children_recursive(dir: &Path, confined_root: &Path, result: &mut ChildDiscovery) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let mut parent_files: Vec<PathBuf> = Vec::new();
-    let mut child_dirs: Vec<PathBuf> = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+    let parents: BTreeSet<&PathBuf> = parents.iter().collect();
+    for parent_path in parents {
+        let (Some(dir), Some(stem)) = (parent_path.parent(), parent_path.file_stem()) else {
+            continue;
         };
-        if ft.is_dir() {
-            child_dirs.push(path);
-        } else if (ft.is_file() || ft.is_symlink())
-            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        let Ok(canonical_dir) = dir.canonicalize() else {
+            continue;
+        };
+        let child_dir = dir.join(stem);
+        // Both the parent's directory and the child directory must resolve
+        // inside the root, and the child directory must be exactly the
+        // sibling `<stem>/` (not a symlink redirected elsewhere).
+        let Ok(canonical_child) = child_dir.canonicalize() else {
+            continue;
+        };
+        if !canonical_dir.starts_with(&confined_root)
+            || canonical_child != canonical_dir.join(stem)
+            || !canonical_child.is_dir()
         {
-            parent_files.push(path);
-        }
-    }
-
-    // For each parent .jsonl, check if there's a matching stem directory
-    for parent_path in &parent_files {
-        let stem = match parent_path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let child_dir = dir.join(&stem);
-        if !child_dir.is_dir() {
             continue;
         }
-        // Found a child directory — parse its contents
-        parse_child_dir(&child_dir, parent_path, confined_root, result);
+        parse_child_dir(&child_dir, parent_path, &confined_root, &mut result);
     }
-
-    // Recurse into grouped workspace directories (those starting with '-')
-    // to find parent files deeper in the tree, but skip child directories
-    // we already processed above.
-    for d in &child_dirs {
-        let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // Only recurse into workspace-encoded dirs (start with '-') or
-        // structural dirs, not into child dirs we already handled.
-        let is_child_of_parent = parent_files
-            .iter()
-            .any(|p| p.file_stem().and_then(|s| s.to_str()) == Some(name));
-        if !is_child_of_parent {
-            discover_children_recursive(d, confined_root, result);
-        }
-    }
+    result
 }
 
 /// Parse all `.jsonl` files in a child directory.
@@ -114,7 +85,9 @@ fn parse_child_dir(
         Ok(e) => e,
         Err(_) => return,
     };
-    for entry in entries.flatten() {
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;

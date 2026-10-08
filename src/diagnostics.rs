@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::preview::text;
+
 /// A redacted, category-based diagnostic. Safe to print in non-verbose mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RedactedDiagnostic {
@@ -124,7 +126,9 @@ impl DiagnosticCollector {
 /// This replaces `$HOME` with `$HOME` and strips query-string-like suffixes.
 /// It does not reveal message bodies or remote URLs embedded in paths.
 pub fn redact_path(path: &Path) -> String {
-    let display = path.display().to_string();
+    // Paths come from the filesystem and may carry terminal controls or
+    // newlines; this string is printed to stderr.
+    let display = text::normalize(&path.display().to_string(), text::Mode::Normalized);
     redact_text(&display)
 }
 
@@ -132,8 +136,11 @@ pub fn redact_path(path: &Path) -> String {
 /// - URLs (http/https/ssh/git/file schemes)
 /// - Message bodies (heuristic: lines containing "body=" or "message=")
 /// - Base64-like blobs (long alphanumeric+/= sequences)
-pub fn redact_text(text: &str) -> String {
-    let mut result = redact_message_bodies(text);
+pub fn redact_text(input: &str) -> String {
+    // Strip terminal controls first so an escape sequence cannot split or hide
+    // text from the redactors below. Newlines are kept (line-based redaction),
+    // but a bare CR could overwrite the terminal line.
+    let mut result = redact_message_bodies(&text::strip_terminal_controls(input).replace('\r', ""));
 
     // Redact URLs with known schemes.
     for scheme in [

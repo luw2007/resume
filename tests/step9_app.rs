@@ -756,6 +756,33 @@ fn json_errors_aggregate_counts_match_stderr_across_multiple_categories() {
 }
 
 #[test]
+fn tree_json_errors_aggregate_like_plain_json() {
+    // Same fixture as the plain --json aggregation test, through --tree --json.
+    let (tmp, ws) = fixtures();
+    let claude_dir = tmp.path().join(".claude/projects/ws");
+    for uuid in [
+        "22222222-2222-2222-2222-222222222222",
+        "33333333-3333-3333-3333-333333333333",
+    ] {
+        line(
+            &claude_dir.join(format!("{uuid}.jsonl")),
+            serde_json::json!({"type":"user","message":{"content":"no id, no cwd"}}),
+        );
+    }
+    let output = run(tmp.path(), &ws, &["--tree", "--json", "--agent", "claude"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries: Vec<_> = value["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["category"] == "claude_no_session_id")
+        .collect();
+    assert_eq!(entries.len(), 1, "{value}");
+    assert_eq!(entries[0]["count"], 2);
+}
+
+#[test]
 fn missing_base_directory_is_a_usage_error() {
     // scope-missing-base-usage-error: a nonexistent positional directory
     // argument must fail canonicalization and exit 2 with a clear message,

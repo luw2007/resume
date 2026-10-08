@@ -165,6 +165,20 @@ pub fn run(cli: Cli) -> i32 {
             return EXIT_USAGE;
         }
     };
+    // Keep first-run setup above; preflight before process probes or discovery.
+    if !cli.list
+        && !cli.json
+        && !options.agents.is_empty()
+        && let Err(reason) = crate::picker::preflight()
+    {
+        eprintln!("resume: {reason}");
+        eprintln!("resume: use --list or --json in this environment");
+        return EXIT_USAGE;
+    }
+    if !cli.list && !cli.json && options.agents.is_empty() {
+        println!("{}", empty_list_message(&[]).unwrap());
+        return EXIT_OK;
+    }
     let discovery_ctx = Arc::new(DiscoveryContext::probe(&options));
 
     if cli.list || cli.json {
@@ -178,7 +192,11 @@ pub fn run(cli: Cli) -> i32 {
             }
         } else {
             if cli.tree {
-                print_tree_list(&records);
+                if !records.is_empty()
+                    || discovery_exit(&records, &state, options.agents.is_empty()) == EXIT_OK
+                {
+                    print_tree_list(&records);
+                }
             } else {
                 print_list(&records);
             }
@@ -187,6 +205,9 @@ pub fn run(cli: Cli) -> i32 {
         return discovery_exit(&records, &state, options.agents.is_empty());
     }
 
+    if cli.tree {
+        return run_interactive_tree(&options, scope, discovery_ctx);
+    }
     run_interactive(&options, scope, discovery_ctx)
 }
 
@@ -317,8 +338,8 @@ fn run_interactive(
     // agent is configured, Codex discovers in the background instead of
     // holding the picker closed: the picker opens on the other agents'
     // results, and Codex's Sessions merge in on the next tab switch or
-    // page turn once its scan finishes (`picker::run_tabbed_picker`
-    // re-reads the shared candidate list on every navigation). When Codex
+    // Ctrl-L refresh (`picker::run_tabbed_picker` re-reads the shared
+    // candidate list on those actions). When Codex
     // is the *only* configured agent there is nothing else to show while
     // waiting, so it stays synchronous like every other agent.
     let codex_async = options.agents.iter().any(|a| a == codex::AGENT) && options.agents.len() > 1;
@@ -401,7 +422,7 @@ fn run_interactive(
 
     let background = codex_async.then(|| crate::picker::BackgroundAgent {
         label: codex::AGENT.to_string(),
-        pending: codex_pending,
+        pending: codex_pending.clone(),
     });
     let outcome = crate::picker::run_tabbed_picker(
         candidates,
@@ -420,15 +441,11 @@ fn run_interactive(
     }
     print_diagnostics(&state, options.verbose);
     match outcome {
-        PickerOutcome::Cancelled => {
-            if state.sessions.load(Ordering::SeqCst) == 0
-                && state.successful_integrations.load(Ordering::SeqCst) == 0
-            {
-                EXIT_ERROR
-            } else {
-                EXIT_OK
-            }
-        }
+        PickerOutcome::Cancelled => completed_empty_exit(
+            &state,
+            options.agents.is_empty(),
+            codex_pending.load(Ordering::SeqCst),
+        ),
         PickerOutcome::Interrupted => EXIT_INTERRUPT,
         PickerOutcome::PreflightFailed(reason) => {
             eprintln!("resume: {reason}");
@@ -492,9 +509,9 @@ fn merge_records(
             map.insert(key, record);
         }
     }
-    let mut candidates = candidates.lock().unwrap();
-    candidates.extend(new_candidates);
-    candidates.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
+    // Append-only: `picker::run_tabbed_picker` reads only the unseen suffix on
+    // each navigation and does its own rank ordering.
+    candidates.lock().unwrap().extend(new_candidates);
 }
 
 fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {
@@ -517,10 +534,26 @@ fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {
     }
     let reasons = launch::risk_reasons(&record.session, options.confirm_always);
     if launch::should_confirm(&record.session, options.confirm_always, options.no_confirm) {
-        let stdin = io::stdin();
-        let mut input = stdin.lock();
-        let mut stderr = io::stderr();
-        match launch::confirm(&mut input, &mut stderr, &record.session, &reasons) {
+        let tty = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
+            Ok(tty) => tty,
+            Err(error) => {
+                eprintln!("resume: unable to open controlling terminal for confirmation: {error}");
+                return EXIT_ERROR;
+            }
+        };
+        let mut output = match tty.try_clone() {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("resume: confirmation failed: {error}");
+                return EXIT_ERROR;
+            }
+        };
+        let mut input = io::BufReader::new(tty);
+        match launch::confirm(&mut input, &mut output, &record.session, &reasons) {
             Ok(true) => {}
             Ok(false) => return EXIT_OK,
             Err(error) => {
@@ -532,7 +565,10 @@ fn resume_selected(record: CandidateRecord, options: &EffectiveOptions) -> i32 {
     #[cfg(unix)]
     let error = match launch::handoff_then_exec(spec) {
         launch::HandoffThenExecError::Handoff(error) => {
-            eprintln!("resume: cmux workspace handoff failed: {error}");
+            eprintln!(
+                "resume: cmux workspace handoff failed: {}",
+                text::normalize(&error.to_string(), text::Mode::Normalized)
+            );
             return EXIT_ERROR;
         }
         launch::HandoffThenExecError::Exec(error) => error,
@@ -760,30 +796,23 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
     let records = outcomes
         .into_iter()
         .filter_map(|outcome| match outcome {
-            codex::DiscoveredSession::Session(mut session) => {
+            codex::DiscoveredSession::Session {
+                mut session,
+                user_messages,
+                parent_thread_id,
+            } => {
                 session.risk =
                     crate::scope::broad_workspace_risk(&session.workspace, home().as_deref());
                 normalize_availability(&mut session);
                 if let Some(rollout) = codex_transcript_path(&session) {
                     session.activity = codex::activity::activity_status(&rollout, Some(activity));
                 }
-                let parsed = codex_transcript_path(&session)
-                    .and_then(|path| {
-                        codex::parse_rollout_file(&path, &root, &Bounds::default()).ok()
-                    })
-                    .flatten();
-                let user_inputs = parsed
-                    .as_ref()
-                    .map(|parsed| parsed.user_messages.clone())
-                    .unwrap_or_default();
-                let relations = parsed
-                    .and_then(|parsed| {
-                        parsed.parent_thread_id.map(|parent_id| NativeRelation {
-                            parent_agent: codex::AGENT.into(),
-                            parent_id,
-                            kind: RelationKind::Spawned,
-                            source: EvidenceSource::NativeTranscript,
-                        })
+                let relations = parent_thread_id
+                    .map(|parent_id| NativeRelation {
+                        parent_agent: codex::AGENT.into(),
+                        parent_id,
+                        kind: RelationKind::Spawned,
+                        source: EvidenceSource::NativeTranscript,
                     })
                     .into_iter()
                     .collect();
@@ -792,7 +821,7 @@ fn discover_codex(scope: &Scope, activity: &codex::activity::ActivitySnapshot) -
                     .and_then(|path| LaunchEvidence::capture_with_transcript(&session, path).ok());
                 Some(CandidateRecord {
                     message_preview: None,
-                    user_inputs,
+                    user_inputs: user_messages,
                     session,
                     spec: Some(spec),
                     evidence,
@@ -1151,6 +1180,7 @@ fn picker_candidate(
         preview,
         details: Some(details),
         rank: crate::session::sort_rank(session),
+        selectable: true,
         agent: text::normalize(&session.key.agent.to_string_lossy(), text::Mode::Normalized),
     }
 }
@@ -1465,7 +1495,17 @@ fn add_execution_children(graph: &mut RelationGraph, records: &[CandidateRecord]
                 )
             })
             .collect();
-        for child in claude::children::discover_children(&root.join("projects")).children {
+        let parents: Vec<PathBuf> = records
+            .iter()
+            .filter(|record| {
+                record.session.key.agent == OsStr::new(claude::AGENT)
+                    && record.session.key.effective_root == root
+            })
+            .map(|record| PathBuf::from(&record.session.key.native_locator))
+            .collect();
+        let children =
+            claude::children::discover_children_for_parents(&root.join("projects"), &parents);
+        for child in children.children {
             let Some(parent_key) = by_id.get(&child.parent_id) else {
                 continue;
             };
@@ -1478,7 +1518,7 @@ fn add_execution_children(graph: &mut RelationGraph, records: &[CandidateRecord]
                 parent: session_nodes[parent_key].clone(),
                 child: child_key,
                 kind: RelationKind::Spawned,
-                source: EvidenceSource::NativeTranscript,
+                source: child.source,
             });
         }
     }
@@ -1502,7 +1542,8 @@ fn add_execution_children(graph: &mut RelationGraph, records: &[CandidateRecord]
                 )
             })
             .collect();
-        for child in omp::children::discover_children(&root).children {
+        let parents: Vec<PathBuf> = by_locator.keys().map(PathBuf::from).collect();
+        for child in omp::children::discover_children_for_parents(&root, &parents).children {
             let Some(parent_key) = by_locator.get(child.parent_locator.as_os_str()) else {
                 continue;
             };
@@ -1522,6 +1563,12 @@ fn add_execution_children(graph: &mut RelationGraph, records: &[CandidateRecord]
 }
 
 fn node_label(key: &NodeKey, records: &[CandidateRecord]) -> String {
+    // Titles and native locators are untrusted transcript/filesystem data and
+    // this label is written straight to the terminal by `--tree --list`.
+    text::normalize(&raw_node_label(key, records), text::Mode::Normalized)
+}
+
+fn raw_node_label(key: &NodeKey, records: &[CandidateRecord]) -> String {
     match key {
         NodeKey::Session(key) => records
             .iter()
@@ -1604,11 +1651,183 @@ fn write_tree_node(
 }
 
 fn print_tree_list(records: &[CandidateRecord]) {
+    if let Some(message) = empty_list_message(records) {
+        println!("{message}");
+        return;
+    }
     let projection = tree::project(&relation_graph(records));
     let mut stdout = io::stdout().lock();
     for root in &projection.roots {
         if write_tree_node(&mut stdout, root, records, "", true, true).is_err() {
             return;
+        }
+    }
+}
+
+/// Flatten the deterministic tree projection into picker candidates. Every
+/// projection node (including repeated-node references) gets one row in DFS
+/// order. The picker lists the highest rank first, so ranks descend with the
+/// DFS index (root row has the highest rank). `map` stores an index into
+/// `records` per Session row (no record duplication); relation-only rows have
+/// no entry and are `selectable: false`.
+fn tree_candidates(
+    records: &[CandidateRecord],
+    next_key: &AtomicU64,
+    map: &mut HashMap<CandidateKey, usize>,
+) -> Vec<PickerCandidate> {
+    let projection = tree::project(&relation_graph(records));
+    let by_key: BTreeMap<&crate::session::SessionKey, usize> = records
+        .iter()
+        .enumerate()
+        .map(|(index, r)| (&r.session.key, index))
+        .collect();
+    let mut out = Vec::new();
+    for root in &projection.roots {
+        push_tree_candidates(
+            root, records, &by_key, next_key, map, &mut out, "", true, true,
+        );
+    }
+    let total = out.len() as u64;
+    for (index, candidate) in out.iter_mut().enumerate() {
+        candidate.rank = (
+            0,
+            Some(std::time::UNIX_EPOCH + Duration::from_secs(total - index as u64)),
+        );
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_tree_candidates(
+    node: &TreeNode,
+    records: &[CandidateRecord],
+    by_key: &BTreeMap<&crate::session::SessionKey, usize>,
+    next_key: &AtomicU64,
+    map: &mut HashMap<CandidateKey, usize>,
+    out: &mut Vec<PickerCandidate>,
+    prefix: &str,
+    last: bool,
+    root: bool,
+) {
+    let (key, children, reference) = match node {
+        TreeNode::Node { key, children } => (key, Some(children), false),
+        TreeNode::Reference(key) => (key, None, true),
+    };
+    let picker_key = CandidateKey(next_key.fetch_add(1, Ordering::SeqCst));
+    let head = if root {
+        String::new()
+    } else {
+        format!("{prefix}{}─ ", if last { "└" } else { "├" })
+    };
+    let child_prefix = if root {
+        String::new()
+    } else {
+        format!("{prefix}{}  ", if last { " " } else { "│" })
+    };
+    let cont = format!("{child_prefix}  ");
+    let mark = if reference { " ↩" } else { "" };
+    let mut candidate = match key {
+        NodeKey::Session(session_key) => {
+            let index = by_key[session_key];
+            let record = &records[index];
+            let candidate = picker_candidate(
+                picker_key.clone(),
+                &record.session,
+                record.message_preview.as_deref(),
+                session_file_size(record),
+                &record.user_inputs,
+            );
+            map.insert(picker_key.clone(), index);
+            candidate
+        }
+        NodeKey::Related(related) => {
+            let label = node_label(key, records);
+            let what = match related.kind {
+                RelatedNodeKind::AgentExecution => "agent execution",
+                RelatedNodeKind::MissingSession => "missing parent Session",
+            };
+            let agent = text::normalize(&related.agent.to_string_lossy(), text::Mode::Normalized);
+            PickerCandidate {
+                key: picker_key.clone(),
+                display: format!("{label}\n{what}  ·  relation only, not resumable"),
+                search_text: format!("{label} {what}"),
+                preview: format!("RELATION ONLY\n{label}\n{what}\nNot resumable."),
+                details: None,
+                rank: (0, None),
+                selectable: false,
+                agent,
+            }
+        }
+    };
+    let mut lines = candidate.display.split('\n');
+    let mut display = format!("{head}{}{mark}", lines.next().unwrap_or_default());
+    for line in lines {
+        display.push('\n');
+        display.push_str(&cont);
+        display.push_str(line);
+    }
+    candidate.display = display;
+    out.push(candidate);
+    if let Some(children) = children {
+        for (index, branch) in children.iter().enumerate() {
+            push_tree_candidates(
+                &branch.node,
+                records,
+                by_key,
+                next_key,
+                map,
+                out,
+                &child_prefix,
+                index + 1 == children.len(),
+                false,
+            );
+        }
+    }
+}
+
+/// Interactive `--tree`: discover everything first (the graph needs the full
+/// record set, including a Codex scan), then browse the relationship tree.
+/// Relation-only rows are `selectable: false`; the picker itself refuses them
+/// in place, so only Session rows ever reach `Selected`.
+fn run_interactive_tree(
+    options: &EffectiveOptions,
+    scope: Arc<Scope>,
+    ctx: Arc<DiscoveryContext>,
+) -> i32 {
+    let (mut records, state) = discover_all(options, scope, ctx);
+    if records.is_empty() {
+        print_diagnostics(&state, options.verbose);
+        return completed_empty_exit(&state, options.agents.is_empty(), false);
+    }
+    let next_key = AtomicU64::new(1);
+    let mut map = HashMap::new();
+    let candidates = Arc::new(Mutex::new(tree_candidates(&records, &next_key, &mut map)));
+    let outcome =
+        crate::picker::run_tree_picker(candidates, options.preview, options.preview_position, None);
+    match outcome {
+        PickerOutcome::Selected(key) => {
+            let Some(index) = map.get(&key).copied() else {
+                eprintln!("resume: selected row is relation-only and cannot be resumed");
+                return EXIT_ERROR;
+            };
+            print_diagnostics(&state, options.verbose);
+            resume_selected(records.swap_remove(index), options)
+        }
+        PickerOutcome::Cancelled => {
+            print_diagnostics(&state, options.verbose);
+            discovery_exit(&records, &state, options.agents.is_empty())
+        }
+        PickerOutcome::Interrupted => EXIT_INTERRUPT,
+        PickerOutcome::PreflightFailed(reason) => {
+            eprintln!("resume: {reason}");
+            if reason.contains("no controlling terminal") {
+                eprintln!("resume: use --list or --json in this environment");
+            }
+            EXIT_USAGE
+        }
+        PickerOutcome::InternalError(reason) => {
+            eprintln!("resume: {reason}");
+            EXIT_ERROR
         }
     }
 }
@@ -1642,17 +1861,40 @@ struct JsonRelated {
     agent: String,
     kind: String,
 }
+/// Injective byte-level encoding: ASCII alphanumerics and `-_./@+=,` stay
+/// readable; every other byte (including `%`, `:` and non-UTF-8 bytes) becomes
+/// `%XX`, so distinct `OsStr` values never share an ID.
+fn enc_id(part: &std::ffi::OsStr) -> String {
+    let mut out = String::with_capacity(part.len());
+    for &byte in part.as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_./@+=,".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+/// Stable, unambiguous node identity: every `SessionKey` component (agent,
+/// effective root, profile, locator) participates, with `:` and `%` escaped so
+/// components cannot run together. Related nodes include their kind.
 fn node_id(key: &NodeKey) -> String {
     match key {
         NodeKey::Session(k) => format!(
-            "session:{}:{}",
-            k.agent.to_string_lossy(),
-            k.native_locator.to_string_lossy()
+            "session:{}:{}:{}:{}",
+            enc_id(&k.agent),
+            enc_id(k.effective_root.as_os_str()),
+            k.profile
+                .as_deref()
+                .map(|p| format!("p{}", enc_id(p)))
+                .unwrap_or_default(),
+            enc_id(&k.native_locator)
         ),
         NodeKey::Related(k) => format!(
-            "related:{}:{}",
-            k.agent.to_string_lossy(),
-            k.native_locator.to_string_lossy()
+            "related:{:?}:{}:{}",
+            k.kind,
+            enc_id(&k.agent),
+            enc_id(&k.native_locator)
         ),
     }
 }
@@ -1679,6 +1921,7 @@ fn print_tree_json(records: &[CandidateRecord], state: &DiscoveryState) {
         })
         .collect();
     let errors_guard = state.errors.lock().unwrap();
+    let aggregated = aggregate_diagnostics(&errors_guard, false);
     let output = TreeJsonOutput {
         schema_version: 1,
         sessions: records
@@ -1690,7 +1933,7 @@ fn print_tree_json(records: &[CandidateRecord], state: &DiscoveryState) {
             .collect(),
         related,
         relations,
-        errors: errors_guard
+        errors: aggregated
             .iter()
             .map(|e| JsonError {
                 category: e.category,
@@ -1828,6 +2071,17 @@ fn discovery_exit(
     }
 }
 
+fn completed_empty_exit(state: &DiscoveryState, no_agents_selected: bool, pending: bool) -> i32 {
+    if pending || state.sessions.load(Ordering::SeqCst) != 0 {
+        return EXIT_OK;
+    }
+    let exit = discovery_exit(&[], state, no_agents_selected);
+    if exit == EXIT_OK {
+        println!("{}", empty_list_message(&[]).unwrap());
+    }
+    exit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1836,6 +2090,19 @@ mod tests {
     #[test]
     fn empty_list_has_human_readable_fallback() {
         assert_eq!(empty_list_message(&[]), Some("No Sessions found in Scope."));
+    }
+
+    #[test]
+    fn empty_interactive_discovery_requires_completion_and_success() {
+        let state = DiscoveryState::default();
+        assert_eq!(completed_empty_exit(&state, false, true), EXIT_OK);
+        assert_eq!(completed_empty_exit(&state, false, false), EXIT_ERROR);
+        assert_eq!(completed_empty_exit(&state, true, false), EXIT_OK);
+        state.successful_integrations.store(1, Ordering::SeqCst);
+        assert_eq!(completed_empty_exit(&state, false, false), EXIT_OK);
+        state.sessions.store(1, Ordering::SeqCst);
+        state.successful_integrations.store(0, Ordering::SeqCst);
+        assert_eq!(completed_empty_exit(&state, false, false), EXIT_OK);
     }
 
     /// session-status-supported-active: `--json`'s `activity` is documented to
@@ -2140,6 +2407,29 @@ mod tests {
         assert_eq!(resolve_branch_label(root.path()), "safeevil");
     }
 
+    pub(super) fn session_with(support: SupportStatus) -> Session {
+        Session {
+            key: crate::session::SessionKey {
+                agent: "codex".into(),
+                effective_root: "/r".into(),
+                profile: None,
+                native_locator: "/t".into(),
+            },
+            resumable_id: "id".into(),
+            title: Some("title".into()),
+            final_model: None,
+            tokens: None,
+            updated_at: None,
+            workspace: WorkspaceEvidence::Recorded {
+                workspace: "/workspace".into(),
+                historical_git_identity: None,
+            },
+            support,
+            activity: ActivityStatus::Unknown,
+            risk: RiskStatus::Normal,
+        }
+    }
+
     #[test]
     fn resume_selected_reports_e3003_for_every_non_supported_status() {
         // errors-unified-catalog-e3003-unsupported-resume: no test previously
@@ -2148,28 +2438,6 @@ mod tests {
         // non-Supported statuses -- and a Supported session missing its
         // ResumeSpec/LaunchEvidence -- actually reaches the E3003 branch
         // instead of silently falling through to `launch::exec`.
-        fn session_with(support: SupportStatus) -> Session {
-            Session {
-                key: crate::session::SessionKey {
-                    agent: "codex".into(),
-                    effective_root: "/r".into(),
-                    profile: None,
-                    native_locator: "/t".into(),
-                },
-                resumable_id: "id".into(),
-                title: Some("title".into()),
-                final_model: None,
-                tokens: None,
-                updated_at: None,
-                workspace: WorkspaceEvidence::Recorded {
-                    workspace: "/workspace".into(),
-                    historical_git_identity: None,
-                },
-                support,
-                activity: ActivityStatus::Unknown,
-                risk: RiskStatus::Normal,
-            }
-        }
         let options = effective_options(
             &default_cli(),
             Config::default(),
@@ -2320,6 +2588,157 @@ mod tests {
         assert!(!rendered.contains("github.com"));
         assert!(rendered.contains("[redacted-url]"));
         assert!(rendered.contains("[redacted-remote]"));
+    }
+
+    #[test]
+    fn verbose_diagnostic_output_has_no_terminal_controls() {
+        let diagnostic = Diagnostic {
+            category: "io_error",
+            count: 1,
+            verbose_path: Some(PathBuf::from("/s/bad\u{1b}]0;Injected\u{7}\r\nname.jsonl")),
+            verbose_chain: Some("fail\u{1b}[2Jed\u{9b}31m\r".into()),
+        };
+
+        let rendered = render_diagnostic(&diagnostic, true);
+        assert!(!rendered.contains(|c: char| c.is_control()), "{rendered:?}");
+        assert!(rendered.contains("name.jsonl"));
+    }
+
+    #[test]
+    fn tree_list_labels_have_no_terminal_controls() {
+        let mut session = session_with(SupportStatus::Supported);
+        session.title = Some("demo\u{1b}]0;Injected title\u{7}\nnext".into());
+        let key = session.key.clone();
+        let record = CandidateRecord {
+            message_preview: None,
+            user_inputs: Vec::new(),
+            session,
+            spec: None,
+            evidence: None,
+            relations: Vec::new(),
+        };
+
+        let label = node_label(&NodeKey::Session(key), &[record]);
+        assert!(!label.contains(|c: char| c.is_control()), "{label:?}");
+        assert!(label.contains("demo"));
+
+        let missing = NodeKey::Related(RelatedNodeKey {
+            agent: "omp".into(),
+            kind: RelatedNodeKind::MissingSession,
+            native_locator: "/x/\u{1b}]52;c;AAAA\u{7}id".into(),
+        });
+        let label = node_label(&missing, &[]);
+        assert!(!label.contains(|c: char| c.is_control()), "{label:?}");
+    }
+
+    #[test]
+    fn node_ids_distinguish_profile_and_root() {
+        let base = crate::session::SessionKey {
+            agent: "omp".into(),
+            effective_root: "/r1".into(),
+            profile: None,
+            native_locator: "same".into(),
+        };
+        let mut other_profile = base.clone();
+        other_profile.profile = Some("work".into());
+        let mut other_root = base.clone();
+        other_root.effective_root = "/r2".into();
+        let mut colon = base.clone();
+        colon.native_locator = "a:b".into();
+        let mut colon2 = base.clone();
+        colon2.effective_root = "/r1:a".into();
+        colon2.native_locator = "b".into();
+        let ids: BTreeSet<String> = [base, other_profile, other_root, colon, colon2]
+            .into_iter()
+            .map(|k| node_id(&NodeKey::Session(k)))
+            .collect();
+        assert_eq!(ids.len(), 5, "{ids:?}");
+    }
+
+    #[test]
+    fn tree_candidates_follow_projection_and_only_sessions_are_resumable() {
+        let mut parent = session_with(SupportStatus::Supported);
+        parent.key.native_locator = "parent".into();
+        parent.resumable_id = "parent".into();
+        let mut child = session_with(SupportStatus::Supported);
+        child.key.native_locator = "child".into();
+        child.resumable_id = "child".into();
+        let mk = |session: Session, relations: Vec<NativeRelation>| CandidateRecord {
+            message_preview: None,
+            user_inputs: Vec::new(),
+            session,
+            spec: None,
+            evidence: None,
+            relations,
+        };
+        let rel = |id: &str| NativeRelation {
+            parent_agent: "codex".into(),
+            parent_id: id.into(),
+            kind: RelationKind::Spawned,
+            source: EvidenceSource::NativeTranscript,
+        };
+        let mut orphan = session_with(SupportStatus::Supported);
+        orphan.key.native_locator = "orphan".into();
+        orphan.resumable_id = "orphan".into();
+        let records = vec![
+            mk(parent, Vec::new()),
+            mk(child, vec![rel("parent")]),
+            mk(orphan, vec![rel("gone")]),
+        ];
+        let next_key = AtomicU64::new(1);
+        let mut map = HashMap::new();
+        let candidates = tree_candidates(&records, &next_key, &mut map);
+
+        // 3 sessions + 1 relation-only missing parent, each exactly once.
+        assert_eq!(candidates.len(), 4);
+        let ranks: BTreeSet<_> = candidates.iter().map(|c| c.rank).collect();
+        assert_eq!(ranks.len(), 4, "ranks must be unique to preserve DFS order");
+        // Only Session rows resolve to a launchable record.
+        assert_eq!(map.len(), 3);
+        let missing = candidates
+            .iter()
+            .find(|c| c.display.contains("[missing]"))
+            .expect("missing-parent row");
+        assert!(!map.contains_key(&missing.key));
+        assert!(missing.display.contains("not resumable"));
+        // Child row is nested directly under its parent's row.
+        let child_at = candidates
+            .iter()
+            .position(|c| c.display.lines().next().unwrap().starts_with("└─ "))
+            .expect("nested child row");
+        let loc = |i: usize| {
+            map.get(&candidates[i].key)
+                .map(|&index| records[index].session.key.native_locator.clone())
+        };
+        assert_eq!(loc(child_at), Some("child".into()));
+        assert_eq!(loc(child_at - 1), Some("parent".into()));
+        // Selection identity resolves to the original record.
+        for (key, index) in &map {
+            assert!(candidates.iter().any(|c| &c.key == key && c.selectable));
+            assert!(*index < records.len());
+        }
+        // The picker lists the highest rank first: DFS order must be strictly
+        // descending by rank so root precedes its child on screen.
+        assert!(candidates.windows(2).all(|w| w[0].rank > w[1].rank));
+        assert!(candidates.iter().filter(|c| !c.selectable).count() == 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_ids_distinguish_non_utf8_locators() {
+        use std::os::unix::ffi::OsStringExt;
+        let key = |bytes: &[u8]| crate::session::SessionKey {
+            agent: "omp".into(),
+            effective_root: "/r".into(),
+            profile: None,
+            native_locator: std::ffi::OsString::from_vec(bytes.to_vec()),
+        };
+        let a = node_id(&NodeKey::Session(key(b"x\xFF")));
+        let b = node_id(&NodeKey::Session(key(b"x\xFE")));
+        let c = node_id(&NodeKey::Session(key("x\u{FFFD}".as_bytes())));
+        let d = node_id(&NodeKey::Session(key(b"x%FF")));
+        let ids: BTreeSet<_> = [a, b, c, d].into_iter().collect();
+        assert_eq!(ids.len(), 4, "{ids:?}");
     }
 
     #[test]

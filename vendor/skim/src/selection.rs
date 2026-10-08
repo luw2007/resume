@@ -222,7 +222,9 @@ impl Selection {
         for item in self.item_cursor..self.item_cursor + capacity {
             if rows_to_top < row + self.item_height(item) {
                 let current = self.item_cursor + self.line_cursor;
-                self.act_move_line_cursor(current as i32 - item as i32);
+                // `act_move_line_cursor` negates its argument in reverse layout.
+                let diff = if self.reverse { current as i32 - item as i32 } else { item as i32 - current as i32 };
+                self.act_move_line_cursor(diff);
                 break;
             }
             row += self.item_height(item);

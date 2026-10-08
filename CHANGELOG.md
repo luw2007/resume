@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Strip terminal-control sequences from relationship-tree labels, verbose diagnostics, launch confirmation paths, and cmux handoff errors without changing native session identity or launch arguments.
+- Limit OMP and Claude execution-child discovery to the parents and workspace directories already selected by discovery, instead of walking unrelated agent history.
+- Preserve workspace directory identity across ordinary file creation and removal; still reject replaced, missing, or non-directory workspaces before launch.
+- Canonicalize the default Git worktree consistently with linked-worktree scope and re-prompt setup after invalid input, stopping safely at end-of-input.
+- Discover Claude's native parent-UUID/subagents layout with explicit layout evidence, reject conflicting parent metadata, and confine child-directory enumeration before reading files.
+- Honor interactive `--tree`, keep relation-only nodes non-resumable, aggregate tree JSON diagnostics, and distinguish full session identity in graph node IDs.
+- Allow Ctrl-C to interrupt the details card, refresh side preview content after dismissal, and preserve filter queries across tab switches and refreshes.
+- Picker: every Session of the current tab is now in one Skim list, so a query reaches Sessions older than the first screen at once and the match count (`matched/total`) shows inline on the query row; the 50-Session pages and `PAGE x/y` header are gone. `PgUp`/`PgDn` scroll, `Alt-P`/`Alt-N` page the cursor down/up in place, and `Ctrl-D`/`Ctrl-U` scroll the list or the details card.
+- Picker: the typed query and the side Preview stay as they were across tab switches; bare `Left`/`Right` edit the query cursor again, and tabs use `Tab`/`Shift-Tab` and `Alt-Left`/`Alt-Right` (this replaces the earlier bare-arrow tab switching).
+- Picker: interactive `--tree` is one unified cross-agent `Tree` view, without agent tabs or tab-switch shortcuts, preserving relationship ancestry. `Enter`/double-click on a relation-only row is ignored in place; filtering, refresh, Preview, details and scrolling remain available.
+- Picker: a doubled `Space` leaves no whitespace in the query, opens details only on a focused Session, and a single space still separates search terms; the details card closes with `q`, `Esc` or `Enter` without resuming, scrolls with `PgUp`/`PgDn`/`Ctrl-U`/`Ctrl-D`, restores the side Preview on close, and `Ctrl-C` exits 130.
+- Picker: the shortcut footer is width-aware (long, shorter and compact wording) so Enter, Esc, Ctrl-O/`^O` and the details gesture stay visible from 60 columns, including an explicit right-hand Preview at 60.
+- Picker: `Ctrl-L` re-reads the shared candidate list in place (query, tab and Preview kept). While a background agent is scanning the header shows `scanning · ^L`; a search made meanwhile covers only the Sessions that had landed, until a tab switch or `Ctrl-L`.
+- Setup re-prompts after invalid input and stops safely at end-of-input; preflight runs early, before discovery; a completed scan with no Sessions is reported visibly; agent and title text is sanitized before it is printed on the launch confirmation prompt (`/dev/tty`).
+- Keep OpenCode's metadata model consistent when SQLite support is disabled, restoring compilation of default-feature test and example targets without enabling OpenCode discovery.
+
+### Performance
+
+- Carry Codex user inputs and explicit parent metadata from discovery and cache results into application records, removing the second rollout read and parse for each retained session.
+- Reuse already-loaded picker candidates and preview/details text across navigation, processing and sorting only newly appended candidates.
+
 ## 0.4.1 - 2026-09-21
 
 ### Fixed

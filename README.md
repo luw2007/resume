@@ -70,9 +70,9 @@ resume --since 2026-01-01      # only Sessions active on or after a date
 resume --since all             # no time filtering (default)
 ```
 
-The tree shows explicit native relationships and never guesses from paths, titles, Workspace equality, or timestamps.
+The tree shows explicit native relationships and never guesses from paths, titles, Workspace equality, or timestamps. Its interactive picker is one unified `Tree` view across agents, without agent tabs or tab-switch shortcuts, so cross-agent ancestry is never sliced. Typing filters all tree rows; `Ctrl-L` refreshes them in place. Relation-only rows cannot be resumed.
 
-The interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background and appears on its tab after the next navigation. It starts on the newest page of the `All` tab; selection remains attached to an opaque Session identity rather than a visual row index, so the result is stable even as background items arrive.
+The normal interactive picker opens after Pi, Claude, and OMP discovery completes; when configured alongside another agent, Codex continues scanning in the background. A tab switch or `Ctrl-L` refresh includes newly discovered Sessions. The picker starts on the `All` tab with every currently discovered Session searchable at once; selection remains attached to an opaque Session identity rather than a visual row index.
 
 ## Scope and Directory Distance
 
@@ -111,20 +111,25 @@ Upward Scope never includes children; downward Scope never includes ancestors or
 
 The Skim picker renders each Session as a card: a native title (when available), its first human message as a second line, metadata (`updated · session file size · agent · model · status · branch`), then an empty separator. Without a native title, the first-message summary takes the title row and has no redundant preview row. The focused card uses Skim's text highlight, without a margin pointer or colored block. Each text row clips to the available list width, including when Preview opens beside it. Session size uses OMP's binary-based format (`11.0MB`); when there is no individual session file (OpenCode stores sessions in a shared database), it shows `size unknown` rather than reporting the whole database size. Supported Sessions show `✅`; missing model data shows `unknown model`. Token counts remain in Preview, not the card.
 
-The header shows every available agent tab and the active one in brackets, for example `[All 50/147] pi omp claude  <-/->  PAGE 1/3 · older: Alt-P`. `50/147` means 50 Sessions on this page out of 147 in the active tab, not 50 matches out of 50 loaded items. Skim's separate per-page match counter is hidden; typing still filters the current page. A background scan appears alongside the tabs until it finishes.
+The header shows every available agent tab and the active one in brackets with its Session count, for example `[All 147] pi omp claude`. Typing filters the whole active tab at once (not just the Sessions on screen); Skim's `matched/total` counter sits on the query row, so a query with no match reads `0/147`. A background scan appears alongside the tabs until it finishes.
 
-Shortcut hints stay at the bottom of the list, so the active tab and Sessions are adjacent.
+Shortcut hints sit in a two-row footer under the list and are shortened to fit the list width (at least Enter, Esc, Ctrl-O and the details gesture down to 60 columns). Tab switches keep your query text and whether the side Preview is shown.
 
 | Key | Behavior |
 |---|---|
-| `Space` twice | Open user-input details; `Esc` closes the card |
-| `h` / `j` / `i` or `k` / `l`, arrow keys (details open) | Scroll the details card horizontally / vertically |
+| `Space` twice | Open user-input details (a read-only card) |
+| `q`, `Esc` or `Enter` (details open) | Close the card without resuming; the side Preview refreshes to the selected Session |
+| `h` / `j` / `i` or `k` / `l`, arrow keys, `PgUp` / `PgDn`, `Ctrl-U` / `Ctrl-D` (details open) | Scroll the details card |
+| `PgUp` / `PgDn` | Scroll the Session list a page |
+| `Left` / `Right` | Move the cursor inside the query |
 | `Ctrl-O` | Toggle side Preview |
 | `Ctrl-R` | Intentionally ignored |
-| `Alt-P` / `Alt-N` | Move to the older / newer page in the current tab |
-| `Alt-Left` / `Alt-Right`, `Left` / `Right`, `Tab` / `Shift-Tab` | Move to the previous / next tab, wrapping and opening its newest page |
-| `Esc` | Close details, or cancel the picker |
-| `Ctrl-C` | Interrupt (exit 130) |
+| `Ctrl-L` | Re-read the candidate list (picks up a still-scanning background agent's Sessions) and keep the tab, query and Preview |
+| `Alt-P` / `Alt-N` | Page the list down (older) / up (newer) in place |
+| `Alt-Left` / `Alt-Right`, `Tab` / `Shift-Tab` | Normal picker only: move to the previous / next tab, wrapping; query and Preview visibility are kept |
+| `Esc` | Cancel the picker |
+| `Ctrl-C` | Interrupt (exit 130), also while details are open |
+
 Preview uses a safe dual-section fallback: normalized and raw-but-terminal-safe sections are shown together. **Ctrl-R does not reload, refresh, or switch views live.** A channel-fed Skim `reload` can execute its default filesystem command, so `resume` explicitly binds Ctrl-R to `ignore` to prevent an accidental filesystem listing. Preview currently presents the Session metadata/title available to the assembled picker; integration parsers and text-safety foundations have broader user-input coverage, but this README does not claim a full native transcript viewer.
 
 ## List and JSON output

@@ -240,6 +240,7 @@ pub fn run_with(opts: &SkimOptions) -> Option<SkimOutput> {
         query: query_str.to_string(),
         cmd: command_str.to_string(),
         selected_items: output_lines,
+        preview_visible: false,
     };
     Some(skim_output)
 }

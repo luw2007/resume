@@ -531,34 +531,60 @@ impl Model {
 
             debug!("handle event: {:?}", ev);
             if self.modal_preview {
-                if self.modal_preview_open && key == Key::ESC {
+                if self.modal_preview_open && matches!(key, Key::ESC | Key::Char('q') | Key::Enter) {
+                    // Esc/q/Enter only dismiss the read-only card; Enter must
+                    // never resume a Session from here. The card rendered the
+                    // current item with modal=true, so force a fresh side
+                    // preview render (even while the pane is hidden, so a later
+                    // Ctrl-O does not reveal stale details).
                     self.modal_preview_open = false;
+                    self.draw_preview(&env, true);
                     let _ = self.do_with_widget(|root| self.term.draw(&root));
                     let _ = self.term.present();
                     continue;
                 }
-                if self.modal_preview_open && key != Key::Null {
+                // Ctrl-C is never captured by the modal: it falls through to the
+                // normal abort action so the picker can still be interrupted.
+                if self.modal_preview_open && key != Key::Null && key != Key::Ctrl('c') {
                     if let Some(previewer) = self.previewer.as_mut() {
-                        let scroll = match key {
-                            Key::Char('h') | Key::Left => Some(Event::EvActPreviewLeft(1)),
-                            Key::Char('j') | Key::Down => Some(Event::EvActPreviewDown(1)),
-                            Key::Char('i') | Key::Char('k') | Key::Up => Some(Event::EvActPreviewUp(1)),
-                            Key::Char('l') | Key::Right => Some(Event::EvActPreviewRight(1)),
-                            _ => None,
-                        };
-                        if let Some(scroll) = scroll {
-                            previewer.handle(&scroll);
-                        } else {
-                            previewer.handle(&ev);
+                        match key {
+                            Key::Char('h') | Key::Left => {
+                                previewer.handle(&Event::EvActPreviewLeft(1));
+                            }
+                            Key::Char('j') | Key::Down => {
+                                previewer.handle(&Event::EvActPreviewDown(1));
+                            }
+                            Key::Char('i') | Key::Char('k') | Key::Up => {
+                                previewer.handle(&Event::EvActPreviewUp(1));
+                            }
+                            Key::Char('l') | Key::Right => {
+                                previewer.handle(&Event::EvActPreviewRight(1));
+                            }
+                            Key::PageDown => {
+                                previewer.handle(&Event::EvActPreviewPageDown(1));
+                            }
+                            Key::PageUp => {
+                                previewer.handle(&Event::EvActPreviewPageUp(1));
+                            }
+                            Key::Ctrl('d') => previewer.scroll_half_page(1),
+                            Key::Ctrl('u') => previewer.scroll_half_page(-1),
+                            _ => {}
                         }
                     }
                     let _ = self.do_with_widget(|root| self.term.draw(&root));
                     let _ = self.term.present();
                     continue;
                 }
-                if !self.modal_preview_open && matches!(ev, Event::EvActAddChar(' ')) && env.in_query_mode {
+                if !self.modal_preview_open
+                    && matches!(ev, Event::EvActAddChar(' '))
+                    && env.in_query_mode
+                {
                     let now = Instant::now();
-                    if self.last_space.is_some_and(|at| now.duration_since(at).as_millis() < 500) {
+                    // Only a repeated space with a focused Session opens details; with no
+                    // current item the space is an ordinary query character.
+                    if self.selection.get_current_item().is_some()
+                        && self.last_space.is_some_and(|at| now.duration_since(at).as_millis() < 500)
+                    {
                         self.last_space = None;
                         self.query.act_backward_delete_char();
                         env.query = self.query.get_fz_query();
@@ -607,11 +633,24 @@ impl Model {
 
                 Event::EvActTogglePreview => {
                     self.preview_hidden = !self.preview_hidden;
+                    if !self.preview_hidden {
+                        // The pane may have last rendered modal details (or nothing
+                        // while hidden); always show the current item's own preview.
+                        self.draw_preview(&env, true);
+                    }
                 }
 
                 Event::EvActRotateMode => {
                     self.act_rotate_mode(&mut env);
                 }
+
+                // Items that opt out (relation-only rows) never resume: Enter and
+                // double-click are ignored in place, but the keys bound as accept
+                // purely for tab navigation (Tab/Shift-Tab/Alt-Left/Alt-Right) still
+                // end the view so the picker can move on.
+                Event::EvActAccept(_)
+                    if !matches!(key, Key::Tab | Key::BackTab | Key::AltLeft | Key::AltRight | Key::Ctrl('l'))
+                        && self.selection.get_current_item().is_some_and(|item| !item.selectable()) => {}
 
                 Event::EvActAccept(accept_key) => {
                     if let Some(ctrl) = self.reader_control.take() {
@@ -628,6 +667,7 @@ impl Model {
                         query: self.query.get_fz_query(),
                         cmd: self.query.get_cmd_query(),
                         selected_items: self.selection.get_selected_indices_and_items().1,
+                        preview_visible: !self.preview_hidden,
                     });
                 }
 
@@ -646,6 +686,7 @@ impl Model {
                         query: self.query.get_fz_query(),
                         cmd: self.query.get_cmd_query(),
                         selected_items: self.selection.get_selected_indices_and_items().1,
+                        preview_visible: !self.preview_hidden,
                     });
                 }
 
@@ -920,7 +961,7 @@ impl Model {
                 .border(true)
                 .border_attr(self.theme.border())
                 .title(" Session details ")
-                .right_prompt("h/j/i/k/l arrows scroll · Esc close ");
+                .right_prompt("↑/↓ PgUp/PgDn ^U/^D scroll · q/Esc/Enter close · ^C quit ");
             Box::new(Stack::new().bottom(screen).top(card))
         } else {
             screen

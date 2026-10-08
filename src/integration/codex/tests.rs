@@ -153,7 +153,7 @@ fn discover_sessions(home: &Path) -> Vec<Session> {
     outcomes
         .into_iter()
         .filter_map(|o| match o {
-            DiscoveredSession::Session(s) => Some(s),
+            DiscoveredSession::Session { session, .. } => Some(session),
             DiscoveredSession::Error { .. } => None,
         })
         .collect()
@@ -239,7 +239,7 @@ fn symlinked_rollout_outside_effective_root_is_rejected_with_error() {
                 .verbose_chain
                 .as_deref()
                 .is_some_and(|chain| chain.contains("outside effective root")),
-            DiscoveredSession::Error { .. } | DiscoveredSession::Session(_) => false,
+            DiscoveredSession::Error { .. } | DiscoveredSession::Session { .. } => false,
         }
     }));
 }
@@ -1325,6 +1325,90 @@ fn rollout_preserves_structured_subagent_spawn_source_and_exact_parent() {
         parsed.structured_source.as_ref().unwrap()["subagent"]["thread_spawn"]["parent_thread_id"],
         "parent-thread-exact"
     );
+}
+
+#[test]
+fn discovered_session_carries_user_messages_and_parent_without_reparse() {
+    let home = codex_home();
+    let workspace = home.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    write_rollout(
+        home.path(),
+        "sessions/2026/08/07/rollout-carry.jsonl",
+        &[
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "carry-child",
+                    "cwd": workspace.canonicalize().unwrap().to_str().unwrap(),
+                    "parent_thread_id": "carry-parent"
+                }
+            }),
+            event_msg_user("carried prompt"),
+        ],
+    );
+
+    let outcomes = discover_outcomes(home.path());
+    assert_eq!(outcomes.len(), 1);
+    match &outcomes[0] {
+        DiscoveredSession::Session {
+            session,
+            user_messages,
+            parent_thread_id,
+        } => {
+            assert_eq!(session.title.as_deref(), Some("carried prompt"));
+            assert_eq!(user_messages.len(), 1);
+            assert_eq!(user_messages[0].text, "carried prompt");
+            assert_eq!(parent_thread_id.as_deref(), Some("carry-parent"));
+        }
+        DiscoveredSession::Error { .. } => panic!("expected a session"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_effective_root_still_carries_user_messages_and_parent() {
+    let real = codex_home();
+    let workspace = real.path().join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    write_rollout(
+        real.path(),
+        "sessions/2026/08/07/rollout-linked.jsonl",
+        &[
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "linked-child",
+                    "cwd": workspace.canonicalize().unwrap().to_str().unwrap(),
+                    "parent_thread_id": "linked-parent"
+                }
+            }),
+            event_msg_user("linked prompt"),
+        ],
+    );
+    let holder = tempfile::tempdir().unwrap();
+    let link_root = holder.path().join("codex-link");
+    std::os::unix::fs::symlink(real.path(), &link_root).unwrap();
+
+    let outcomes = discover_outcomes(&link_root);
+    assert_eq!(outcomes.len(), 1);
+    match &outcomes[0] {
+        DiscoveredSession::Session {
+            session,
+            user_messages,
+            parent_thread_id,
+        } => {
+            assert_eq!(session.title.as_deref(), Some("linked prompt"));
+            assert_eq!(user_messages.len(), 1);
+            assert_eq!(user_messages[0].text, "linked prompt");
+            assert_eq!(parent_thread_id.as_deref(), Some("linked-parent"));
+            assert_eq!(
+                session.key.effective_root,
+                real.path().canonicalize().unwrap()
+            );
+        }
+        DiscoveredSession::Error { .. } => panic!("expected a session"),
+    }
 }
 
 #[test]

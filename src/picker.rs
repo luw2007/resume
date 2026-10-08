@@ -46,11 +46,6 @@ use skim::tuikit::key::Key as SkimKey;
 pub const MIN_TERM_WIDTH: usize = 60;
 pub const MIN_TERM_HEIGHT: usize = 10;
 
-/// Maximum candidates rendered per page once the live view switches into
-/// paginated mode (Alt+P after the live stream). Every discovered session is
-/// retained in memory; only the per-page render is capped.
-pub const PAGE_SIZE: usize = 50;
-
 /// An opaque, content-independent identity for a spike candidate.
 ///
 /// Invariant under test: the value returned from `SkimOutput::selected_items`
@@ -78,9 +73,15 @@ pub struct SpikeItem {
     /// Pointer to the shared in-memory preview store + current mode, so the
     /// preview is resolved at render time without a shell command.
     pub preview_store: Arc<PreviewStore>,
+    /// False for relation-only rows: Enter on them is ignored by the picker.
+    pub selectable: bool,
 }
 
 impl SkimItem for SpikeItem {
+    fn selectable(&self) -> bool {
+        self.selectable
+    }
+
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.search_text)
     }
@@ -219,6 +220,7 @@ where
             let search_text = display.clone();
             Arc::new(SpikeItem {
                 key: key.clone(),
+                selectable: true,
                 display,
                 search_text,
                 preview_store: preview_store.clone(),
@@ -260,6 +262,7 @@ where
             let item = Arc::new(SpikeItem {
                 key: key.clone(),
                 display: display.clone(),
+                selectable: true,
                 search_text: display,
                 preview_store: producer_preview.clone(),
             }) as Arc<dyn SkimItem>;
@@ -327,7 +330,7 @@ fn run_skim_panic_safe(rx: SkimItemReceiver) -> Option<SkimOutput> {
 }
 
 /// Run Skim behind a panic guard, shared by the spike, production, and
-/// paginated call sites. `Term::with_options` panics if the TUI cannot init
+/// tabbed/tree call sites. `Term::with_options` panics if the TUI cannot init
 /// (e.g. /dev/tty missing despite preflight, or a panic inside rendering);
 /// tuikit's `Term::Drop` still restores the terminal during the unwind, so we
 /// only need to signal the caller that the run failed. A real `SkimOutput`
@@ -382,14 +385,14 @@ fn is_interrupt(key: &SkimKey) -> bool {
     matches!(key, SkimKey::Ctrl('c'))
 }
 
-/// Internal control-flow result for one rendered tab+page view: either a
-/// terminal outcome, or a request to move to a different page or tab.
+/// Internal control-flow result for one rendered tab view: either a terminal
+/// outcome, or a request to move to a different tab.
 enum NavExit {
     Terminal(PickerOutcome),
-    OlderPage,
-    NewerPage,
     PrevTab,
     NextTab,
+    /// Re-read the shared candidate list and reopen the same tab.
+    Refresh,
 }
 
 fn classify_nav(outcome: Option<SkimOutput>) -> NavExit {
@@ -397,10 +400,9 @@ fn classify_nav(outcome: Option<SkimOutput>) -> NavExit {
         && !o.is_abort
     {
         match o.final_key {
-            SkimKey::Alt('p') => return NavExit::OlderPage,
-            SkimKey::Alt('n') => return NavExit::NewerPage,
-            SkimKey::AltLeft | SkimKey::Left | SkimKey::BackTab => return NavExit::PrevTab,
-            SkimKey::AltRight | SkimKey::Right | SkimKey::Tab => return NavExit::NextTab,
+            SkimKey::AltLeft | SkimKey::BackTab => return NavExit::PrevTab,
+            SkimKey::AltRight | SkimKey::Tab => return NavExit::NextTab,
+            SkimKey::Ctrl('l') => return NavExit::Refresh,
             _ => {}
         }
     }
@@ -415,12 +417,14 @@ pub struct PickerCandidate {
     pub search_text: String,
     pub preview: String,
     pub details: Option<String>,
-    /// Ascending rank for the paginated view. It reverses
+    /// Ascending rank for the list view. It reverses
     /// `session::compare_sessions` so Skim's reverse display preserves the
     /// documented activity-first, newest-first order.
     pub rank: (u8, Option<SystemTime>),
     /// Agent name, used to build the per-agent tabs (`Alt+Left`/`Alt+Right`).
     pub agent: String,
+    /// False for relation-only rows; Enter on them is ignored, keeping picker state.
+    pub selectable: bool,
 }
 
 /// A discovery worker still running when the picker opens (see
@@ -433,20 +437,23 @@ pub struct BackgroundAgent {
 }
 
 /// Run the full production picker: an "All" tab plus one tab per distinct
-/// agent present in `candidates`, each sorted ascending by `rank` and
-/// paginated at [`PAGE_SIZE`]. Starts on the newest page of the "All" tab,
-/// which is always filled before an older remainder page. `Alt+P`/`Alt+N`
-/// move between older and newer pages of the current tab; `Alt+Left`/
-/// `Alt+Right`, `Left`/`Right`, and `Tab`/`Shift+Tab` all switch tabs
-/// (wrapping), resetting to that tab's newest page.
+/// agent present in `candidates`, each ordered ascending by `rank` and
+/// displayed newest-first. Every candidate of the current tab is fed to Skim,
+/// so the filter searches the whole tab at once. `PgUp`/`PgDn` scroll the
+/// list; `Alt+P`/`Alt+N` page older (down) / newer (up) in view.
+/// `Tab`/`Shift+Tab` and `Alt+Left`/`Alt+Right` switch tabs (wrapping) while
+/// keeping the query text and Preview visibility; bare `Left`/`Right` edit the
+/// query cursor.
 ///
 /// `candidates` is shared and may keep growing after this call starts: a
 /// `background` agent (see [`BackgroundAgent`]) can still be discovering
 /// when the picker opens (`app::run_interactive` uses this for Codex, whose
 /// per-file JSONL parsing cost is not bounded the way the directory-pruned
-/// agents' scans are). Each navigation re-reads the current snapshot, so a
-/// tab a background agent contributes picks up its Sessions as soon as they
-/// land — but never mid-render, only on the next page turn or tab switch.
+/// agents' scans are). The snapshot is re-read on each tab switch and on an
+/// explicit `Ctrl+L` refresh (the header shows `^L` while a background scan is
+/// pending) — never mid-render, so a search made while the background agent
+/// is still scanning covers only the Sessions that had landed when the view
+/// opened.
 /// The current tab is tracked by agent name, not index, so a tab list that
 /// grows between renders (a background agent's first Session arriving)
 /// never silently retargets the user onto the wrong tab.
@@ -455,6 +462,33 @@ pub fn run_tabbed_picker(
     preview_mode: PreviewMode,
     preview_position: PreviewPosition,
     background: Option<BackgroundAgent>,
+) -> PickerOutcome {
+    run_picker_views(candidates, preview_mode, preview_position, background, true)
+}
+
+/// Browse a pre-rendered relationship tree as one unified cross-agent view.
+/// Agent tabs are disabled so filtering by agent cannot slice its ancestry.
+pub fn run_tree_picker(
+    candidates: Arc<Mutex<Vec<PickerCandidate>>>,
+    preview_mode: PreviewMode,
+    preview_position: PreviewPosition,
+    background: Option<BackgroundAgent>,
+) -> PickerOutcome {
+    run_picker_views(
+        candidates,
+        preview_mode,
+        preview_position,
+        background,
+        false,
+    )
+}
+
+fn run_picker_views(
+    candidates: Arc<Mutex<Vec<PickerCandidate>>>,
+    preview_mode: PreviewMode,
+    preview_position: PreviewPosition,
+    background: Option<BackgroundAgent>,
+    tabs_enabled: bool,
 ) -> PickerOutcome {
     if let Err(reason) = preflight() {
         return PickerOutcome::PreflightFailed(reason);
@@ -486,26 +520,46 @@ pub fn run_tabbed_picker(
     // by name (not index) so tab-list growth between renders never
     // retargets the user at the wrong position.
     let mut current_tab: Option<String> = None;
-    let mut page_index = 0usize; // zero is the newest page
+    let mut preview_visible = preview_mode == PreviewMode::Visible;
+    // The shared list is append-only and its entries immutable (see
+    // `app::merge_records`), so each navigation only pays for entries it has
+    // not seen yet. Preview/details text moves into the store once; the
+    // view-local `all` keeps only what the rows need.
+    let mut all: Vec<Arc<PickerCandidate>> = Vec::new();
+    let mut seen = 0usize;
+    // Skim's filter text is restored on every page/tab re-render.
+    let mut query = String::new();
     loop {
-        let mut snapshot = candidates.lock().unwrap().clone();
-        snapshot.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
-        for candidate in &snapshot {
-            store.insert(candidate.key.clone(), candidate.preview.clone());
-            let details = candidate
-                .details
-                .as_ref()
-                .map(|text| (candidate.key.clone(), text.clone()));
-            if let (Some(details), Ok(mut entries)) = (details, store.details.lock()) {
-                entries.insert(details.0, details.1);
+        let before = all.len();
+        {
+            let shared = candidates.lock().unwrap();
+            for candidate in &shared[seen..] {
+                let mut candidate = candidate.clone();
+                store.insert(
+                    candidate.key.clone(),
+                    std::mem::take(&mut candidate.preview),
+                );
+                if let (Some(details), Ok(mut entries)) =
+                    (candidate.details.take(), store.details.lock())
+                {
+                    entries.insert(candidate.key.clone(), details);
+                }
+                all.push(Arc::new(candidate));
             }
+            seen = shared.len();
         }
+        if all.len() != before {
+            all.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.key.0.cmp(&b.key.0)));
+        }
+        let snapshot = &all;
 
         // Tab 0 is "All"; tabs 1.. are each distinct agent, in first-seen order.
         let mut agent_tabs: Vec<&str> = Vec::new();
-        for candidate in &snapshot {
-            if !agent_tabs.contains(&candidate.agent.as_str()) {
-                agent_tabs.push(&candidate.agent);
+        if tabs_enabled {
+            for candidate in snapshot {
+                if !agent_tabs.contains(&candidate.agent.as_str()) {
+                    agent_tabs.push(&candidate.agent);
+                }
             }
         }
         let total_tabs = agent_tabs.len() + 1;
@@ -515,61 +569,51 @@ pub fn run_tabbed_picker(
             .map_or(0, |i| i + 1);
 
         let tab_candidates: Vec<&PickerCandidate> = if tab_index == 0 {
-            snapshot.iter().collect()
+            snapshot.iter().map(|c| c.as_ref()).collect()
         } else {
             snapshot
                 .iter()
                 .filter(|c| c.agent == agent_tabs[tab_index - 1])
+                .map(|c| c.as_ref())
                 .collect()
         };
-        let total_pages = tab_candidates.len().div_ceil(PAGE_SIZE).max(1);
-        page_index = page_index.min(total_pages - 1);
-        let page = page_bounds(tab_candidates.len(), page_index);
         let pending_label = background
             .as_ref()
             .filter(|bg| bg.pending.load(Ordering::Relaxed))
             .map(|bg| bg.label.as_str());
 
-        match run_single_view(SingleView {
+        let (exit, state) = run_single_view(SingleView {
             store: &store,
-            candidates: &tab_candidates[page],
+            candidates: &tab_candidates,
             tab_index,
             agent_tabs: &agent_tabs,
-            page: PageInfo {
-                index: page_index,
-                total: total_pages,
-                candidates: tab_candidates.len(),
-            },
-            preview_mode,
+            tabs_enabled,
+            preview_visible,
             preview_position,
             pending_label,
-        }) {
-            NavExit::OlderPage if page_index + 1 < total_pages => page_index += 1,
-            NavExit::NewerPage if page_index > 0 => page_index -= 1,
-            NavExit::OlderPage | NavExit::NewerPage => {}
+            query: &query,
+        });
+        if let Some(state) = state {
+            query = state.query;
+            preview_visible = state.preview_visible;
+        }
+        match exit {
             NavExit::PrevTab => {
                 let new_index = (tab_index + total_tabs - 1) % total_tabs;
                 current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
-                page_index = 0;
             }
+            NavExit::Refresh => {}
             NavExit::NextTab => {
                 let new_index = (tab_index + 1) % total_tabs;
                 current_tab = (new_index > 0).then(|| agent_tabs[new_index - 1].to_string());
-                page_index = 0;
             }
             NavExit::Terminal(outcome) => return outcome,
         }
     }
 }
 
-fn page_bounds(total_candidates: usize, page_index: usize) -> std::ops::Range<usize> {
-    let end = total_candidates - page_index * PAGE_SIZE;
-    let start = end.saturating_sub(PAGE_SIZE);
-    start..end
-}
-
-fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str, &'static str) {
-    let position = match position {
+fn preview_side(position: PreviewPosition) -> &'static str {
+    match position {
         PreviewPosition::Right => "right",
         PreviewPosition::Bottom => "down",
         PreviewPosition::Auto => {
@@ -579,19 +623,74 @@ fn preview_layout(mode: PreviewMode, position: PreviewPosition) -> (&'static str
                 "down"
             }
         }
-    };
-    let visibility = if mode == PreviewMode::Hidden {
-        ":hidden"
-    } else {
-        ""
-    };
-    (position, visibility)
+    }
 }
 
-struct PageInfo {
-    index: usize,
-    total: usize,
-    candidates: usize,
+/// Footer rows packed to the narrowest list pane the layout can produce. A
+/// right-hand Preview takes 60% of the terminal and can be toggled on at any
+/// time, so the pane is sized for that worst case. Hints are listed by
+/// priority; a pane too narrow for the long wording falls back to compact
+/// wording, and tokens wrap onto extra rows rather than being clipped.
+fn footer_text(cols: usize, side: &str, tabs_enabled: bool) -> String {
+    let list_width = if side == "right" {
+        cols.saturating_sub(cols * 60 / 100 + 1)
+    } else {
+        cols
+    };
+    // Footer text starts at column 2.
+    let avail = list_width.saturating_sub(2).max(1);
+    let (tokens, sep): (&[&str], &str) = if avail >= 53 {
+        (
+            &[
+                "Enter resume",
+                "Tab tabs",
+                "Ctrl-O preview",
+                "Esc cancel",
+                "↑/↓ PgUp/PgDn move",
+                "Alt-P/N page",
+                "2×Space details",
+            ],
+            " · ",
+        )
+    } else if avail >= 40 {
+        (
+            &[
+                "Enter resume",
+                "Esc cancel",
+                "Tab tabs",
+                "Ctrl-O preview",
+                "2×Space details",
+            ],
+            " · ",
+        )
+    } else {
+        (
+            &[
+                "Enter open",
+                "Esc cancel",
+                "^O preview",
+                "Tab tabs",
+                "2×Space details",
+            ],
+            "·",
+        )
+    };
+    let mut rows: Vec<String> = Vec::new();
+    for token in tokens {
+        if !tabs_enabled && *token == "Tab tabs" {
+            continue;
+        }
+        match rows.last_mut() {
+            Some(row)
+                if row.chars().count() + sep.chars().count() + token.chars().count() <= avail =>
+            {
+                row.push_str(sep);
+                row.push_str(token);
+            }
+            _ => rows.push((*token).to_string()),
+        }
+    }
+    rows.join("\n")
 }
 
 struct SingleView<'a> {
@@ -599,17 +698,26 @@ struct SingleView<'a> {
     candidates: &'a [&'a PickerCandidate],
     tab_index: usize,
     agent_tabs: &'a [&'a str],
-    page: PageInfo,
-    preview_mode: PreviewMode,
+    tabs_enabled: bool,
+    preview_visible: bool,
     preview_position: PreviewPosition,
     pending_label: Option<&'a str>,
+    query: &'a str,
 }
 
-fn run_single_view(view: SingleView<'_>) -> NavExit {
+/// Query text and Preview visibility Skim held when a view ended, carried into
+/// the next view so tab switches do not reset either.
+struct ViewState {
+    query: String,
+    preview_visible: bool,
+}
+
+fn run_single_view(view: SingleView<'_>) -> (NavExit, Option<ViewState>) {
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = bounded(view.candidates.len().max(1));
     for candidate in view.candidates {
         let item = Arc::new(SpikeItem {
             key: candidate.key.clone(),
+            selectable: candidate.selectable,
             display: candidate.display.clone(),
             search_text: candidate.search_text.clone(),
             preview_store: view.store.clone(),
@@ -617,93 +725,106 @@ fn run_single_view(view: SingleView<'_>) -> NavExit {
         let _ = tx.send(item);
     }
     drop(tx);
-    let options = build_tabbed_options(
+    let mut options = build_tabbed_options(
         view.tab_index,
         view.agent_tabs,
-        view.page,
-        view.preview_mode,
+        view.tabs_enabled,
+        view.candidates.len(),
+        view.preview_visible,
         view.preview_position,
         view.pending_label,
     );
-    classify_nav(run_skim_with_options(&options, rx))
+    options.query = Some(view.query.to_string());
+    let outcome = run_skim_with_options(&options, rx);
+    let state = outcome.as_ref().map(|output| ViewState {
+        query: output.query.clone(),
+        preview_visible: output.preview_visible,
+    });
+    (classify_nav(outcome), state)
 }
 
 fn build_tabbed_options(
     tab_index: usize,
     agent_tabs: &[&str],
-    page: PageInfo,
-    mode: PreviewMode,
+    tabs_enabled: bool,
+    count: usize,
+    preview_visible: bool,
     position: PreviewPosition,
     pending_label: Option<&str>,
 ) -> SkimOptions {
-    let (position, visibility) = preview_layout(mode, position);
+    let side = preview_side(position);
+    let visibility = if preview_visible { "" } else { ":hidden" };
+    // Page keys scroll Skim's own list; Alt-P/Alt-N are the same in-view page
+    // moves (older = down the list, newer = up). Bare Left/Right keep Skim's
+    // query-cursor editing; tabs use Tab/Shift-Tab and Alt-Left/Alt-Right.
     let mut binds = vec![
         String::from("ctrl-o:toggle-preview"),
         String::from("ctrl-r:ignore"),
         String::from("enter:accept"),
         String::from("esc:abort"),
+        String::from("alt-p:page-down"),
+        String::from("alt-n:page-up"),
+        String::from("ctrl-d:half-page-down"),
+        String::from("ctrl-l:accept"),
     ];
-    if page.index + 1 < page.total {
-        binds.push(String::from("alt-p:accept")); // older page
+    if tabs_enabled {
+        binds.extend(
+            [
+                "alt-left:accept",
+                "alt-right:accept",
+                "tab:accept",
+                "shift-tab:accept",
+            ]
+            .map(String::from),
+        );
+    } else {
+        binds.extend(
+            [
+                "alt-left:ignore",
+                "alt-right:ignore",
+                "tab:ignore",
+                "shift-tab:ignore",
+            ]
+            .map(String::from),
+        );
     }
-    if page.index > 0 {
-        binds.push(String::from("alt-n:accept")); // newer page
-    }
-    // "All" plus one tab per agent is always >= 2 tabs whenever there is any
-    // data at all (run_tabbed_picker's wait loop only lets the render loop
-    // start once there is at least one candidate), so tab switching is
-    // unconditionally bound and wraps in the caller. Left/Right and Tab/
-    // Shift-Tab are bound alongside Alt-Left/Alt-Right for the same move;
-    // this sacrifices Skim's default arrow-key cursor movement inside the
-    // typed filter query in exchange for one-key tab switching.
-    binds.push(String::from("alt-left:accept")); // previous tab
-    binds.push(String::from("alt-right:accept")); // next tab
-    binds.push(String::from("left:accept")); // previous tab
-    binds.push(String::from("right:accept")); // next tab
-    binds.push(String::from("tab:accept")); // next tab
-    binds.push(String::from("shift-tab:accept")); // previous tab
 
-    let current_page = page_bounds(page.candidates, page.index).len();
     let mut tabs = Vec::with_capacity(agent_tabs.len() + 1);
     tabs.push(if tab_index == 0 {
-        format!("[All {current_page}/{}]", page.candidates)
+        format!("[All {count}]")
     } else {
         "All".to_string()
     });
     for (index, agent) in agent_tabs.iter().enumerate() {
         tabs.push(if tab_index == index + 1 {
-            format!("[{agent} {current_page}/{}]", page.candidates)
+            format!("[{agent} {count}]")
         } else {
             (*agent).to_string()
         });
     }
+    if !tabs_enabled {
+        tabs = vec![format!("[Tree {count}]")];
+    }
     let pending_note = pending_label
-        .map(|label| format!(" ({label} still scanning)"))
+        .map(|label| format!(" ({label} scanning · ^L)"))
         .unwrap_or_default();
-    let older_count = page_bounds(page.candidates, page.index).start;
-    let page_note = format!("PAGE {}/{}", page.index + 1, page.total);
-    let older_note = if older_count > 0 {
-        " · older: Alt-P"
-    } else {
-        ""
-    };
+    let cols = tty_size().map_or(80, |(width, _)| width);
 
     SkimOptionsBuilder::default()
         .height(String::from("100%"))
         .multi(false)
-        .no_info(true)
+        // Inline info puts "matched/total" on the query row (no extra row), so
+        // a filter with no match visibly reads 0/N.
+        .inline_info(true)
         .reverse(true)
         .no_sort(true)
         .tac(true)
         .prompt(String::from("> "))
-        .header(Some(format!(
-            "{}{}  <-/->  {page_note}{older_note}",
-            tabs.join(" "), pending_note
-        )))
-        .footer(Some(String::from("↑/↓ navigate  ·  enter resume  ·  tab agent  ·  alt-p/alt-n page  ·  space space details  ·  ctrl-o side preview  ·  esc cancel")))
+        .header(Some(format!("{}{}", tabs.join(" "), pending_note)))
+        .footer(Some(footer_text(cols, side, tabs_enabled)))
         .preview(Some(String::new()))
         .modal_preview(true)
-        .preview_window(format!("{position}:60%{visibility}"))
+        .preview_window(format!("{side}:60%{visibility}"))
         .bind(binds)
         .build()
         .expect("hardcoded tabbed skim options are valid")
@@ -1030,6 +1151,7 @@ mod tests {
         let store = Arc::new(PreviewStore::default());
         let item = SpikeItem {
             key: CandidateKey(7),
+            selectable: true,
             display: "display \x1b[31mred\x1b[0m".into(),
             search_text: "searchable".into(),
             preview_store: store.clone(),
@@ -1056,6 +1178,7 @@ mod tests {
         let store = Arc::new(PreviewStore::default());
         let item = SpikeItem {
             key: CandidateKey(8),
+            selectable: true,
             display: "title row\ndetail row".into(),
             search_text: "searchable".into(),
             preview_store: store,
@@ -1076,6 +1199,7 @@ mod tests {
     fn native_title_card_preserves_preview_and_metadata() {
         let item = SpikeItem {
             key: CandidateKey(10),
+            selectable: true,
             display: "Native title\nA first human message that exceeds the narrow pane\nmetadata"
                 .into(),
             search_text: "full first human message".into(),
@@ -1101,6 +1225,7 @@ mod tests {
         let store = Arc::new(PreviewStore::default());
         let item = SpikeItem {
             key: CandidateKey(9),
+            selectable: true,
             display: "A title that fits the wide list but not a side preview\nmetadata".into(),
             search_text: "complete searchable title".into(),
             preview_store: store,
@@ -1143,147 +1268,5 @@ mod tests {
         // The key type carries no path, agent, or launch state.
         let k = CandidateKey(42);
         assert_eq!(format!("{k:?}"), "CandidateKey(42)");
-    }
-
-    #[test]
-    fn newest_page_is_full_before_older_remainder() {
-        assert_eq!(page_bounds(PAGE_SIZE + 3, 0), 3..PAGE_SIZE + 3);
-        assert_eq!(page_bounds(PAGE_SIZE + 3, 1), 0..3);
-    }
-
-    #[test]
-    fn tabbed_picker_preserves_chronological_row_order() {
-        let options = build_tabbed_options(
-            0,
-            &["omp"],
-            PageInfo {
-                index: 0,
-                total: 1,
-                candidates: 1,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            None,
-        );
-        assert!(options.no_sort);
-        assert!(options.tac);
-    }
-
-    #[test]
-    fn tabbed_picker_header_advertises_older_remainder() {
-        let options = build_tabbed_options(
-            0,
-            &["pi"],
-            PageInfo {
-                index: 0,
-                total: 2,
-                candidates: PAGE_SIZE + 3,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            None,
-        );
-        assert!(
-            options
-                .header
-                .as_deref()
-                .is_some_and(|h| { h.contains("[All 50/53] pi  <-/->  PAGE 1/2 · older: Alt-P") }),
-            "header={:?}",
-            options.header
-        );
-    }
-    #[test]
-    fn tabbed_picker_advertises_modal_details_and_keeps_side_preview_binding() {
-        let options = build_tabbed_options(
-            0,
-            &["pi"],
-            PageInfo {
-                index: 0,
-                total: 1,
-                candidates: 1,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            None,
-        );
-        assert!(
-            options.footer.as_deref().is_some_and(
-                |h| h.contains("space space details") && h.contains("ctrl-o side preview")
-            ),
-            "footer={:?}",
-            options.footer
-        );
-        assert!(
-            options.bind.iter().any(|b| b == "ctrl-o:toggle-preview"),
-            "bind={:?}",
-            options.bind
-        );
-        assert!(options.modal_preview);
-        assert!(
-            options.preview_window.ends_with(":hidden"),
-            "preview_window={:?}",
-            options.preview_window
-        );
-    }
-
-    #[test]
-    fn tabbed_picker_header_uses_omp_style_controls() {
-        let options = build_tabbed_options(
-            0,
-            &["pi"],
-            PageInfo {
-                index: 0,
-                total: 1,
-                candidates: 1,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            None,
-        );
-        assert!(
-            options.header.as_deref() == Some("[All 1/1] pi  <-/->  PAGE 1/1")
-                && options.footer.as_deref().is_some_and(|h| {
-                    h.contains("↑/↓ navigate")
-                        && h.contains("enter resume")
-                        && h.contains("esc cancel")
-                }),
-            "header={:?}, footer={:?}",
-            options.header,
-            options.footer
-        );
-    }
-
-    #[test]
-    fn tabbed_picker_header_shows_pending_background_agent() {
-        let without = build_tabbed_options(
-            0,
-            &["pi"],
-            PageInfo {
-                index: 0,
-                total: 1,
-                candidates: 1,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            None,
-        );
-        assert!(!without.header.unwrap().contains("still scanning"));
-        let with = build_tabbed_options(
-            0,
-            &["pi"],
-            PageInfo {
-                index: 0,
-                total: 1,
-                candidates: 1,
-            },
-            PreviewMode::Hidden,
-            PreviewPosition::Auto,
-            Some("codex"),
-        );
-        assert!(
-            with.header
-                .unwrap()
-                .contains("[All 1/1] pi (codex still scanning)")
-        );
     }
 }

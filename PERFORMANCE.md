@@ -264,6 +264,16 @@ A regression in either group's reported time is the primary signal to investigat
 merging a change that touches `Scope::contains_workspace` or Codex/Pi/Claude/OMP rollout
 parsing.
 
+## Relationship discovery and reuse
+
+Tree construction uses only the parent transcript locators already retained by scoped discovery. OMP opens those parents' sibling stem directories; Claude opens their native parent-UUID/subagents directories and the retained workspace directories' flat subagent layout. Directory enumeration is confined before reading child transcripts. It no longer recursively walks unrelated agent stores and then discards their children.
+
+A local debug-binary smoke of `resume --tree --json --agent omp --since all` exceeded a 60-second timeout before this change and completed in 7.38 seconds afterward, retaining native execution-child relations. This is a single real-corpus observation, not a Criterion comparison or a release-build latency guarantee. Claude's native nested-layout smoke completed in 0.53 seconds with three `NativeLayout` relations.
+
+Codex discovery also returns the user inputs and explicit parent metadata already present in parsed/cache outcomes. Application record construction no longer reopens and reparses each retained rollout; this also avoids losing those fields when the configured store path contains a filesystem symlink.
+
+Picker navigation retains loaded candidate and preview/details data and only incorporates newly appended discoveries. This removes repeated full-history string copying; no numerical speedup is claimed without a controlled benchmark.
+
 ## Known remaining gaps (not yet fixed)
 
 - **Pi, OMP and Claude discovery now prune whole out-of-Scope Workspace

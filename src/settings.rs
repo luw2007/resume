@@ -211,24 +211,42 @@ fn select_agents(
             source,
         })?;
     }
-    write!(output, "Selection (for example 1,3; `all`; or `none`): ").map_err(|source| {
-        SettingsError::Write {
-            path: PathBuf::from("/dev/tty"),
-            source,
-        }
-    })?;
-    output.flush().map_err(|source| SettingsError::Write {
-        path: PathBuf::from("/dev/tty"),
-        source,
-    })?;
     let mut line = String::new();
-    input
-        .read_line(&mut line)
-        .map_err(|source| SettingsError::Read {
+    loop {
+        write!(output, "Selection (for example 1,3; `all`; or `none`): ").map_err(|source| {
+            SettingsError::Write {
+                path: PathBuf::from("/dev/tty"),
+                source,
+            }
+        })?;
+        output.flush().map_err(|source| SettingsError::Write {
             path: PathBuf::from("/dev/tty"),
             source,
         })?;
-    parse_selection(&line)
+        line.clear();
+        let bytes_read = input
+            .read_line(&mut line)
+            .map_err(|source| SettingsError::Read {
+                path: PathBuf::from("/dev/tty"),
+                source,
+            })?;
+        if bytes_read == 0 {
+            return Err(SettingsError::Read {
+                path: PathBuf::from("/dev/tty"),
+                source: io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "agent selection input closed",
+                ),
+            });
+        }
+        match parse_selection(&line) {
+            Ok(agents) => return Ok(agents),
+            Err(error) => writeln!(output, "{error}").map_err(|source| SettingsError::Write {
+                path: PathBuf::from("/dev/tty"),
+                source,
+            })?,
+        }
+    }
 }
 
 pub fn run_setup() -> Result<Settings, SettingsError> {
@@ -310,6 +328,36 @@ mod tests {
         assert_eq!(parse_selection("all").unwrap(), SUPPORTED_AGENTS);
         assert!(parse_selection("none").unwrap().is_empty());
         assert!(parse_selection("").is_err());
+    }
+
+    #[test]
+    fn select_agents_reasks_invalid_input_then_accepts_valid_selection() {
+        let mut input = io::Cursor::new(b"foo\n\n2,1,2\n");
+        let mut output = Vec::new();
+        assert_eq!(
+            select_agents(&mut input, &mut output).unwrap(),
+            ["claude", "codex"]
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("Selection (for example").count(), 3);
+        assert!(output.contains("invalid agent selection \"foo\""));
+        assert_eq!(output.matches("Choose agents to scan:").count(), 1);
+    }
+
+    #[test]
+    fn select_agents_stops_at_eof_without_retrying_forever() {
+        for (text, prompts) in [("", 1), ("foo\n", 2), ("\n", 2)] {
+            let mut input = io::Cursor::new(text.as_bytes());
+            let mut output = Vec::new();
+            match select_agents(&mut input, &mut output).unwrap_err() {
+                SettingsError::Read { source, .. } => {
+                    assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof);
+                }
+                error => panic!("unexpected error: {error}"),
+            }
+            let output = String::from_utf8(output).unwrap();
+            assert_eq!(output.matches("Selection (for example").count(), prompts);
+        }
     }
 
     #[test]

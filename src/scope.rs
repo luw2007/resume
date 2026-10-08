@@ -421,7 +421,7 @@ pub fn discover_git_scope(base: &Path, all_worktrees: bool) -> io::Result<GitSco
     if !all_worktrees {
         return Ok(GitScopeEvidence {
             common_dir,
-            worktrees: vec![toplevel],
+            worktrees: vec![toplevel.canonicalize()?],
         });
     }
 
@@ -840,6 +840,52 @@ mod tests {
         assert!(wide.worktrees.contains(&repo));
         assert!(wide.worktrees.contains(&linked));
         assert_eq!(wide.worktrees.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_git_scope_default_canonicalizes_symlinked_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&repo, &alias).unwrap();
+        let narrow = discover_git_scope(&alias, false).unwrap();
+        let wide = discover_git_scope(&alias, true).unwrap();
+        let real = repo.canonicalize().unwrap();
+        assert_eq!(narrow.worktrees, vec![real.clone()]);
+        assert_eq!(wide.worktrees, narrow.worktrees);
+        let scope = Scope::new(
+            real.clone(),
+            None,
+            DefaultScope::Git {
+                common_dir: narrow.common_dir,
+                worktrees: narrow.worktrees,
+            },
+        );
+        assert!(scope.contains_workspace(&alias));
+        assert!(scope.contains_workspace(&real));
+    }
+
+    #[test]
+    fn worktree_parser_rejects_missing_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let output = format!("worktree {}\0", missing.display());
+        assert_eq!(
+            parse_worktree_porcelain_z(output.as_bytes())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]
