@@ -15,6 +15,9 @@ screen row per `SkimItem`. This vendored copy patches:
   highlight-aware path. Multi-row cards print rows independently.
 - `src/options.rs`, `src/header.rs`, `src/model/mod.rs`: optional fixed footer
   below the selection in reverse layout, for the picker shortcut hints.
+- `src/model/mod.rs`: in the modal-enabled reverse layout, cap vertical Preview
+  height on each draw to reserve fixed header/footer rows and the focused item's
+  physical height, including after a terminal resize.
 - `src/options.rs`, `src/model/mod.rs`: optional double-space modal Preview
   overlay (opens only with a focused item; the trigger spaces are removed from
   the query). `q`, `Esc` or `Enter` dismiss it (Enter never accepts), and

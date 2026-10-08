@@ -1059,6 +1059,82 @@ fn preview_hidden_by_default_and_ctrl_o_toggles() {
     let _ = wait_child(&mut sess);
 }
 
+#[test]
+fn minimum_height_preview_keeps_focused_session_visible() {
+    if !pty_available() {
+        return;
+    }
+    for mode in ["tabbed", "tabbed-cards", "tree"] {
+        let mut sess = spawn(mode, 60, 10);
+        let title = if mode == "tree" {
+            "tree pi-relation-only"
+        } else {
+            "omp-candidate-004"
+        };
+        sess.wait_screen(
+            "focused session before Preview",
+            Duration::from_secs(4),
+            |s| s.contains(title),
+        );
+        sess.write(b"\x0f");
+        let visible =
+            sess.wait_screen("Preview and focused session", Duration::from_secs(4), |s| {
+                s.contains("# normalized")
+                    && s.lines()
+                        .take_while(|line| !line.contains("# normalized"))
+                        .any(|line| line.contains(title))
+            });
+        if mode == "tabbed-cards" {
+            assert!(visible.contains("Session metadata"), "{visible:?}");
+        }
+        sess.write(b"\x1b");
+        assert_eq!(wait_child(&mut sess), 0);
+    }
+}
+
+#[test]
+fn shrinking_terminal_with_preview_keeps_focused_card_visible() {
+    if !pty_available() {
+        return;
+    }
+    let mut sess = spawn("tabbed-cards", 60, 30);
+    sess.wait_screen("focused card", Duration::from_secs(4), |s| {
+        s.contains("omp-candidate-004")
+    });
+    sess.write(b"\x0f");
+    sess.wait_screen("Preview before resize", Duration::from_secs(4), |s| {
+        s.contains("# normalized")
+    });
+    // Resize the emulator with the PTY so assertions reflect the live screen,
+    // not cells left behind by the larger terminal.
+    {
+        let mut screen = sess.screen.lock().unwrap_or_else(|p| p.into_inner());
+        screen.parser.screen_mut().set_size(10, 60);
+        screen.last_change = Instant::now();
+    }
+    sess._pair
+        .master
+        .resize(PtySize {
+            rows: 10,
+            cols: 60,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize");
+    sess.wait_screen(
+        "Preview and card after resize",
+        Duration::from_secs(4),
+        |s| {
+            s.contains("# normalized")
+                && s.contains("omp-candidate-004")
+                && s.contains("Session metadata")
+        },
+    );
+    sess.write(b"\r");
+    assert_eq!(wait_child(&mut sess), 0);
+    assert!(strip(&sess.accumulated()).contains("key:85"));
+}
+
 /// The details card overlays the list and Escape returns to it without exiting.
 #[test]
 fn double_space_opens_details_and_escape_returns_to_picker() {

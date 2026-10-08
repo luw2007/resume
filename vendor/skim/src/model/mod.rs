@@ -930,8 +930,26 @@ impl Model {
 
         let screen: Box<dyn Widget<Event>> = if !self.modal_preview_open && !self.preview_hidden && self.previewer.is_some() {
             let previewer = self.previewer.as_ref().unwrap();
+            // A vertical preview must leave room for the fixed chrome and the
+            // focused item, including multi-row cards. Recompute on each draw
+            // so toggling Preview or shrinking the terminal cannot hide the list.
+            let preview_size = if self.modal_preview && layout == "reverse"
+                && matches!(self.preview_direction, Direction::Up | Direction::Down)
+            {
+                let (_, height) = self.term.term_size().unwrap_or((0, 0));
+                let height = height.saturating_sub(
+                    self.margin_top.calc_fixed_size(height, 0) + self.margin_bottom.calc_fixed_size(height, 0),
+                );
+                let chrome = if self.info == InfoDisplay::Default { 2 } else { 1 }
+                    + self.header.size_hint().1.unwrap_or(0)
+                    + self.footer.as_ref().and_then(|footer| footer.size_hint().1).unwrap_or(0);
+                let item_height = self.selection.get_current_item().map_or(1, |item| item.display_height().max(1));
+                Size::Fixed(self.preview_size.calc_fixed_size(height, height / 2).min(height.saturating_sub(chrome + item_height)))
+            } else {
+                self.preview_size
+            };
             let win = Win::new(previewer)
-                .basis(self.preview_size)
+                .basis(preview_size)
                 .grow(0)
                 .shrink(0)
                 .border_attr(self.theme.border());

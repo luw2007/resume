@@ -8,6 +8,7 @@
 //!                                  full-tab search, Alt+P/Alt+N in-view scroll
 //!                                  and Tab/Alt+Left/Alt+Right tab switching
 //!   resume-spike tabbed-right     – same, with an explicit right-hand Preview
+//!   resume-spike tabbed-cards     – same, with title + metadata Session cards
 //!   resume-spike tree             – unified cross-agent tree with a relation row
 //!   resume-spike tabbed-async     – run_tabbed_picker opens immediately on
 //!                                  "pi"/"omp" while a simulated slow
@@ -38,8 +39,9 @@ fn main() -> ExitCode {
             let outcome = run_picker_streamed(demo_candidates(), false);
             print_outcome(outcome)
         }
-        "tabbed" => print_outcome(run_tabbed_demo(PreviewPosition::Auto)),
-        "tabbed-right" => print_outcome(run_tabbed_demo(PreviewPosition::Right)),
+        "tabbed" => print_outcome(run_tabbed_demo(PreviewPosition::Auto, false)),
+        "tabbed-right" => print_outcome(run_tabbed_demo(PreviewPosition::Right, false)),
+        "tabbed-cards" => print_outcome(run_tabbed_demo(PreviewPosition::Auto, true)),
         "tree" => print_outcome(run_tree_demo(false)),
         "relation-tabbed" => print_outcome(run_tree_demo(true)),
         "tabbed-async" => print_outcome(run_tabbed_async_demo()),
@@ -77,14 +79,18 @@ fn run(candidates: Vec<(CandidateKey, String, String)>, force_raw: bool) -> Exit
 /// "pi" gets 70 candidates, "claude" and "omp" a handful each, so "All" (85)
 /// holds Sessions far older than one screen while Tab/Alt+Left/Alt+Right
 /// cycle all 4 tabs.
-fn run_tabbed_demo(position: PreviewPosition) -> PickerOutcome {
+fn run_tabbed_demo(position: PreviewPosition, cards: bool) -> PickerOutcome {
     let mut candidates = Vec::new();
     let mut next_id = 1u64;
     let mut push = |agent: &str, count: usize, candidates: &mut Vec<PickerCandidate>| {
         for i in 0..count {
             candidates.push(PickerCandidate {
                 key: CandidateKey(next_id),
-                display: format!("{agent}-candidate-{i:03}"),
+                display: if cards {
+                    format!("{agent}-candidate-{i:03}\nSession metadata")
+                } else {
+                    format!("{agent}-candidate-{i:03}")
+                },
                 search_text: format!("{agent}-candidate-{i:03}"),
                 preview: format!("Session {agent}-{i}"),
                 details: Some(format!(

@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Picker: limit bottom Preview height to keep the focused Session card and shortcut footer visible at the supported 60×10 terminal size, including after a terminal resize.
 - Strip terminal-control sequences from relationship-tree labels, verbose diagnostics, launch confirmation paths, and cmux handoff errors without changing native session identity or launch arguments.
 - Limit OMP and Claude execution-child discovery to the parents and workspace directories already selected by discovery, instead of walking unrelated agent history.
 - Preserve workspace directory identity across ordinary file creation and removal; still reject replaced, missing, or non-directory workspaces before launch.
